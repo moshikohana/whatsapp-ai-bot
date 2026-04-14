@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: whatsapp-ai-bot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GOOGLE_CREDENTIALS
+        sync: false
+      - key: GOOGLE_TOKEN
+        sync: false
+      - key: GOOGLE_CALENDAR_ENABLED
+        value: "true"
+      - key: GOOGLE_GMAIL_ENABLED
+        value: "true"
+      - key: PORT
+        value: "3000"
+      - key: CHROMIUM_PATH
+        value: /usr/bin/chromium
