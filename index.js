@@ -487,7 +487,18 @@ const client = new Client({
   puppeteer: {
     headless: true,
     executablePath: process.env.CHROMIUM_PATH || undefined,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-translate',
+      '--no-first-run',
+      '--disable-software-rasterizer',
+    ],
   },
 });
 
