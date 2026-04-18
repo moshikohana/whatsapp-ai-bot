@@ -768,6 +768,24 @@ client.on('ready', () => {
   if (restoredScheduled || restoredDaily) {
     logger.info(`♻️ שוחזרו: ${restoredScheduled} תזמונים, ${restoredDaily} משימות יומיות`);
   }
+
+  // ── Startup notification (cloud deploy only) ──────────────────
+  // Sends a message to the owner when the bot starts on Railway/Render.
+  // Confirms the bot can both connect AND send messages.
+  if (process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_ENVIRONMENT || process.env.RENDER_EXTERNAL_URL) {
+    setTimeout(async () => {
+      try {
+        const oc = await client.getChatById(OWNER_ID);
+        const env = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RENDER_EXTERNAL_URL || 'cloud';
+        await oc.sendMessage(
+          `🚀 *בוטי הופעל!*\n✅ מחובר ומוכן לפקודות\n📡 ${env}\n⏰ ${new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}` + BOT_MARKER,
+        );
+        logger.info('📲 Startup notification sent to owner');
+      } catch (e) {
+        logger.warn('⚠️ Startup notification failed:', e.message?.substring(0, 60));
+      }
+    }, 8000); // wait 8s for connection to fully stabilise
+  }
 });
 
 client.on('disconnected', (reason) => { console.log('❌ נותק:', reason); botStatus = 'disconnected'; io.emit('status', 'disconnected'); });
@@ -827,6 +845,8 @@ async function botSend(chat, text) {
 const ALLOWED_TYPES = new Set(['chat', 'image', 'sticker', 'ptt', 'audio', 'document']);
 
 client.on('message_create', async (msg) => {
+  // 🔍 Early diagnostic log — visible in Railway/cloud logs
+  console.log(`📩 msg_create: type=${msg.type} from=${(msg.from||'').substring(0,25)} to=${(msg.to||'').substring(0,25)} fromMe=${msg.fromMe}`);
   try {
     // Only handle text and images
     if (!ALLOWED_TYPES.has(msg.type)) return;
@@ -2152,12 +2172,25 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 // ─── Keep-alive self-ping (prevents free-tier hosting from sleeping) ─
-if (process.env.RENDER_EXTERNAL_URL || process.env.KEEP_ALIVE_URL) {
-  const keepAliveUrl = (process.env.RENDER_EXTERNAL_URL || process.env.KEEP_ALIVE_URL) + '/health';
-  setInterval(() => {
-    require('https').get(keepAliveUrl, () => {}).on('error', () => {});
-    console.log('💓 Keep-alive ping');
-  }, 13 * 60 * 1000); // every 13 minutes
+{
+  const _rawUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+    || process.env.RENDER_EXTERNAL_URL
+    || process.env.KEEP_ALIVE_URL;
+  if (_rawUrl) {
+    let _keepAliveUrl = _rawUrl.trim();
+    if (!_keepAliveUrl.startsWith('http://') && !_keepAliveUrl.startsWith('https://')) {
+      _keepAliveUrl = 'https://' + _keepAliveUrl;
+    }
+    _keepAliveUrl += '/health';
+    console.log('💓 Keep-alive target:', _keepAliveUrl);
+    setInterval(() => {
+      try {
+        const _mod = _keepAliveUrl.startsWith('https://') ? require('https') : require('http');
+        _mod.get(_keepAliveUrl, (res) => { res.resume(); }).on('error', () => {});
+      } catch (_) {}
+      console.log('💓 Keep-alive ping');
+    }, 13 * 60 * 1000); // every 13 minutes
+  }
 }
 
 // ─── Performance endpoint ───────────────────────────────────────
