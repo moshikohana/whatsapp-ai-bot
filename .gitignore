@@ -5,3 +5,9 @@ node_modules/
 *.log
 output/
 .claude/
+
+# Private runtime data — do not commit
+data/conversations.json
+data/scheduled.json
+bot-memory.json
+bot-context.json

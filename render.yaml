@@ -2,7 +2,11 @@ services:
   - type: web
     name: whatsapp-ai-bot
     runtime: docker
-    plan: free
+    plan: starter          # Render Starter = $7/month (free tier removed Nov 2023)
+    disk:
+      name: bot-data
+      mountPath: /app/.wwebjs_auth
+      sizeGB: 1
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
@@ -20,3 +24,8 @@ services:
         value: "3000"
       - key: CHROMIUM_PATH
         value: /usr/bin/chromium
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          type: web
+          name: whatsapp-ai-bot
+          property: host

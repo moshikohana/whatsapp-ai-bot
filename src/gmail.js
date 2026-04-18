@@ -4,15 +4,28 @@ const { google } = require('googleapis');
 // Store last queried emails for reference by number
 let lastEmails = [];
 
+// ─── Singleton auth client (shared token persistence via calendar.js) ─
+let _authClient = null;
+
 function getAuth() {
+  if (_authClient) return _authClient;
   if (!process.env.GOOGLE_CREDENTIALS) throw new Error('GOOGLE_CREDENTIALS לא מוגדר ב-.env');
   const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   const { client_id, client_secret, redirect_uris } = creds.installed || creds.web;
   const auth = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
   if (!process.env.GOOGLE_TOKEN) throw new Error('GOOGLE_TOKEN לא מוגדר — הרץ: node setup-google.js');
   auth.setCredentials(JSON.parse(process.env.GOOGLE_TOKEN));
-  auth.on('tokens', (t) => { if (t.refresh_token) console.log('🔄 Gmail token refreshed'); });
+  auth.on('tokens', (newTokens) => {
+    console.log('🔄 Gmail token refreshed — saving...');
+    // Delegate to calendar's updateEnvToken to keep both in sync
+    try { require('./calendar').updateEnvToken(newTokens); } catch (_) {}
+  });
+  _authClient = auth;
   return auth;
+}
+
+function resetAuth() {
+  _authClient = null;
 }
 
 function getGmail() {
@@ -324,4 +337,5 @@ module.exports = {
   trashEmail,
   starEmail,
   getGmailStats,
+  resetAuth,
 };

@@ -1,19 +1,62 @@
 'use strict';
 const { google } = require('googleapis');
+const fs = require('fs');
+const path = require('path');
 
 // Store last queried events for reference by number
 let lastEvents = [];
 
+// ─── Singleton auth client ───────────────────────────────────────
+let _authClient = null;
+
+function updateEnvToken(tokens) {
+  try {
+    const existing = JSON.parse(process.env.GOOGLE_TOKEN || '{}');
+    const merged = { ...existing, ...tokens };
+    // Don't overwrite refresh_token with null/undefined
+    if (!tokens.refresh_token && existing.refresh_token) {
+      merged.refresh_token = existing.refresh_token;
+    }
+    process.env.GOOGLE_TOKEN = JSON.stringify(merged);
+
+    // Persist to .env file
+    const envPath = path.join(__dirname, '..', '.env');
+    if (fs.existsSync(envPath)) {
+      let envContent = fs.readFileSync(envPath, 'utf-8');
+      const tokenLine = `GOOGLE_TOKEN=${JSON.stringify(merged)}`;
+      if (/^GOOGLE_TOKEN=/m.test(envContent)) {
+        envContent = envContent.replace(/^GOOGLE_TOKEN=.*/m, tokenLine);
+      } else {
+        envContent += `\n${tokenLine}`;
+      }
+      fs.writeFileSync(envPath, envContent, 'utf-8');
+      console.log('💾 Google token saved to .env');
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to save Google token:', e.message);
+  }
+}
+
 function getAuthClient() {
+  if (_authClient) return _authClient;
   if (!process.env.GOOGLE_CREDENTIALS) throw new Error('GOOGLE_CREDENTIALS לא מוגדר ב-.env');
   const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   const { client_secret, client_id, redirect_uris } = credentials.installed || credentials.web;
   const auth = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
   if (process.env.GOOGLE_TOKEN) {
     auth.setCredentials(JSON.parse(process.env.GOOGLE_TOKEN));
-    auth.on('tokens', (t) => { if (t.refresh_token) console.log('🔄 Google token refreshed'); });
+    auth.on('tokens', (newTokens) => {
+      console.log('🔄 Google token refreshed — saving...');
+      updateEnvToken(newTokens);
+    });
   }
+  _authClient = auth;
   return auth;
+}
+
+// Called after successful re-auth to reset the singleton
+function resetAuthClient() {
+  _authClient = null;
 }
 
 function getCalendar() {
@@ -486,4 +529,7 @@ module.exports = {
   addCalendarEvent,
   formatEventTime,
   formatTimeOnly,
+  getAuthClient,
+  resetAuthClient,
+  updateEnvToken,
 };

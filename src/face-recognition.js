@@ -24,22 +24,31 @@ let initialized = false;
 let initError = null;
 
 // ─── Config ─────────────────────────────────────────────────────
+let _configCache = null;
+let _configMtime = null;
+
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+      const stat = fs.statSync(CONFIG_FILE);
+      const mtime = stat.mtime.getTime();
+      if (_configCache && _configMtime === mtime) return _configCache;
+      const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+      if (!cfg.ownerGroups) cfg.ownerGroups = [];
+      _configCache = cfg;
+      _configMtime = mtime;
+      return cfg;
     }
-  } catch {}
-  return {
-    referenceDescriptors: {},
-    monitoredGroups: [],
-    threshold: 0.45,
-    enabled: true,
-  };
+  } catch (err) {
+    logger.error('⚠️ Config read error:', err.message);
+  }
+  return { referenceDescriptors: {}, monitoredGroups: [], ownerGroups: [], threshold: 0.45, enabled: true };
 }
 
 function saveConfig(config) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+  _configCache = config;
+  try { _configMtime = fs.statSync(CONFIG_FILE).mtime.getTime(); } catch (_) {}
 }
 
 // ─── Initialize face-api models ─────────────────────────────────
@@ -66,15 +75,21 @@ async function initFaceAPI() {
 }
 
 // ─── Convert image buffer → tf.Tensor3D via sharp ──────────────
+// Use 1280px for higher resolution — critical for small faces in group photos.
 async function bufferToTensor(imageBuffer) {
   const { data, info } = await sharp(imageBuffer)
-    .resize(640, 640, { fit: 'inside', withoutEnlargement: true })
+    .resize(1280, 1280, { fit: 'inside', withoutEnlargement: true })
+    .sharpen({ sigma: 1.2, m1: 0.5, m2: 0.8 }) // enhance edges — helps with blurry distant faces
     .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
 
   return tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]);
 }
+
+// Detection options — lower minConfidence so small/distant faces aren't missed.
+// Default is 0.5; 0.3 catches faces that are far away or partially occluded.
+const DETECTION_OPTIONS = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3, maxResults: 50 });
 
 // ─── Detect faces in image buffer ───────────────────────────────
 async function detectFaces(imageBuffer) {
@@ -85,7 +100,7 @@ async function detectFaces(imageBuffer) {
   const tensor = await bufferToTensor(imageBuffer);
   try {
     const detections = await faceapi
-      .detectAllFaces(tensor)
+      .detectAllFaces(tensor, DETECTION_OPTIONS)
       .withFaceLandmarks()
       .withFaceDescriptors();
     return detections;
@@ -97,8 +112,31 @@ async function detectFaces(imageBuffer) {
 // ─── Add reference photo for a person ───────────────────────────
 async function addReference(name, imageBuffer) {
   const detections = await detectFaces(imageBuffer);
+
+  // Quality guard: reject images that are too dark or overexposed
+  try {
+    const imgStats = await sharp(imageBuffer).stats();
+    const brightness = imgStats.channels.reduce((s, c) => s + c.mean, 0) / imgStats.channels.length;
+    if (brightness < 30) {
+      return { success: false, error: 'התמונה חשוכה מדי — נסה תמונה עם תאורה טובה יותר 💡', facesFound: 0 };
+    }
+    if (brightness > 240) {
+      return { success: false, error: 'התמונה בהירה מדי / שרופה — נסה תמונה אחרת ☀️', facesFound: 0 };
+    }
+  } catch (_) { /* quality check is optional — never block on its failure */ }
+
   if (detections.length === 0) {
     return { success: false, error: 'לא זוהו פנים בתמונה', facesFound: 0 };
+  }
+
+  // If multiple faces detected, reject: storing the wrong face contaminates the reference set
+  // and causes 100% false-positive matches for other children in the photo.
+  if (detections.length > 1) {
+    return {
+      success: false,
+      error: `זוהו ${detections.length} פנים בתמונה — אנא שלח תמונה עם פנים של ${name} בלבד`,
+      facesFound: detections.length,
+    };
   }
 
   const config = loadConfig();
@@ -106,15 +144,13 @@ async function addReference(name, imageBuffer) {
     config.referenceDescriptors[name] = [];
   }
 
-  // Add each detected face's descriptor
-  for (const det of detections) {
-    config.referenceDescriptors[name].push(Array.from(det.descriptor));
-  }
+  // Only add the single detected face's descriptor
+  config.referenceDescriptors[name].push(Array.from(detections[0].descriptor));
 
   saveConfig(config);
   return {
     success: true,
-    facesAdded: detections.length,
+    facesAdded: 1,
     totalReferences: config.referenceDescriptors[name].length,
   };
 }
@@ -142,30 +178,39 @@ async function findMatches(imageBuffer) {
         if (dist < bestDistance) bestDistance = dist;
       }
 
-      if (bestDistance < config.threshold) {
+      const effectiveThreshold = config.perPersonThresholds?.[name] ?? config.threshold;
+      if (bestDistance < effectiveThreshold) {
         matches.push({
           name,
           distance: Math.round(bestDistance * 1000) / 1000,
-          confidence: Math.round((1 - bestDistance) * 100),
+          confidence: Math.round(Math.max(0, (1 - bestDistance / effectiveThreshold) * 100)),
+          threshold: effectiveThreshold,
         });
       }
     }
   }
 
+  // Deduplicate: keep only the best (highest confidence) entry per name
+  const deduped = {};
+  for (const m of matches) {
+    if (!deduped[m.name] || m.confidence > deduped[m.name].confidence) {
+      deduped[m.name] = m;
+    }
+  }
+
   // Best match first
-  matches.sort((a, b) => b.confidence - a.confidence);
-  return matches;
+  return Object.values(deduped).sort((a, b) => b.confidence - a.confidence);
 }
 
 // ─── Blur non-matching faces in image ───────────────────────────
-async function blurNonMatchingFaces(imageBuffer) {
+async function blurNonMatchingFaces(imageBuffer, preDetected = null) {
   const config = loadConfig();
-  const detections = await detectFaces(imageBuffer);
+  const detections = preDetected || await detectFaces(imageBuffer);
   if (detections.length === 0) return { buffer: imageBuffer, blurred: 0, matched: 0 };
 
   // Get original dimensions + calculate resize scale
   const origMeta = await sharp(imageBuffer).metadata();
-  const maxDim = 640;
+  const maxDim = 1280;
   const ratio = Math.min(maxDim / origMeta.width, maxDim / origMeta.height, 1);
   const scaleX = 1 / ratio;
   const scaleY = 1 / ratio;
@@ -226,6 +271,87 @@ async function blurNonMatchingFaces(imageBuffer) {
   return { buffer: result, blurred: composites.length, matched: matchedCount };
 }
 
+// ─── Highlight matching faces (draw colored border around them) ──
+async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDetected = null } = {}) {
+  const config = loadConfig();
+  const detections = preDetected || await detectFaces(imageBuffer);
+  if (detections.length === 0) return { buffer: imageBuffer, highlighted: 0, blurred: 0, matched: 0 };
+
+  const origMeta = await sharp(imageBuffer).metadata();
+  const maxDim = 1280;
+  const ratio = Math.min(maxDim / origMeta.width, maxDim / origMeta.height, 1);
+  const scaleX = 1 / ratio;
+  const scaleY = 1 / ratio;
+
+  const matchedBoxes = [];
+  const unmatchedBoxes = [];
+
+  for (const det of detections) {
+    let bestDist = Infinity;
+    let matchedName = null;
+    for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
+      for (const refDesc of descriptors) {
+        const dist = faceapi.euclideanDistance(det.descriptor, new Float32Array(refDesc));
+        if (dist < bestDist) { bestDist = dist; matchedName = name; }
+      }
+    }
+    const isMatch = bestDist < config.threshold;
+    const box = det.detection.box;
+    const pad = Math.round(box.width * scaleX * 0.35);
+    const x = Math.max(0, Math.round(box.x * scaleX - pad));
+    const y = Math.max(0, Math.round(box.y * scaleY - pad));
+    const w = Math.min(origMeta.width - x, Math.round(box.width * scaleX + pad * 2));
+    const h = Math.min(origMeta.height - y, Math.round(box.height * scaleY + pad * 2));
+    if (isMatch) matchedBoxes.push({ x, y, w, h, name: matchedName });
+    else unmatchedBoxes.push({ x, y, w, h });
+  }
+
+  const composites = [];
+  const borderWidth = Math.max(4, Math.round(origMeta.width * 0.006));
+
+  // Green border for matched faces
+  for (const { x, y, w, h } of matchedBoxes) {
+    if (w <= 4 || h <= 4) continue;
+    try {
+      // Build SVG border overlay
+      const svg = Buffer.from(
+        `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">` +
+        `<rect x="${borderWidth / 2}" y="${borderWidth / 2}" width="${w - borderWidth}" height="${h - borderWidth}" ` +
+        `fill="none" stroke="#00e676" stroke-width="${borderWidth}" rx="8"/>` +
+        `</svg>`
+      );
+      const border = await sharp(svg).png().toBuffer();
+      composites.push({ input: border, left: x, top: y });
+    } catch {}
+  }
+
+  // Blur OR red border for unmatched faces
+  for (const { x, y, w, h } of unmatchedBoxes) {
+    if (w <= 4 || h <= 4) continue;
+    try {
+      if (blurOthers) {
+        const blurred = await sharp(imageBuffer).extract({ left: x, top: y, width: w, height: h }).blur(30).toBuffer();
+        composites.push({ input: blurred, left: x, top: y });
+      } else {
+        const svg = Buffer.from(
+          `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">` +
+          `<rect x="${borderWidth / 2}" y="${borderWidth / 2}" width="${w - borderWidth}" height="${h - borderWidth}" ` +
+          `fill="none" stroke="#ff1744" stroke-width="${borderWidth}" rx="8" opacity="0.75"/>` +
+          `</svg>`
+        );
+        const border = await sharp(svg).png().toBuffer();
+        composites.push({ input: border, left: x, top: y });
+      }
+    } catch {}
+  }
+
+  if (composites.length === 0) return { buffer: imageBuffer, highlighted: matchedBoxes.length, blurred: 0, matched: matchedBoxes.length };
+
+  const result = await sharp(imageBuffer).composite(composites).jpeg({ quality: 88 }).toBuffer();
+  logger.info(`🟢 Highlighted ${matchedBoxes.length} matched, ${blurOthers ? 'blurred' : 'marked'} ${unmatchedBoxes.length} others`);
+  return { buffer: result, highlighted: matchedBoxes.length, blurred: blurOthers ? unmatchedBoxes.length : 0, matched: matchedBoxes.length };
+}
+
 // ─── Group management ───────────────────────────────────────────
 function getMonitoredGroups() {
   return loadConfig().monitoredGroups;
@@ -279,11 +405,44 @@ function setEnabled(enabled) {
 function setBlurEnabled(enabled) {
   const config = loadConfig();
   config.blurEnabled = !!enabled;
+  if (enabled) config.highlightMode = 'none'; // mutually exclusive
   saveConfig(config);
 }
 
 function isBlurEnabled() {
   return !!loadConfig().blurEnabled;
+}
+
+// highlightMode: 'none' | 'highlight' | 'highlight_blur'
+function setHighlightMode(mode) {
+  const config = loadConfig();
+  config.highlightMode = mode || 'none';
+  if (mode && mode !== 'none') config.blurEnabled = false; // mutually exclusive
+  saveConfig(config);
+}
+
+function getHighlightMode() {
+  return loadConfig().highlightMode || 'none';
+}
+
+function addOwnerGroup(groupName) {
+  const config = loadConfig();
+  if (!config.ownerGroups) config.ownerGroups = [];
+  if (!config.ownerGroups.includes(groupName)) {
+    config.ownerGroups.push(groupName);
+    saveConfig(config);
+    return true;
+  }
+  return false;
+}
+
+function removeOwnerGroup(groupName) {
+  const config = loadConfig();
+  if (!config.ownerGroups) config.ownerGroups = [];
+  const before = config.ownerGroups.length;
+  config.ownerGroups = config.ownerGroups.filter(g => g !== groupName);
+  saveConfig(config);
+  return config.ownerGroups.length < before;
 }
 
 function getStatus() {
@@ -292,13 +451,23 @@ function getStatus() {
   return {
     enabled: config.enabled,
     blurEnabled: !!config.blurEnabled,
+    highlightMode: config.highlightMode || 'none',
     threshold: config.threshold,
     monitoredGroups: config.monitoredGroups,
+    ownerGroups: config.ownerGroups || [],
     references: names.map(n => ({ name: n, count: config.referenceDescriptors[n].length })),
     totalReferences: getReferenceCount(),
     initialized,
     initError,
   };
+}
+
+function setPersonThreshold(name, value) {
+  const config = loadConfig();
+  if (!config.perPersonThresholds) config.perPersonThresholds = {};
+  config.perPersonThresholds[name] = Math.max(0.1, Math.min(0.8, value));
+  saveConfig(config);
+  return config.perPersonThresholds[name];
 }
 
 module.exports = {
@@ -307,14 +476,20 @@ module.exports = {
   addReference,
   findMatches,
   blurNonMatchingFaces,
+  highlightMatchingFaces,
   isBlurEnabled,
   setBlurEnabled,
+  getHighlightMode,
+  setHighlightMode,
   getMonitoredGroups,
   addMonitoredGroup,
   removeMonitoredGroup,
+  addOwnerGroup,
+  removeOwnerGroup,
   getReferenceCount,
   clearReferences,
   setThreshold,
+  setPersonThreshold,
   setEnabled,
   getStatus,
   loadConfig,

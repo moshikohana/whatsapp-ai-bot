@@ -14,11 +14,12 @@ const {
   getCalendarEvents, getTodaySchedule, getWeekSchedule,
   searchCalendarEvents, deleteCalendarEvent, addCalendarEvent,
   formatEventTime, formatTimeOnly,
+  getAuthClient: googleGetAuthClient, resetAuthClient: googleResetAuthClient, updateEnvToken: googleUpdateEnvToken,
 } = require('./src/calendar');
 const { getSystemInfo, listFiles, readFile, searchFiles, runCommand, getProcesses, getBattery, getWifi } = require('./src/computer');
 const {
   getUnreadEmails, searchEmails, readEmail, sendEmail, replyToEmail,
-  markAsRead, trashEmail, starEmail, getGmailStats,
+  markAsRead, trashEmail, starEmail, getGmailStats, resetAuth: gmailResetAuth,
 } = require('./src/gmail');
 const { runClaudeCode } = require('./src/claude-code');
 const { addMemory, deleteMemory, listMemories, updateContext, clearFailedTools } = require('./src/memory');
@@ -29,103 +30,206 @@ const { withCache, cache } = require('./src/cache');
 const logger = require('./src/logger');
 const { formatContextForClaude, matchTopicToPositions, getBriefingSearchQueries } = require('./src/spokesperson');
 const {
-  initFaceAPI, addReference, findMatches, blurNonMatchingFaces,
-  isBlurEnabled, setBlurEnabled,
+  initFaceAPI, addReference, findMatches, blurNonMatchingFaces, highlightMatchingFaces,
+  isBlurEnabled, setBlurEnabled, getHighlightMode, setHighlightMode,
   getMonitoredGroups, addMonitoredGroup, removeMonitoredGroup,
+  addOwnerGroup, removeOwnerGroup,
   getReferenceCount, clearReferences, setThreshold, setEnabled, getStatus: getFaceStatus,
+  loadConfig: loadFaceConfig,
 } = require('./src/face-recognition');
 
-// ─── Helper: fetch messages with loadEarlierMsgs bug workaround ─
+// ─── Helper: fetch messages — 3-strategy robust loader ──────────
+// Strategy 1: chat.fetchMessages (official API)
+// Strategy 2: Store.Chat.get + looped loadEarlierMsgs (best fallback)
+// Strategy 3: WWebJS.getChat (last resort)
+// Returns array with ._usedFallback flag so callers detect partial data.
 async function safeFetchMessages(chat, limit) {
   const chatId = chat.id._serialized || chat.id;
+  const Message = require('whatsapp-web.js/src/structures/Message');
+
+  // ── Strategy 1: Official API ──────────────────────────────────
   try {
-    // First try the normal way
-    return await chat.fetchMessages({ limit });
-  } catch {
-    // Fallback: use pupPage.evaluate directly, wrapping loadEarlierMsgs in try/catch
-    logger.warn(`fetchMessages failed for "${chat.name}", using fallback...`);
-    const Message = require('whatsapp-web.js/src/structures/Message');
+    const msgs = await chat.fetchMessages({ limit });
+    msgs._usedFallback = false;
+    return msgs;
+  } catch (e1) {
+    logger.warn(`fetchMessages S1 failed for "${chat.name}": ${e1.message?.substring(0, 60)}`);
+  }
+
+  // ── Strategy 2: Direct Store access with iterative loading ────
+  try {
+    const rawMsgs = await client.pupPage.evaluate(async (cid, lim) => {
+      const chat = window.Store?.Chat?.get(cid);
+      if (!chat) return null;
+      let prev = 0;
+      for (let i = 0; i < 5 && chat.msgs.length < lim; i++) {
+        prev = chat.msgs.length;
+        try {
+          await window.Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs);
+          await new Promise(r => setTimeout(r, 400));
+        } catch { break; }
+        if (chat.msgs.length === prev) break; // nothing new loaded
+      }
+      let msgs = chat.msgs.getModelsArray().filter(m => !m.isNotification);
+      msgs.sort((a, b) => a.t - b.t);
+      if (msgs.length > lim) msgs = msgs.slice(-lim);
+      return msgs.map(m => window.WWebJS.getMessageModel(m));
+    }, chatId, limit);
+
+    if (rawMsgs !== null) {
+      const result = rawMsgs.map(m => new Message(client, m));
+      result._usedFallback = result.length < Math.min(limit * 0.3, 10);
+      if (!result._usedFallback) logger.info(`fetchMessages S2 ok for "${chat.name}": ${result.length} msgs`);
+      return result;
+    }
+  } catch (e2) {
+    logger.warn(`fetchMessages S2 failed for "${chat.name}": ${e2.message?.substring(0, 60)}`);
+  }
+
+  // ── Strategy 3: WWebJS fallback ──────────────────────────────
+  try {
     const rawMsgs = await client.pupPage.evaluate(async (cid, lim) => {
       const chat = await window.WWebJS.getChat(cid, { getAsModel: false });
       let msgs = chat.msgs.getModelsArray().filter(m => !m.isNotification);
-      // Try loading more messages, but don't crash if it fails
-      if (lim > 0 && msgs.length < lim) {
+      for (let i = 0; i < 3 && msgs.length < lim; i++) {
         try {
           const loaded = await window.Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs);
-          if (loaded?.length) msgs = [...loaded.filter(m => !m.isNotification), ...msgs];
-        } catch {}
+          if (!loaded?.length) break;
+          msgs = [...loaded.filter(m => !m.isNotification), ...msgs];
+        } catch { break; }
       }
-      if (msgs.length > lim) {
-        msgs.sort((a, b) => (a.t > b.t) ? 1 : -1);
-        msgs = msgs.splice(msgs.length - lim);
-      }
+      msgs.sort((a, b) => a.t - b.t);
+      if (msgs.length > lim) msgs = msgs.slice(-lim);
       return msgs.map(m => window.WWebJS.getMessageModel(m));
     }, chatId, limit);
-    return rawMsgs.map(m => new Message(client, m));
+    const result = rawMsgs.map(m => new Message(client, m));
+    result._usedFallback = true;
+    logger.warn(`fetchMessages S3 (last resort) for "${chat.name}": ${result.length} msgs`);
+    return result;
+  } catch (e3) {
+    logger.error(`fetchMessages all strategies failed for "${chat.name}": ${e3.message?.substring(0, 60)}`);
+    const empty = []; empty._usedFallback = true; return empty;
   }
+}
+
+// Returns true when fallback was used AND returned suspiciously few messages
+function isFetchIncomplete(msgs, requested) {
+  return msgs._usedFallback && msgs.length < Math.max(3, requested * 0.15);
+}
+
+// ─── Smart chat finder: exact > prefix > shortest-include ────────
+// Prevents "קניות" from matching "קניות חכמות ברשת" when an exact match exists.
+function findChatByName(chats, query) {
+  const q = query.trim().toLowerCase();
+  // 1. Exact match
+  const exact = chats.find(c => (c.name || c.pushname || '').toLowerCase() === q);
+  if (exact) return exact;
+  // 2. Starts-with match (shortest name wins)
+  const prefixes = chats.filter(c => (c.name || c.pushname || '').toLowerCase().startsWith(q));
+  if (prefixes.length) return prefixes.sort((a, b) => (a.name||'').length - (b.name||'').length)[0];
+  // 3. Includes match — prefer shortest name (closest to query)
+  const includes = chats.filter(c => (c.name || c.pushname || '').toLowerCase().includes(q));
+  if (includes.length) return includes.sort((a, b) => (a.name||'').length - (b.name||'').length)[0];
+  return undefined;
 }
 
 // ─── Register unified tool handlers for Claude ──────────────────
 registerToolHandlers({
   // ─── Calendar (unified) ───────────────────────────────────────
   calendar: withCache('calendar', async ({ action, days, event_text, query, index, recurrence, recurrence_days, recurrence_count, recurrence_until }) => {
-    switch (action) {
-      case 'today': {
-        const events = await getTodaySchedule();
-        if (!events.length) return 'אין אירועים היום ביומן Google.';
-        return events.map((e, i) => {
-          const time = e.allDay ? 'כל היום' : `${formatTimeOnly(e.start)}–${formatTimeOnly(e.end)}`;
-          return `${i + 1}. ${e.summary} (${time})${e.location ? ' 📍 ' + e.location : ''}`;
-        }).join('\n');
-      }
-      case 'week': {
-        const d = await getWeekSchedule();
-        let result = '';
-        for (const [, day] of Object.entries(d)) {
-          const t = day.isToday ? ' (היום)' : '';
-          result += `יום ${day.name} — ${day.date}${t}:\n`;
-          if (!day.events.length) result += '  אין אירועים\n';
-          else day.events.forEach(e => {
-            const time = e.allDay ? 'כל היום' : `${e.startTime}–${e.endTime}`;
-            result += `  • ${e.summary} (${time})${e.calendar ? ` [${e.calendar}]` : ''}${e.location ? ' 📍 ' + e.location : ''}\n`;
-          });
+    const runAction = async () => {
+      switch (action) {
+        case 'today': {
+          const events = await getTodaySchedule();
+          if (!events.length) return 'אין אירועים היום ביומן Google.';
+          return events.map((e, i) => {
+            const time = e.allDay ? 'כל היום' : `${formatTimeOnly(e.start)}–${formatTimeOnly(e.end)}`;
+            return `${i + 1}. ${e.summary} (${time})${e.location ? ' 📍 ' + e.location : ''}`;
+          }).join('\n');
         }
-        return result;
+        case 'week': {
+          const d = await getWeekSchedule();
+          let result = '';
+          for (const [, day] of Object.entries(d)) {
+            const t = day.isToday ? ' (היום)' : '';
+            result += `יום ${day.name} — ${day.date}${t}:\n`;
+            if (!day.events.length) result += '  אין אירועים\n';
+            else day.events.forEach(e => {
+              const time = e.allDay ? 'כל היום' : `${e.startTime}–${e.endTime}`;
+              result += `  • ${e.summary} (${time})${e.calendar ? ` [${e.calendar}]` : ''}${e.location ? ' 📍 ' + e.location : ''}\n`;
+            });
+          }
+          return result;
+        }
+        case 'events': {
+          const events = await getCalendarEvents(days || 7);
+          if (!events.length) return 'אין אירועים בתקופה הזו.';
+          return events.map((e, i) => `${i + 1}. ${e.summary} — ${formatEventTime(e.start)}${e.location ? ' 📍 ' + e.location : ''}`).join('\n');
+        }
+        case 'add': {
+          const recurrenceOpts = recurrence ? { recurrence, recurrence_days, recurrence_count, recurrence_until } : null;
+          const r = await addCalendarEvent(event_text, recurrenceOpts);
+          let msg = `אירוע נוסף: "${r.summary}" ב-${r.start}`;
+          if (r.recurring) msg += ' 🔄 (אירוע חוזר)';
+          return msg;
+        }
+        case 'search': {
+          const events = await searchCalendarEvents(query);
+          if (!events.length) return `לא נמצאו אירועים עבור "${query}"`;
+          return events.map((e, i) => `${i + 1}. ${e.summary} — ${e.startFormatted}`).join('\n');
+        }
+        case 'delete': { const ev = await deleteCalendarEvent(index); return `אירוע "${ev.summary}" נמחק.`; }
+        default: return `פעולה לא מוכרת: ${action}`;
       }
-      case 'events': {
-        const events = await getCalendarEvents(days || 7);
-        if (!events.length) return 'אין אירועים בתקופה הזו.';
-        return events.map((e, i) => `${i + 1}. ${e.summary} — ${formatEventTime(e.start)}${e.location ? ' 📍 ' + e.location : ''}`).join('\n');
+    };
+    try {
+      return await runAction();
+    } catch (err) {
+      if (err.message?.includes('invalid_grant') || err.message?.includes('Token has been expired')) {
+        googleResetAuthClient();
+        gmailResetAuth();
+        // Notify owner via WhatsApp (fire-and-forget)
+        const authUrl = `http://localhost:${process.env.PORT || 3000}/auth/google`;
+        setImmediate(async () => {
+          try {
+            const oc = await client.getChatById(OWNER_ID);
+            await botSend(oc, `🔑 *הרשאת Google פגה!*\n\nהטוקן של יומן Google / Gmail פג (7 ימים בעלון Testing).\n\nלחץ על הקישור לחידוש הגישה:\n${authUrl}`);
+          } catch (_) {}
+        });
+        return '❌ הגישה ל-Google פגה. שלחתי לך קישור לחידוש ההרשאה בצ\'אט הפרטי.';
       }
-      case 'add': {
-        const recurrenceOpts = recurrence ? { recurrence, recurrence_days, recurrence_count, recurrence_until } : null;
-        const r = await addCalendarEvent(event_text, recurrenceOpts);
-        let msg = `אירוע נוסף: "${r.summary}" ב-${r.start}`;
-        if (r.recurring) msg += ' 🔄 (אירוע חוזר)';
-        return msg;
-      }
-      case 'search': {
-        const events = await searchCalendarEvents(query);
-        if (!events.length) return `לא נמצאו אירועים עבור "${query}"`;
-        return events.map((e, i) => `${i + 1}. ${e.summary} — ${e.startFormatted}`).join('\n');
-      }
-      case 'delete': { const ev = await deleteCalendarEvent(index); return `אירוע "${ev.summary}" נמחק.`; }
-      default: return `פעולה לא מוכרת: ${action}`;
+      throw err;
     }
   }),
   // ─── Gmail (unified) ──────────────────────────────────────────
   gmail: withCache('gmail', async ({ action, index, query, to, subject, body }) => {
-    switch (action) {
-      case 'unread': return getUnreadEmails();
-      case 'search': return searchEmails(query);
-      case 'read': return readEmail(index);
-      case 'reply': return replyToEmail(index, body);
-      case 'send': return sendEmail(to, subject, body);
-      case 'mark_read': return markAsRead(index);
-      case 'trash': return trashEmail(index);
-      case 'star': return starEmail(index);
-      case 'stats': return getGmailStats();
-      default: return `פעולה לא מוכרת: ${action}`;
+    try {
+      switch (action) {
+        case 'unread': return await getUnreadEmails();
+        case 'search': return await searchEmails(query);
+        case 'read': return await readEmail(index);
+        case 'reply': return await replyToEmail(index, body);
+        case 'send': return await sendEmail(to, subject, body);
+        case 'mark_read': return await markAsRead(index);
+        case 'trash': return await trashEmail(index);
+        case 'star': return await starEmail(index);
+        case 'stats': return await getGmailStats();
+        default: return `פעולה לא מוכרת: ${action}`;
+      }
+    } catch (err) {
+      if (err.message?.includes('invalid_grant') || err.message?.includes('Token has been expired')) {
+        googleResetAuthClient();
+        gmailResetAuth();
+        const authUrl = `http://localhost:${process.env.PORT || 3000}/auth/google`;
+        setImmediate(async () => {
+          try {
+            const oc = await client.getChatById(OWNER_ID);
+            await botSend(oc, `🔑 *הרשאת Google פגה!*\n\nהטוקן של Gmail / יומן Google פג.\n\nלחץ על הקישור לחידוש הגישה:\n${authUrl}`);
+          } catch (_) {}
+        });
+        return '❌ הגישה ל-Gmail פגה. שלחתי לך קישור לחידוש ההרשאה בצ\'אט הפרטי.';
+      }
+      throw err;
     }
   }),
   // ─── Computer (unified) ───────────────────────────────────────
@@ -193,9 +297,13 @@ registerToolHandlers({
       }
       case 'read': {
         const chats = await client.getChats();
-        const ch = chats.find(c => (c.name || c.pushname || '').toLowerCase().includes(chatName.toLowerCase()));
+        const ch = findChatByName(chats, chatName);
         if (!ch) return `❌ לא נמצאה שיחה "${chatName}"`;
-        const msgs = await safeFetchMessages(ch, Math.min(limit || 20, 50));
+        const reqLimit = Math.min(limit || 20, 50);
+        const msgs = await safeFetchMessages(ch, reqLimit);
+        if (isFetchIncomplete(msgs, reqLimit)) {
+          return `❌ *שגיאה בטעינת ההיסטוריה של "${ch.name}"*\nWhatsApp Web לא הצליח לגשת להודעות הישנות יותר.\n💡 _פתח את הקבוצה ב-WhatsApp ולחץ על גלול למעלה, ואז שאל שוב._`;
+        }
         let text = `💬 *${ch.name || chatName}${ch.isGroup ? ' 👥' : ''}* — ${msgs.length} הודעות:\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         for (const m of msgs) {
           const t = new Date(m.timestamp * 1000).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
@@ -206,7 +314,7 @@ registerToolHandlers({
       }
       case 'search': {
         const chats = await client.getChats();
-        let searchIn = chatName ? [chats.find(c => (c.name||c.pushname||'').toLowerCase().includes(chatName.toLowerCase()))].filter(Boolean) : chats.slice(0, 15);
+        let searchIn = chatName ? [findChatByName(chats, chatName)].filter(Boolean) : chats.slice(0, 15);
         if (chatName && !searchIn.length) return `❌ לא נמצאה שיחה "${chatName}"`;
         const results = [];
         for (const ch of searchIn) {
@@ -224,9 +332,14 @@ registerToolHandlers({
       case 'summarize': {
         try {
           const chats = await client.getChats();
-          const ch = chats.find(c => (c.name||c.pushname||'').toLowerCase().includes(chatName.toLowerCase()));
+          const ch = findChatByName(chats, chatName);
           if (!ch) return `❌ לא נמצאה "${chatName}"`;
-          const msgs = (await safeFetchMessages(ch, Math.min(limit||50, 100))).filter(m => m.body?.trim().length > 2);
+          const reqLim = Math.min(limit||50, 100);
+          const rawMsgs = await safeFetchMessages(ch, reqLim);
+          if (isFetchIncomplete(rawMsgs, reqLim)) {
+            return `❌ *שגיאה בטעינת ההיסטוריה של "${ch.name}"*\nWhatsApp Web לא הצליח לגשת להודעות הישנות יותר.\n💡 _פתח את הקבוצה ב-WhatsApp ולחץ על גלול למעלה, ואז שאל שוב._`;
+          }
+          const msgs = rawMsgs.filter(m => m.body?.trim().length > 2);
           if (!msgs.length) return `📋 אין הודעות ב-"${ch.name}" לסיכום.`;
           const dump = msgs.map(m => `[${new Date(m.timestamp*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}] ${m.fromMe?'מושיקו':(m._data?.notifyName||'משתתף')}: ${m.body}`).join('\n');
           return `📋 *"${ch.name}"* (${msgs.length} הודעות):\n━━━━━━━━━━━━━━━━━━━━\n\n${dump}\n\n━━━━━━━━━━━━━━━━━━━━\n_סכם בנקודות תמציתיות. נושאים עיקריים, החלטות, פעולות._`;
@@ -237,7 +350,7 @@ registerToolHandlers({
       }
       case 'forward': {
         const chats = await client.getChats();
-        const src = chats.find(c => (c.name||c.pushname||'').toLowerCase().includes(chatName.toLowerCase()));
+        const src = findChatByName(chats, chatName);
         if (!src) return `❌ לא נמצאה "${chatName}"`;
         const idx = messageIndex || 1;
         const msgs = (await safeFetchMessages(src, idx + 5)).filter(m => m.body);
@@ -284,18 +397,27 @@ registerToolHandlers({
             const oc = await client.getChatById(OWNER_ID);
             if (daily_action === 'group_summary') {
               let sum = `📋 *סקירה יומית — ${time}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+              const allGroupContent = [];
+              const {smartChat:sc} = require('./src/claude');
               for (const gn of (params.groups||[])) {
-                const cs = await client.getChats(); const ch = cs.find(c => (c.name||'').toLowerCase().includes(gn.toLowerCase()));
+                const cs = await client.getChats(); const ch = findChatByName(cs, gn);
                 if (!ch) { sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
                 const msgs = await safeFetchMessages(ch, 50); const day = Date.now()/1000-86400;
                 const rec = msgs.filter(m => m.body && m.timestamp > day);
                 if (!rec.length) { sum += `*${ch.name}:* אין חדש\n\n`; continue; }
                 const d = rec.map(m => `${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,150)}`).join('\n');
-                const {smartChat:sc} = require('./src/claude');
                 const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות 24ש):\n${d}`, []);
                 sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
+                allGroupContent.push(`📌 ${ch.name}:\n${s}`);
               }
               await botSend(oc, sum);
+              if (allGroupContent.length > 0) {
+                try {
+                  const synthesisPrompt = `אתה עוזר חכם לדובר ח"כ אריאל קלנר (ליכוד). קראת את הסיכומים מהקבוצות הפוליטיות. כתוב ניתוח מודיעין פוליטי תמציתי:\n\n${allGroupContent.join('\n\n')}\n\nכתוב בדיוק בפורמט הזה:\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא ראשון + שם הקבוצה]\n2. [נושא שני + שם הקבוצה]\n3. [נושא שלישי + שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא אחד שקלנר יכול להגיב עליו בהתאם לעמדותיו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית אחת — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
+                  const synthesis = await sc(synthesisPrompt, []);
+                  await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
+                } catch (synthErr) { logger.warn('⚠️ synthesis failed:', synthErr.message); }
+              }
             } else if (daily_action === 'media_briefing') {
               // Morning media briefing
               let briefing = `📡 *סקירת תקשורת בוקר — ${new Date().toLocaleDateString('he-IL')}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
@@ -315,7 +437,7 @@ registerToolHandlers({
               // WhatsApp groups if specified
               if (params.groups?.length) {
                 for (const gn of params.groups) {
-                  const cs = await client.getChats(); const ch = cs.find(c => (c.name||'').toLowerCase().includes(gn.toLowerCase()));
+                  const cs = await client.getChats(); const ch = findChatByName(cs, gn);
                   if (!ch) continue;
                   const msgs = await safeFetchMessages(ch, 50); const day = Date.now()/1000-86400;
                   const rec = msgs.filter(m => m.body && m.timestamp > day);
@@ -413,8 +535,10 @@ registerToolHandlers({
     switch (action) {
       case 'status': {
         const s = getFaceStatus();
+        const hlLabels = { none: '❌ כבוי', highlight: '🟢 סימון', highlight_blur: '🟢🔒 סימון+טשטוש' };
         let text = `📷 *סינון תמונות: ${s.enabled ? '✅ פעיל' : '❌ כבוי'}*\n`;
-        text += `🔒 טשטוש פנים: ${s.blurEnabled ? '✅ פעיל' : '❌ כבוי'}\n`;
+        text += `🔒 טשטוש: ${s.blurEnabled ? '✅ פעיל' : '❌ כבוי'}\n`;
+        text += `🎨 סימון פנים: ${hlLabels[s.highlightMode] || '❌ כבוי'}\n`;
         text += `🎯 סף רגישות: ${s.threshold}\n`;
         text += `🔧 מנוע: ${s.initialized ? '✅ מוכן' : '⏳ טעינה...'}`;
         if (s.initError) text += ` (${s.initError.substring(0, 50)})`;
@@ -438,18 +562,51 @@ registerToolHandlers({
         return removeMonitoredGroup(group_name)
           ? `✅ הקבוצה "${group_name}" הוסרה`
           : `❌ הקבוצה "${group_name}" לא נמצאה`;
-      case 'set_threshold':
+      case 'add_owner_group': {
+        if (!group_name) return '❌ ציין שם קבוצת בדיקה';
+        addOwnerGroup(group_name);
+        return `✅ הקבוצה "${group_name}" הוגדרה כקבוצת בדיקה — גם תמונות שלך יבדקו`;
+      }
+      case 'remove_owner_group': {
+        if (!group_name) return '❌ ציין שם קבוצה';
+        return removeOwnerGroup(group_name)
+          ? `✅ הקבוצה "${group_name}" הוסרה מקבוצות הבדיקה`
+          : `❌ הקבוצה "${group_name}" לא נמצאה בקבוצות הבדיקה`;
+      }
+      case 'set_threshold': {
         if (threshold === undefined) return '❌ ציין סף (0.1-0.8)';
+        if (name) {
+          // Per-person threshold — uses setPersonThreshold from face-recognition.js
+          const { setPersonThreshold } = require('./src/face-recognition');
+          const val = setPersonThreshold(name, threshold);
+          return `✅ סף רגישות אישי של *"${name}"* עודכן ל-*${val}*\n_נמוך=קפדן, גבוה=מתירני_`;
+        }
         return `✅ סף רגישות עודכן ל-${setThreshold(threshold)}\n_נמוך=קפדן, גבוה=מתירני_`;
-      case 'clear_references':
-        clearReferences(name);
-        return name ? `✅ תמונות הייחוס של "${name}" נמחקו` : '✅ כל תמונות הייחוס נמחקו';
+      }
+      case 'clear_references': {
+        const refCount = name ? getReferenceCount(name) : getReferenceCount();
+        const label = name ? `של *"${name}"*` : 'של *כל האנשים*';
+        // Set a 30-second pending confirmation — actual deletion happens when user replies "כן"
+        pendingClearConfirm.set(OWNER_ID, { name: name || null, count: refCount, expiresAt: Date.now() + 30000 });
+        return `⚠️ *אישור נדרש לפני מחיקה*\n\nהאם למחוק *${refCount} ייחוסים* ${label}?\n\n✅ ענה *"כן, מחק"* לאישור סופי\n❌ ענה *"לא"* לביטול`;
+      }
       case 'toggle':
         setEnabled(enabled !== false);
         return `📷 סינון תמונות: ${enabled !== false ? '✅ פעיל' : '❌ כבוי'}`;
       case 'toggle_blur':
         setBlurEnabled(enabled !== false);
-        return `🔒 טשטוש פנים: ${enabled !== false ? '✅ פעיל — פנים אחרות יטושטשו' : '❌ כבוי — תמונות מקוריות'}`;
+        return `🔒 טשטוש פנים: ${enabled !== false ? '✅ פעיל — פנים אחרות יטושטשו' : '❌ כבוי'}`;
+      case 'set_highlight': {
+        // name field reused as mode: 'none' | 'highlight' | 'highlight_blur'
+        const mode = name || 'none';
+        setHighlightMode(mode);
+        const modeLabels = {
+          none: '❌ כבוי — תמונות מקוריות',
+          highlight: '🟢 פעיל — גבול ירוק על הפנים המזוהות, אדום על האחרות',
+          highlight_blur: '🟢🔒 פעיל — גבול ירוק על הפנים המזוהות + טשטוש על האחרות',
+        };
+        return `🎨 מצב סימון: ${modeLabels[mode] || mode}`;
+      }
       default: return `פעולה לא מוכרת: ${action}`;
     }
   },
@@ -466,6 +623,19 @@ let currentQR = null;
 const messageLog = [];
 const conversations = loadConversations();
 let stats = { received: 0, sent: 0 };
+
+// ─── Recent reference context (for multi-photo batches) ─────────
+// When user sends "ייחוס [name]" on one photo, remember name for 8s
+// so subsequent photos in the same batch are treated as references too
+const recentRefContext = new Map(); // chatId → { name, expiresAt }
+const pendingClearConfirm = new Map(); // chatId → { name, count, expiresAt } — awaiting "כן" before clearing refs
+
+// ─── Feedback store ──────────────────────────────────────────────
+// Key: bot's sent message ID → { name, imageBuffer, confidence, groupName }
+// Also keep "last" per chatId for text-based "פידבק כן/לא"
+const forwardedPhotos = new Map();   // msgId → photoData
+const lastForwardedPhoto = new Map(); // chatId → photoData (for text-only feedback)
+const MAX_FEEDBACK_STORE = 50;       // don't grow unbounded
 
 const OWNER_ID = '972524243250@c.us';
 const BOT_MARKER = '\u200B\u200C\u200B';
@@ -563,18 +733,27 @@ client.on('ready', () => {
         const oc = await client.getChatById(OWNER_ID);
         if (d.action === 'group_summary') {
           let sum = `📋 *סקירה יומית — ${d.time}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+          const allGroupContent = [];
+          const {smartChat:sc} = require('./src/claude');
           for (const gn of (d.params.groups||[])) {
-            const cs = await client.getChats(); const ch = cs.find(c => (c.name||'').toLowerCase().includes(gn.toLowerCase()));
+            const cs = await client.getChats(); const ch = findChatByName(cs, gn);
             if (!ch) { sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
             const msgs = await safeFetchMessages(ch, 50); const day = Date.now()/1000-86400;
             const rec = msgs.filter(m => m.body && m.timestamp > day);
             if (!rec.length) { sum += `*${ch.name}:* אין חדש\n\n`; continue; }
             const dump = rec.map(m => `${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,150)}`).join('\n');
-            const {smartChat:sc} = require('./src/claude');
             const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות 24ש):\n${dump}`, []);
             sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
+            allGroupContent.push(`📌 ${ch.name}:\n${s}`);
           }
           await botSend(oc, sum);
+          if (allGroupContent.length > 0) {
+            try {
+              const synthesisPrompt = `אתה עוזר חכם לדובר ח"כ אריאל קלנר (ליכוד). קראת את הסיכומים מהקבוצות הפוליטיות. כתוב ניתוח מודיעין פוליטי תמציתי:\n\n${allGroupContent.join('\n\n')}\n\nכתוב בדיוק בפורמט הזה:\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא ראשון + שם הקבוצה]\n2. [נושא שני + שם הקבוצה]\n3. [נושא שלישי + שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא אחד שקלנר יכול להגיב עליו בהתאם לעמדותיו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית אחת — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
+              const synthesis = await sc(synthesisPrompt, []);
+              await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
+            } catch (synthErr) { logger.warn('⚠️ synthesis failed:', synthErr.message); }
+          }
         } else if (d.action === 'send_message') {
           const {target:t,message:msg,type:tp} = d.params;
           if (tp==='email') { const{sendEmail:se}=require('./src/gmail'); await se(t,d.params.subject||'',msg); await botSend(oc,`⏰ יומי #${did} — מייל ל-${t}`); }
@@ -652,6 +831,76 @@ client.on('message_create', async (msg) => {
     // Only handle text and images
     if (!ALLOWED_TYPES.has(msg.type)) return;
 
+    // ── Owner-sent group photo → ownerGroups face recognition ──────
+    // Must run BEFORE the self-chat-only check below.
+    // When owner sends a photo to a group: msg.from or msg.to ends with @g.us
+    const _isGroupMsg = msg.from?.endsWith('@g.us') || msg.to?.endsWith('@g.us');
+    if (msg.fromMe && msg.type === 'image' && _isGroupMsg) {
+      // Guard: skip the bot's own result photos to prevent infinite loop
+      if (msg.body?.includes(BOT_MARKER)) return;
+      try {
+        const status = getFaceStatus();
+        if (status.enabled && status.totalReferences > 0 && (status.ownerGroups || []).length > 0) {
+          const grpChat = await msg.getChat();
+          if (!grpChat.isGroup) { /* skip non-group */ } else {
+          const groupName = grpChat.name || '';
+          const ownerGroups = status.ownerGroups || [];
+          const isOwnerGroup = ownerGroups.some(g => groupName.includes(g) || g.includes(groupName));
+          if (isOwnerGroup) {
+            console.log(`📷 Owner photo in test group "${groupName}" — checking faces...`);
+            const media = await msg.downloadMedia();
+            if (media?.data) {
+              const imageBuffer = Buffer.from(media.data, 'base64');
+              const matches = await findMatches(imageBuffer);
+              const ownerChat = await client.getChatById(OWNER_ID);
+              if (matches.length > 0) {
+                const match = matches[0];
+                const allNames = matches.map(m => `${m.name} (${m.confidence}%)`).join(', ');
+                const time = new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+                const { MessageMedia } = require('whatsapp-web.js');
+                const baseCaption = `🧪 *בדיקה:* זוהה — *${allNames}*\n📍 ${groupName} · ⏰ ${time}`;
+                // Compute highlight once — reuse for both owner DM and group reply
+                let markedBuf = null; let hlNote = '';
+                try {
+                  const { buffer: _b, highlighted, blurred: hlB } =
+                    await highlightMatchingFaces(imageBuffer, { blurOthers: false });
+                  markedBuf = _b;
+                  hlNote = ` · 🟢 ${highlighted} זוהה${hlB > 0 ? ` · 🔴 ${hlB} לא זוהה` : ''}`;
+                } catch (hlErr) { /* will send text fallback */ }
+                // Send to owner DM
+                if (markedBuf) {
+                  const mm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'test.jpg');
+                  await ownerChat.sendMessage(mm, { caption: baseCaption + hlNote + BOT_MARKER });
+                } else {
+                  await ownerChat.sendMessage(baseCaption + BOT_MARKER);
+                }
+                // Reply directly to the photo in the group (test group only)
+                try {
+                  if (markedBuf) {
+                    const gm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'result.jpg');
+                    await msg.reply(gm, null, { caption: `🟢 זוהה: *${allNames}*` + BOT_MARKER });
+                  } else {
+                    await msg.reply(`🟢 זוהה: *${allNames}*` + BOT_MARKER);
+                  }
+                } catch (e) { /* silent */ }
+                console.log(`🎀 Test match: ${allNames} in "${groupName}"`);
+              } else {
+                console.log(`📷 No match in owner test photo from "${groupName}"`);
+                // Reply directly to the photo so it's clear which image wasn't recognized
+                try { await msg.reply(`🔍 לא זוהו פנים מוכרים` + BOT_MARKER); } catch (e) { /* silent */ }
+              }
+            }
+          }
+        }
+        } // closes if (status.enabled...)
+      } catch (ownerGrpErr) {
+        if (!ownerGrpErr.message?.includes('not initialized')) {
+          console.error('Owner group photo error:', ownerGrpErr.message?.substring(0, 80));
+        }
+      }
+      return; // done — don't fall through to self-chat handler
+    }
+
     const chatId = msg.from;
     const toId = msg.to;
 
@@ -662,6 +911,27 @@ client.on('message_create', async (msg) => {
 
     const rawBody = msg.body || '';
     if (rawBody.includes(BOT_MARKER)) return;
+
+    // ── Reply-based feedback on forwarded photos ──────────────────
+    // Any reply to a bot photo message → smart feedback handler
+    if (msg.hasQuotedMsg) {
+      try {
+        const quotedMsg = await msg.getQuotedMessage();
+        const quotedId = quotedMsg?.id?._serialized;
+        const photoData = quotedId ? forwardedPhotos.get(quotedId) : null;
+        if (photoData) {
+          const chat = await msg.getChat();
+          await chat.sendStateTyping();
+          const reply = await handlePhotoFeedback(rawBody.trim(), photoData, quotedId);
+          await botSend(chat, reply);
+          stats.sent++;
+          log({ time: ts(), from: 'בוטי', text: reply.substring?.(0, 120) || '📸', direction: 'out' });
+          return;
+        }
+      } catch (quotedErr) {
+        console.warn('Quoted msg lookup failed:', quotedErr.message?.substring(0, 60));
+      }
+    }
 
     // Handle voice messages
     if (msg.type === 'ptt' || msg.type === 'audio') {
@@ -684,14 +954,20 @@ client.on('message_create', async (msg) => {
       const caption = rawBody.trim() || 'מה יש בתמונה?';
 
       // ── Reference photo for face recognition ──
-      const refMatch = caption.match(/ייחוס\s+(?:של\s+)?(.+)/);
-      if (refMatch) {
-        const refName = refMatch[1].trim();
+      const refMatch = caption.match(/ייחוס\s+(?:של\s+)?(.+)/i);
+      // Also check if this is a batch photo (no caption) after a recent "ייחוס" caption
+      const batchRef = !refMatch && recentRefContext.get(chatId);
+      const activeBatchRef = batchRef && batchRef.expiresAt > Date.now() ? batchRef : null;
+
+      if (refMatch || activeBatchRef) {
+        const refName = refMatch ? refMatch[1].trim() : activeBatchRef.name;
+        // Update/extend the batch context
+        recentRefContext.set(chatId, { name: refName, expiresAt: Date.now() + 8000 });
         console.log(`📨 [${ts()}] 📸 תמונת ייחוס: ${refName}`);
         stats.received++;
         log({ time: ts(), from: 'מושיקו', text: `📸 ייחוס ${refName}`, direction: 'in' });
         const chat = await msg.getChat();
-        await chat.sendStateTyping();
+        await chat.sendMessage('📸 _שומר תמונת ייחוס..._' + BOT_MARKER);
         const response = await handleReferencePhoto(msg, refName);
         await botSend(chat, response);
         stats.sent++;
@@ -699,17 +975,30 @@ client.on('message_create', async (msg) => {
         return;
       }
 
-      // ── Test mode: "בדיקה" = match only, "בדיקת טשטוש" = match + blur ──
-      const isBlurTest = /^(בדיקת טשטוש|טשטוש|blur)/i.test(caption.trim());
-      const isMatchTest = /^(בדיקה|בדוק|test|טסט|זיהוי)$/i.test(caption.trim());
-      if (isBlurTest || isMatchTest) {
-        const testType = isBlurTest ? '🔒 בדיקת טשטוש' : '🔍 בדיקת זיהוי';
+      // ── Test / highlight mode detection ───────────────────────
+      // Caption triggers (prefix match, case-insensitive):
+      //   "ייחוס [שם]"        → add reference photo
+      //   "בדיקה"             → face match text report
+      //   "בדיקת טשטוש"       → blur non-matching faces + report
+      //   "סימון"             → green/red border overlay
+      //   "סימון טשטוש"       → green border + blur others
+      const trimCap = caption.trim();
+      const isBlurTest     = /^(בדיקת טשטוש|טשטוש בלבד|blur test|blur)/i.test(trimCap);
+      const isHighlightBlur = /^(סימון טשטוש|highlight blur|סמן טשטוש|בדיקת סימון טשטוש)/i.test(trimCap);
+      const isHighlight    = /^(סימון|highlight|mark|סמן|הצג פנים|בדיקת סימון)/i.test(trimCap);
+      const isFeedbackYes  = /^(פידבק כן|feedback yes|✅ נכון|נכון)/i.test(trimCap);
+      const isFeedbackNo   = /^(פידבק לא|feedback no|❌ לא נכון|לא נכון)/i.test(trimCap);
+      // "בדיקה" prefix (not "בדיקת טשטוש"/"בדיקת סימון" which are caught above)
+      const isMatchTest    = /^(בדיקה|בדוק|test|טסט|זיהוי)/i.test(trimCap) && !isBlurTest && !isHighlightBlur && !isHighlight;
+
+      if (isBlurTest || isHighlight || isHighlightBlur || isMatchTest) {
+        const testType = isBlurTest ? '🔒 בדיקת טשטוש' : isHighlightBlur ? '🟢 סימון+טשטוש' : isHighlight ? '🟢 סימון' : '🔍 בדיקת זיהוי';
         console.log(`📨 [${ts()}] ${testType}`);
         stats.received++;
         log({ time: ts(), from: 'מושיקו', text: testType, direction: 'in' });
         const chat = await msg.getChat();
-        await chat.sendStateTyping();
-        const response = await handleFaceTest(msg, isBlurTest);
+        await chat.sendMessage('🔍 _בודק פנים בתמונה..._' + BOT_MARKER);
+        const response = await handleFaceTest(msg, isBlurTest, isHighlight || isHighlightBlur, isHighlightBlur);
         await botSend(chat, response);
         stats.sent++;
         log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
@@ -777,6 +1066,136 @@ client.on('message_create', async (msg) => {
 
     const chat = await msg.getChat();
     await chat.sendStateTyping();
+
+    // ── Pending "clear references" confirmation check ────────────
+    const pendingClear = pendingClearConfirm.get(chatId);
+    if (pendingClear && pendingClear.expiresAt > Date.now()) {
+      if (/^(כן|כן מחק|אישור|confirm|מחק)/i.test(text)) {
+        pendingClearConfirm.delete(chatId);
+        clearReferences(pendingClear.name);
+        const doneLabel = pendingClear.name ? `של "${pendingClear.name}"` : '';
+        await botSend(chat, `✅ *${pendingClear.count} ייחוסים נמחקו ${doneLabel}*`);
+        stats.sent++;
+        return;
+      } else if (/^(לא|ביטול|cancel|לא מחק)/i.test(text)) {
+        pendingClearConfirm.delete(chatId);
+        await botSend(chat, `↩️ *מחיקה בוטלה*`);
+        stats.sent++;
+        return;
+      }
+      // Any other text — cancel the pending confirm (user moved on)
+      pendingClearConfirm.delete(chatId);
+    }
+
+    // ── Direct face-status shortcut (bypass Claude) ─────────────
+    // "פקודות זיהוי" or "עזרה זיהוי" → instant command guide
+    if (/^(פקודות זיהוי|עזרה זיהוי|help זיהוי|זיהוי help|face commands|מדריך זיהוי)/i.test(text)) {
+      const helpReply =
+        `📷 *פקודות זיהוי פנים — מדריך מהיר:*\n\n` +
+        `*שלח תמונה עם אחד מהכיתובים:*\n` +
+        `• *"ייחוס [שם]"* — לשמור תמונת ייחוס\n` +
+        `  _דוגמה: "ייחוס מיה"_\n` +
+        `• *"בדיקה"* — לראות ציון זיהוי (טקסט)\n` +
+        `• *"סימון"* — תמונה עם גבולות 🟢מוכר / 🔴לא מוכר\n` +
+        `• *"סימון טשטוש"* — ירוק על מוכרים + טשטוש לאחרים\n` +
+        `• *"בדיקת טשטוש"* — טשטוש לא מוכרים בלבד\n\n` +
+        `*פקודות טקסט:*\n` +
+        `• *"כמה ייחוסים יש"* — סטטוס המערכת\n` +
+        `• *"תחמיר רגישות"* — פחות זיהויים שגויים\n` +
+        `• *"תרחיב רגישות"* — יזהה גם דמיון חלקי\n` +
+        `• *"פקודות זיהוי"* — המדריך הזה 😊\n\n` +
+        `*כשהבוט שולח תמונה מקבוצה — ענה עליה:*\n` +
+        `• *"כן"* / *"נכון"* — מוסיף לייחוסים\n` +
+        `• *"לא"* / *"טעות"* — מסמן שגיאה\n` +
+        `• כל הסבר חופשי — Claude מבין ומתקן 🤖`;
+      await botSend(chat, helpReply);
+      stats.sent++;
+      log({ time: ts(), from: 'בוטי', text: helpReply.substring(0, 120), direction: 'out' });
+      return;
+    }
+
+    // Catches plain-text questions about reference counts / recognition status
+    const isFaceQuery = /כמה (תמונות|ייחוסים|ייחוס) (יש|של)|סטטוס זיהוי|מצב זיהוי|זיהוי פנים סטטוס|מה הסטטוס של (זיהוי|פנים)|כמה פנים|ייחוס סטטוס/i.test(text);
+    if (isFaceQuery) {
+      const st = getFaceStatus();
+      const refs = st.references.map(r => `  👤 *${r.name}*: ${r.count} ייחוסים`).join('\n') || '  _אין ייחוסים עדיין_';
+      const groups = st.monitoredGroups.length > 0 ? st.monitoredGroups.map(g => `  📲 ${g}`).join('\n') : '  _אין קבוצות מנוטרות_';
+      const ownerGrps = st.ownerGroups?.length > 0 ? st.ownerGroups.map(g => `  🧪 ${g}`).join('\n') : '  _אין_';
+      const blurMode = st.blurEnabled ? '🔒 טשטוש פעיל' : (st.highlightMode !== 'none' ? `🟢 סימון: ${st.highlightMode}` : '⬜ ללא עיבוד');
+      const faceReply = `📊 *סטטוס זיהוי פנים:*\n\n` +
+        `${st.enabled ? '✅ פעיל' : '❌ כבוי'} | ${blurMode} | סף: ${st.threshold}\n\n` +
+        `*ייחוסים שמורים:*\n${refs}\n\n` +
+        `*קבוצות מנוטרות:*\n${groups}\n\n` +
+        `*קבוצות בדיקה (גם תמונות שלך):*\n${ownerGrps}\n\n` +
+        `💡 _לבדיקה: שלח תמונה עם כיתוב "בדיקה" / "סימון" / "סימון טשטוש"_`;
+      await botSend(chat, faceReply);
+      stats.sent++;
+      log({ time: ts(), from: 'בוטי', text: faceReply.substring(0, 120), direction: 'out' });
+      return;
+    }
+
+    // ── Manual briefing trigger — runs scheduled group_summary now ─
+    if (/^(סקירה עכשיו|הרץ סקירה|סקירת קבוצות עכשיו|run briefing|briefing now|תסרוק קבוצות|תעשה סקירה עכשיו)/i.test(text)) {
+      const summaryTask = [...dailyTasks.values()].find(d => d.action === 'group_summary');
+      if (!summaryTask) {
+        await botSend(chat, `❌ לא נמצאה משימת סקירה מתוזמנת. הגדר אחת קודם.`);
+        stats.sent++; return;
+      }
+      await botSend(chat, `⏳ *מריץ סקירת קבוצות עכשיו...*\n_${(summaryTask.params.groups||[]).length} קבוצות — זה ייקח כמה שניות_`);
+      // Run the same logic as the cron job, in background
+      setImmediate(async () => {
+        try {
+          const oc = await client.getChatById(OWNER_ID);
+          let sum = `📋 *סקירה ידנית — ${new Date().toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+          const allGroupContent = [];
+          const { smartChat: sc } = require('./src/claude');
+          const day = Date.now() / 1000 - 86400;
+          for (const gn of (summaryTask.params.groups || [])) {
+            try {
+              const cs = await client.getChats();
+              const ch = findChatByName(cs, gn);
+              if (!ch) { sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
+              const msgs = await safeFetchMessages(ch, 50);
+              const rec = msgs.filter(m => m.body && m.timestamp > day);
+              if (!rec.length) { sum += `*${ch.name}:* אין חדש ב-24 שעות\n\n`; continue; }
+              const d = rec.map(m => `${m._data?.notifyName || 'משתתף'}: ${m.body.substring(0, 150)}`).join('\n');
+              const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות):\n${d}`, []);
+              sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
+              allGroupContent.push(`📌 ${ch.name}:\n${s}`);
+            } catch (ge) { sum += `⚠️ "${gn}" — שגיאה: ${ge.message?.substring(0,40)}\n\n`; }
+          }
+          await botSend(oc, sum);
+          if (allGroupContent.length > 0) {
+            const synthPrompt = `אתה עוזר לדובר ח"כ אריאל קלנר (ליכוד). כתוב ניתוח מודיעין פוליטי תמציתי:\n\n${allGroupContent.join('\n\n')}\n\n🔥 *TOP 3 — הכי חם:*\n1.\n2.\n3.\n\n💡 *זווית קלנר:*\n\n📲 *פעולה מוצעת:*`;
+            const synthesis = await sc(synthPrompt, []);
+            await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
+          }
+        } catch (err) { logger.error('Manual briefing error:', err.message); }
+      });
+      stats.sent++; return;
+    }
+
+    // ── Reference audit shortcut ─────────────────────────────────
+    if (/^(רשימת ייחוסים|audit ייחוסים|ייחוסים פירוט|כמה ייחוסים לכל אחד|פירוט ייחוסים)/i.test(text)) {
+      const st = getFaceStatus();
+      if (st.references.length === 0) {
+        await botSend(chat, `📋 *אין ייחוסים שמורים*\nשלח תמונה עם כיתוב "ייחוס [שם]" כדי להוסיף`);
+      } else {
+        let auditMsg = `📋 *פירוט ייחוסים שמורים:*\n\n`;
+        for (const ref of st.references) {
+          const filled = Math.min(ref.count, 10);
+          const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
+          const quality = ref.count >= 8 ? '✅ מעולה' : ref.count >= 4 ? '🟡 בסדר' : '🔴 מעט מדי';
+          auditMsg += `👤 *${ref.name}*\n   ${bar} ${ref.count} — ${quality}\n\n`;
+        }
+        auditMsg += `_סה"כ: ${st.totalReferences} ייחוסים · סף: ${st.threshold}_\n`;
+        auditMsg += `💡 _למחיקה: "נקה ייחוסים של [שם]"_`;
+        await botSend(chat, auditMsg);
+      }
+      stats.sent++;
+      log({ time: ts(), from: 'בוטי', text: 'audit ייחוסים', direction: 'out' });
+      return;
+    }
 
     // Send "working on it" if response takes too long
     let slowTimer = setTimeout(async () => {
@@ -932,28 +1351,141 @@ async function handleReferencePhoto(msg, name) {
     }
 
     const tips = result.totalReferences < 3
-      ? `\n\n💡 _לדיוק טוב יותר — שלח עוד ${3 - result.totalReferences} תמונות לפחות מזוויות שונות._\n_כתוב "ייחוס ${name}" בכיתוב של כל תמונה._`
+      ? `\n💡 _לדיוק טוב — שלח עוד ${3 - result.totalReferences} תמונות מזוויות שונות עם כיתוב "ייחוס ${name}"_`
       : result.totalReferences < 8
-        ? `\n\n💡 _יש ${result.totalReferences} תמונות ייחוס — טוב! עוד כמה ישפרו את הדיוק._`
-        : `\n\n✨ _${result.totalReferences} תמונות ייחוס — מעולה! דיוק מקסימלי._`;
+        ? `\n💡 _${result.totalReferences} ייחוסים — טוב! עוד כמה ישפרו את הדיוק_`
+        : `\n✨ _${result.totalReferences} ייחוסים — מעולה! דיוק מקסימלי_`;
+
+    const nextSteps = `\n\n🧪 *לבדיקה — שלח תמונה עם אחד מהכיתובים:*\n` +
+      `• *"בדיקה"* — לראות ציון זיהוי (טקסט)\n` +
+      `• *"סימון"* — לראות גבולות ירוק/אדום על הפנים\n` +
+      `• *"סימון טשטוש"* — ירוק על ${name} + טשטוש לאחרים`;
 
     return `✅ *תמונת ייחוס נוספה ל-${name}!*\n` +
-      `👤 פנים שזוהו בתמונה: ${result.facesAdded}\n` +
-      `📊 סה"כ תמונות ייחוס: ${result.totalReferences}` + tips;
+      `👤 פנים שנשמרו: ${result.facesAdded} | 📊 סה"כ: ${result.totalReferences}` +
+      tips + nextSteps;
   } catch (err) {
     console.error('Reference photo error:', err.message);
     return '❌ שגיאה בעיבוד תמונת ייחוס: ' + err.message.substring(0, 80);
   }
 }
 
-// ─── Face Test Handler (test matching + optional blur preview) ──
-async function handleFaceTest(msg, withBlur = false) {
+// ─── Smart Photo Feedback Handler ───────────────────────────────
+// Called when user replies to a bot-forwarded photo with any text.
+// Uses Claude vision to understand the feedback and fix the image.
+async function handlePhotoFeedback(feedbackText, photoData, quotedMsgId) {
+  const { name, imageBuffer, confidence, groupName } = photoData;
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const { MessageMedia } = require('whatsapp-web.js');
+
+  try {
+    // Ask Claude to classify the feedback intent using vision + text
+    const base64 = imageBuffer.toString('base64');
+    const classifyRes = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 400,
+      system: `אתה מנתח פידבק על זיהוי פנים אוטומטי. הבוט זיהה את "${name}" בתמונה עם ביטחון ${confidence}%.
+המשתמש הגיב בעברית על הזיהוי הזה.
+
+כללי סיווג חשובים:
+• "כן" / "נכון" / "זה הוא/היא" / "בדיוק" → intent: "correct"
+• "לא" / "לא נכון" / "זה לא [שם]" / "זאת לא [שם]" / "הוא לא [שם]" / "שגוי" / "טעות" → intent: "wrong_person"
+• אם המשתמש ציין שם אחר (כגון "זאת מיה" / "זה דן") → fixName: "[השם שצוין]"
+• בקשה לראות התמונה המעובדת / לסמן → intent: "fix_highlight"
+• אם הפנים טושטשו ולא היו אמורות → intent: "blurred_match"
+
+החזר JSON בלבד:
+{
+  "intent": "correct" | "wrong_person" | "blurred_match" | "missed_match" | "fix_highlight" | "other",
+  "action": "add_reference" | "false_positive" | "send_highlighted" | "send_blurred" | "send_original" | "none",
+  "fixName": "שם אחר שצוין או null",
+  "message": "הסבר קצר בעברית"
+}`,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+          { type: 'text', text: `הבוט אמר: "${name}" (${confidence}%)\nהמשתמש ענה: "${feedbackText}"` },
+        ],
+      }],
+    });
+
+    let intent = { intent: 'other', action: 'none', fixName: null, message: '' };
+    try {
+      const raw = classifyRes.content.find(b => b.type === 'text')?.text || '';
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) intent = JSON.parse(jsonMatch[0]);
+    } catch {}
+
+    console.log(`📣 Feedback intent: ${intent.intent} → action: ${intent.action}`);
+
+    // ── Execute the action ─────────────────────────────────────
+    if (intent.action === 'add_reference' || intent.intent === 'correct') {
+      const refName = intent.fixName || name;
+      const result = await addReference(refName, imageBuffer).catch(() => null);
+      if (quotedMsgId) forwardedPhotos.delete(quotedMsgId);
+      return `✅ *זיהוי נכון — תמונה נוספה לייחוסים של ${refName}!*\n🧠 ${result?.totalReferences || '?'} תמונות ייחוס — הזיהוי משתפר 📈`;
+    }
+
+    if (intent.action === 'false_positive' || intent.intent === 'wrong_person') {
+      logger.warn(`❌ Feedback: false positive "${name}" (${confidence}%) from "${groupName}" — user said: "${feedbackText}"`);
+      if (quotedMsgId) forwardedPhotos.delete(quotedMsgId);
+      const fix = intent.fixName ? `\n💡 אם זו ${intent.fixName} — שלח תמונה שלה עם "ייחוס ${intent.fixName}" כדי ללמד אותי` : '\n💡 אם זה קורה הרבה — אמור "תחמיר רגישות"';
+      return `📝 *סומן כזיהוי שגוי* — לא ${name} בתמונה הזו${fix}`;
+    }
+
+    if (intent.intent === 'blurred_match' || intent.action === 'send_highlighted') {
+      // Person was blurred — send highlighted version so they can see who was found
+      const ownerChat = await client.getChatById(OWNER_ID);
+      try {
+        const { buffer: markedBuf } = await highlightMatchingFaces(imageBuffer, { blurOthers: false });
+        const markedMedia = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'fixed.jpg');
+        await ownerChat.sendMessage(markedMedia, {
+          caption: `🟢 *תיקון:* סימון פנים ללא טשטוש — ${name} מסומן בירוק` + BOT_MARKER,
+        });
+        return `📸 שלחתי את התמונה עם סימון ירוק על ${name} ואדום על האחרים`;
+      } catch (e) {
+        return `❌ לא הצלחתי לסמן: ${e.message?.substring(0, 60)}`;
+      }
+    }
+
+    if (intent.intent === 'missed_match' || intent.action === 'send_original') {
+      // Person wasn't recognized — send original for user to see
+      const ownerChat = await client.getChatById(OWNER_ID);
+      const origMedia = new MessageMedia('image/jpeg', base64, 'original.jpg');
+      await ownerChat.sendMessage(origMedia, {
+        caption: `📸 תמונה מקורית ללא עיבוד — ${name} לא זוהה (סף: ${confidence}%)` + BOT_MARKER,
+      });
+      return `שלחתי את התמונה המקורית. אם ${name} באמת שם — שלח את התמונה עם כיתוב "ייחוס ${name}" כדי ללמד אותי 🎓`;
+    }
+
+    // Generic — just acknowledge and log
+    return `📝 פידבק נשמר. ${intent.message || ''}`;
+
+  } catch (err) {
+    if (err.status === 429 || err.status === 503 || err.status === 529) {
+      // Recoverable: keep photoData in forwardedPhotos so user can retry
+      logger.warn?.('Temporary API error in photo feedback:', err.status);
+      return `⏳ *שגיאה זמנית ב-API* — נסה שוב בעוד דקה 🔄\n_${err.message?.substring(0, 50)}_`;
+    }
+    logger.error?.('Photo feedback error:', err.message);
+    if (quotedMsgId) forwardedPhotos.delete(quotedMsgId);
+    return `❌ שגיאה בעיבוד הפידבק: ${err.message?.substring(0, 60)}`;
+  }
+}
+
+// ─── Face Test Handler ──────────────────────────────────────────
+// withBlur: blur non-matching faces
+// withHighlight: draw green/red borders
+// highlightAndBlur: green border on match + blur others
+async function handleFaceTest(msg, withBlur = false, withHighlight = false, highlightAndBlur = false) {
   try {
     const media = await msg.downloadMedia();
     if (!media || !media.data) return '❌ לא הצלחתי להוריד את התמונה';
 
     const imageBuffer = Buffer.from(media.data, 'base64');
-    console.log(`🔍 Face test (${(imageBuffer.length / 1024).toFixed(0)}KB)`);
+    console.log(`🔍 Face test (${(imageBuffer.length / 1024).toFixed(0)}KB, blur=${withBlur}, highlight=${withHighlight})`);
 
     const { detectFaces } = require('./src/face-recognition');
     const detections = await detectFaces(imageBuffer);
@@ -967,6 +1499,8 @@ async function handleFaceTest(msg, withBlur = false) {
       return response;
     }
 
+    const status = getFaceStatus();
+
     if (matches.length > 0) {
       response += '\n✅ *התאמות:*\n';
       for (const m of matches) {
@@ -974,31 +1508,65 @@ async function handleFaceTest(msg, withBlur = false) {
         response += `  ${emoji} *${m.name}* — ${m.confidence}% (מרחק: ${m.distance})\n`;
       }
       response += '\n_🟢 70%+ = בטוח, 🟡 50-70% = סביר, 🔴 <50% = לא בטוח_';
-
-      // Send blurred preview only if requested
-      if (withBlur && detections.length > matches.length) {
-        try {
-          const { buffer: blurredBuf, blurred } = await blurNonMatchingFaces(imageBuffer);
-          if (blurred > 0) {
-            const { MessageMedia } = require('whatsapp-web.js');
-            const blurredMedia = new MessageMedia('image/jpeg', blurredBuf.toString('base64'), 'blurred.jpg');
-            const chat = await msg.getChat();
-            await chat.sendMessage(blurredMedia, {
-              caption: `🔒 תצוגה מקדימה: ${blurred} פנים טושטשו, ${matches.length} נשארו חדים` + BOT_MARKER,
-            });
-          }
-        } catch (blurErr) {
-          response += `\n\n⚠️ טשטוש נכשל: ${blurErr.message?.substring(0, 50)}`;
-        }
-      }
     } else {
-      response += '\n❌ אין התאמה לאף תמונת ייחוס.';
-      const status = getFaceStatus();
+      response += '\n❌ אין התאמה לאף תמונת ייחוס.\n';
       if (status.totalReferences === 0) {
-        response += '\n\n💡 שלח תמונת ייחוס קודם (כיתוב "ייחוס שי")';
+        response += '\n💡 *שלב ראשון:* שלח תמונה ברורה עם כיתוב "ייחוס [שם]"';
       } else {
-        response += `\n\n📊 יש ${status.totalReferences} תמונות ייחוס. סף נוכחי: ${status.threshold}`;
-        response += '\n💡 אפשר להוריד את הסף (אמור "תוריד רגישות") אם יש יותר מדי פספוסים';
+        response += `\n📊 יש ${status.totalReferences} ייחוסים (סף: ${status.threshold})`;
+        response += '\n💡 אם אמור להיות שם — נסה להוסיף עוד ייחוסים מזוויות שונות';
+        response += '\n💡 אפשר גם לומר "תרחיב רגישות" כדי שיזהה בקלות יותר';
+      }
+    }
+
+    // ── Highlight mode: send image with colored borders ────────
+    if ((withHighlight || highlightAndBlur) && detections.length > 0) {
+      try {
+        const { buffer: markedBuf, highlighted } = await highlightMatchingFaces(imageBuffer, { blurOthers: highlightAndBlur });
+        const { MessageMedia } = require('whatsapp-web.js');
+        const markedMedia = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'marked.jpg');
+        const chat = await msg.getChat();
+        const others = detections.length - highlighted;
+        const capText = highlighted > 0
+          ? `🟢 ${highlighted} מסומן${highlighted > 1 ? 'ות' : ''} — זוהה${others > 0 ? ` | ${highlightAndBlur ? '🔒 ' + others + ' טושטש' : '🔴 ' + others + ' לא זוהה'}` : ''}`
+          : `🔴 אף אחד לא זוהה — כל ${others} פנים לא מוכרים`;
+        await chat.sendMessage(markedMedia, { caption: capText + BOT_MARKER });
+        // add tips after the image
+        if (matches.length === 0 && status.totalReferences > 0) {
+          response += `\n\n💡 *לא זיהיתי? נסה:*\n• שלח תמונה ברורה יותר עם כיתוב "ייחוס [שם]"\n• אמור "תרחיב רגישות" (סף נוכחי: ${status.threshold})`;
+        }
+      } catch (hErr) {
+        response += `\n\n⚠️ סימון נכשל: ${hErr.message?.substring(0, 50)}`;
+      }
+    }
+    // ── Blur mode ──────────────────────────────────────────────
+    else if (withBlur && detections.length > matches.length) {
+      try {
+        const { buffer: blurredBuf, blurred } = await blurNonMatchingFaces(imageBuffer);
+        if (blurred > 0) {
+          const { MessageMedia } = require('whatsapp-web.js');
+          const blurredMedia = new MessageMedia('image/jpeg', blurredBuf.toString('base64'), 'blurred.jpg');
+          const chat = await msg.getChat();
+          await chat.sendMessage(blurredMedia, {
+            caption: `🔒 ${blurred} פנים טושטשו | ✅ ${matches.length} נשארו חדים` + BOT_MARKER,
+          });
+        }
+      } catch (blurErr) {
+        response += `\n\n⚠️ טשטוש נכשל: ${blurErr.message?.substring(0, 50)}`;
+      }
+    }
+
+    // ── If plain test (no image sent back) — add next steps ────
+    if (!withBlur && !withHighlight && !highlightAndBlur) {
+      response += `\n\n📌 *שלבים הבאים:*\n`;
+      if (matches.length > 0) {
+        response += `• שלח שוב עם כיתוב *"סימון"* — תראה גבולות על הפנים 🟢\n`;
+        response += `• שלח עם *"סימון טשטוש"* — ירוק על מוכרים + טשטוש לאחרים\n`;
+      } else {
+        response += `• שלח תמונה עם כיתוב *"ייחוס [שם]"* להוספת ייחוס\n`;
+        if (status.totalReferences > 0) {
+          response += `• אמור *"תרחיב רגישות"* אם הסף קשוח מדי\n`;
+        }
       }
     }
 
@@ -1016,7 +1584,6 @@ client.on('message', async (msg) => {
   try {
     if (msg.type !== 'image') return;
     if (!msg.from?.endsWith('@g.us')) return;
-    if (msg.fromMe) return;
 
     const status = getFaceStatus();
     if (!status.enabled || status.totalReferences === 0) return;
@@ -1030,6 +1597,10 @@ client.on('message', async (msg) => {
       groupName.includes(g) || g.includes(groupName),
     );
     if (!isMonitored) return;
+
+    // Owner's photos are handled exclusively by message_create (ownerGroups block).
+    // Never process them here to avoid double-processing and infinite loops.
+    if (msg.fromMe) return;
 
     console.log(`📷 Group photo from "${groupName}" — checking faces...`);
 
@@ -1047,34 +1618,84 @@ client.on('message', async (msg) => {
       const sender = msg._data?.notifyName || 'מישהו';
       const time = new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
 
-      // Send with blur (if enabled) or forward original
-      if (isBlurEnabled()) {
+      const photoData = { name: match.name, imageBuffer, confidence: match.confidence, groupName };
+      lastForwardedPhoto.set(OWNER_ID, photoData); // for text-only "פידבק כן/לא"
+
+      // Helper: register a sent message for reply-based feedback
+      const registerFeedbackMsg = (sentMsg) => {
+        if (!sentMsg?.id?._serialized) return;
+        // Prune BEFORE insert so we never exceed MAX_FEEDBACK_STORE
+        if (forwardedPhotos.size >= MAX_FEEDBACK_STORE) {
+          const firstKey = [...forwardedPhotos.keys()][0];
+          forwardedPhotos.delete(firstKey);
+        }
+        forwardedPhotos.set(sentMsg.id._serialized, photoData);
+      };
+
+      // Send with blur / highlight / original
+      const feedbackNote = `\n💬 _הגב: "כן" אם נכון, "לא" אם טעות_`;
+      const { MessageMedia } = require('whatsapp-web.js');
+      const hlMode = getHighlightMode(); // 'none' | 'highlight' | 'highlight_blur'
+
+      const baseCaption = `🎀 *תמונה של ${match.name}!*\n📍 ${groupName} · 👤 ${sender}\n📊 ${match.confidence}%\n⏰ ${time}`;
+
+      if (hlMode === 'highlight' || hlMode === 'highlight_blur') {
+        try {
+          const { buffer: markedBuf, highlighted, blurred: hlBlurred } =
+            await highlightMatchingFaces(imageBuffer, { blurOthers: hlMode === 'highlight_blur' });
+          const markedMedia = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'photo.jpg');
+          const hlNote = highlighted > 0
+            ? ` · 🟢 ${highlighted} מסומן${hlBlurred > 0 ? ` · 🔒 ${hlBlurred} טושטש` : ''}`
+            : '';
+          const sentMsg = await ownerChat.sendMessage(markedMedia, {
+            caption: baseCaption + hlNote + feedbackNote + BOT_MARKER,
+          });
+          registerFeedbackMsg(sentMsg);
+        } catch (hlErr) {
+          console.error('Highlight failed, forwarding original:', hlErr.message?.substring(0, 60));
+          await msg.forward(OWNER_ID);
+          const sentMsg = await ownerChat.sendMessage(baseCaption + feedbackNote + BOT_MARKER);
+          registerFeedbackMsg(sentMsg);
+        }
+      } else if (isBlurEnabled()) {
         try {
           const { buffer: blurredBuf, blurred } = await blurNonMatchingFaces(imageBuffer);
-          const { MessageMedia } = require('whatsapp-web.js');
           const blurredMedia = new MessageMedia('image/jpeg', blurredBuf.toString('base64'), 'photo.jpg');
-          const caption = `🎀 *תמונה של ${match.name}!*\n` +
-            `📍 ${groupName} · 👤 ${sender}\n` +
-            `📊 ${match.confidence}%` +
-            (blurred > 0 ? ` · 🔒 ${blurred} פנים טושטשו` : '') +
-            `\n⏰ ${time}`;
-          await ownerChat.sendMessage(blurredMedia, { caption: caption + BOT_MARKER });
+          const blurNote = blurred > 0 ? ` · 🔒 ${blurred} פנים טושטשו` : '';
+          const sentMsg = await ownerChat.sendMessage(blurredMedia, {
+            caption: baseCaption + blurNote + feedbackNote + BOT_MARKER,
+          });
+          registerFeedbackMsg(sentMsg);
         } catch (blurErr) {
           console.error('Blur failed, forwarding original:', blurErr.message?.substring(0, 60));
           await msg.forward(OWNER_ID);
-          await ownerChat.sendMessage(
-            `🎀 *תמונה של ${match.name}!*\n📍 ${groupName} · 📊 ${match.confidence}%\n⏰ ${time}` + BOT_MARKER,
-          );
+          const sentMsg = await ownerChat.sendMessage(baseCaption + feedbackNote + BOT_MARKER);
+          registerFeedbackMsg(sentMsg);
         }
       } else {
         await msg.forward(OWNER_ID);
-        await ownerChat.sendMessage(
-          `🎀 *תמונה של ${match.name}!*\n📍 ${groupName} · 👤 ${sender}\n📊 ${match.confidence}%\n⏰ ${time}` + BOT_MARKER,
-        );
+        const sentMsg = await ownerChat.sendMessage(baseCaption + feedbackNote + BOT_MARKER);
+        registerFeedbackMsg(sentMsg);
+      }
+      // ── ownerGroup: reply directly to the photo with highlighted result ──
+      const isTestGrp = (status.ownerGroups || []).some(g => groupName.includes(g) || g.includes(groupName));
+      if (isTestGrp) {
+        try {
+          const { MessageMedia: MMA } = require('whatsapp-web.js');
+          const { buffer: grpBuf } = await highlightMatchingFaces(imageBuffer, { blurOthers: false });
+          const grpMedia = new MMA('image/jpeg', grpBuf.toString('base64'), 'result.jpg');
+          const allNames = matches.map(m => `*${m.name}* (${m.confidence}%)`).join(', ');
+          await msg.reply(grpMedia, null, { caption: `🟢 זוהה: ${allNames}` + BOT_MARKER });
+        } catch (e) { /* silent */ }
       }
       stats.sent++;
     } else {
       console.log(`📷 No match in "${groupName}" photo`);
+      // For ownerGroups (test groups): reply directly to the photo so it's clear which one
+      const isTestGrp = (status.ownerGroups || []).some(g => groupName.includes(g) || g.includes(groupName));
+      if (isTestGrp) {
+        try { await msg.reply(`🔍 לא זוהו פנים מוכרים` + BOT_MARKER); } catch (e) { /* silent */ }
+      }
     }
   } catch (err) {
     // Silent — don't spam logs for every group photo error
@@ -1097,7 +1718,20 @@ async function handleImage(msg, caption, chatId) {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1500,
-      system: 'אתה "בוטי" — העוזר האישי של מושיקו בוואטסאפ. ענה קצר וטבעי בעברית. תשתמש בסלנג ישראלי.',
+      system: `אתה "בוטי" — העוזר האישי של מושיקו בוואטסאפ. ענה קצר וטבעי בעברית. תשתמש בסלנג ישראלי.
+
+📸 תפקידך עכשיו: לתאר מה אתה רואה בתמונה.
+
+🤖 *פקודות מיוחדות לזיהוי פנים — אלה פועלות דרך כיתוב בתמונה, לא דרכך:*
+• כיתוב "ייחוס [שם]"       → שמירת תמונה כייחוס לזיהוי פנים
+• כיתוב "בדיקה"             → בדיקת זיהוי פנים (טקסט + ציון)
+• כיתוב "סימון"             → סימון פנים עם גבולות צבעוניים (🟢מוכר, 🔴לא מוכר)
+• כיתוב "סימון טשטוש"       → סימון ירוק + טשטוש פנים לא מוכרים
+• כיתוב "בדיקת טשטוש"       → טשטוש פנים לא מוכרים
+
+🚫 אל תאמר שאתה "שומר", "מוסיף", "מזהה" פנים — זה נעשה בקוד בשרת, לא על ידך.
+✅ אם המשתמש ביקש לסמן/לזהות/לשמור — הסבר לו *בדיוק* איזה כיתוב לשלח.
+✅ לבדיקת כמות ייחוסים — הוא יכול לשאול "כמה ייחוסים יש" בהודעת טקסט.`,
       messages: [
         ...history,
         {
@@ -1215,6 +1849,20 @@ async function route(chatId, text) {
     }
   }
 
+  // ── Face recognition feedback — natural language ────────────────
+  // Any short message after a forwarded photo → route directly to Claude vision feedback handler.
+  // No keyword gating — Claude inside handlePhotoFeedback understands ANY phrasing:
+  //   "זאת לא שי", "זה מיה", "טעות", "נכון", "כן", "לא הוא" etc.
+  const lastPhoto = lastForwardedPhoto.get(chatId);
+  if (lastPhoto && text.length < 150 && !text.startsWith('/')) {
+    const reply = await handlePhotoFeedback(text.trim(), lastPhoto, null);
+    // Clear pending photo only after meaningful action (confirm / deny)
+    if (reply.startsWith('✅') || reply.startsWith('📝 *')) {
+      lastForwardedPhoto.delete(chatId);
+    }
+    return reply;
+  }
+
   // Quick commands (still work for power users)
   if (/^\/(תפריט|menu|help|עזרה|start)/i.test(text)) return helpMenu();
   if (/^\/(חדש|חדשות|עדכון|changelog|whatsnew|מה חדש)/i.test(text)) return whatsNew();
@@ -1292,6 +1940,12 @@ function helpMenu() {
 • _"תראה לי קבצים בשולחן העבודה"_
 • _"כמה סוללה נשארה?"_
 
+📷 *זיהוי פנים:*
+• _שלח תמונה + "ייחוס [שם]"_ — לשמור ייחוס
+• _שלח תמונה + "בדיקה"_ — לראות ציון זיהוי
+• _שלח תמונה + "סימון"_ — לסמן 🟢מוכר / 🔴לא מוכר
+• _"פקודות זיהוי"_ — מדריך מלא
+
 ━━━━━━━━━━━━━━━━━━━━
 
 ⚡ *פקודות מיוחדות:*
@@ -1304,63 +1958,79 @@ function helpMenu() {
 }
 
 // ─── What's New ─────────────────────────────────────────────────
+// !! כשמוסיפים עדכון — מוסיפים בלוק חדש בראש הרשימה עם תאריך + שעה !!
 function whatsNew() {
-  return `╭──── *🆕 מה חדש בבוטי?* ────╮
-╰────────────────────────╯
+  return `╭──── *🆕 עדכוני בוטי* ────╮
+╰───────────────────────╯
 
-*📌 עדכון אחרון: 13/4/2026*
+━━━━━━━━━━━━━━━━━━━━
+📅 *18/4/2026 — 23:15*
+━━━━━━━━━━━━━━━━━━━━
 
-━━ *חדש!* ━━━━━━━━━━━━━━━
+*📷 זיהוי פנים — שיפור מסיבי*
+
+🐛 *תיקוני באגים:*
+• תמונות ייחוס עם כמה פנים נדחות (מנע זיהום)
+• אותו שם לא יופיע פעמיים בתוצאות
+• ניקוי ייחוסים מזוהמים
+
+🎯 *דיוק:*
+• רזולוציה זיהוי: 640px ← *1280px* (פנים קטנות)
+• חידוד תמונה אוטומטי לפני זיהוי
+• זיהוי פנים קטנות: minConfidence 0.5 ← *0.3*
+• בקרת איכות ייחוס — דוחה תמונות חשוכות/שרופות
+• threshold אישי לכל אדם ("שנה סף של מיה ל-0.38")
+
+🖥️ *UX:*
+• "🔍 בודק פנים..." — אינדיקטור בזמן עיבוד
+• תשובה ישירות *על* התמונה (reply) — ברור איזו תמונה
+• אישור לפני מחיקת ייחוסים — לא עוד מחיקה בטעות
+• פקודה חדשה: _"רשימת ייחוסים"_ — progress bar + תווית איכות
+• זיהוי פנים נוסף לתפריט /תפריט
+
+⚡ *ביצועים ויציבות:*
+• Config cache — קורא קובץ רק כשמשתנה (×15 פחות I/O)
+• זיהוי פנים מתבצע פעם אחת לתמונה במקום כפול
+• confidence מנורמל לסף (100% = התאמה מושלמת, 0% = בגבול)
+• תור תמונות לא עולה על הגבול (prune-before-insert)
+• Claude API נפל? — מנסה שוב במקום לאבד פידבק
+
+━━━━━━━━━━━━━━━━━━━━
+📅 *13/4/2026*
+━━━━━━━━━━━━━━━━━━━━
 
 *💬 קריאת שיחות וואטסאפ*
 • _"תראה שיחות"_ — רשימת כל השיחות
 • _"תקרא את השיחה עם יובל"_ — הודעות אחרונות
 • _"תחפש בוואטסאפ ראיון"_ — חיפוש בכל השיחות
-• קריאה בלבד — בלי אישור
 
 *📋 סיכום קבוצות*
 • _"תסכם את הקבוצה של..."_ — סיכום תמציתי
-• מתמקד בנושאים עיקריים, החלטות, ופעולות
 
 *↗️ העברת הודעות*
-• _"תעביר את ההודעה מהקבוצה לקלנר"_
-• העברה אמיתית (forward) — עם אישור
+• _"תעביר את ההודעה מהקבוצה לקלנר"_ — עם אישור
 
 *🔄 משימות יומיות חוזרות*
-• _"כל יום ב-8:00 תשלח סקירה מהקבוצות"_
-• _"כל בוקר תשלח בוקר טוב ליובל"_
-• אפשר לראות ולבטל: _"מה יש יומי?"_
+• _"כל יום ב-8:00 תשלח סקירה"_
+• _"מה יש יומי?"_ לצפייה ובטל
 
 *⏰ תזמון שליחה*
 • _"תשלח הודעה לדני בעוד 30 דקות"_
-• _"תזמן מייל מחר בבוקר"_
 • וואטסאפ + מייל · אישור כשנשלח
 
 *🎬 יצירת סרטונים (Remotion)*
-• *text* — כותרת לסטורי (1080x1920)
-• *quote* — ציטוט מעוצב (1080x1080)
-• *slideshow* — מצגת שקפים (1080x1920)
-• אנימציות מקצועיות, צבעים מותאמים, RTL
-• _"איזה סרטונים יש?"_ למדריך מלא
+• text / quote / slideshow · RTL · אנימציות
 
 *🎤 הודעות קוליות*
-• תמלול Whisper (עברית מלא)
-• אחרי תמלול — גישה לכל הכלים
-
-━━ *בסיס* ━━━━━━━━━━━━━━━
-
-*📅 יומן* — צפייה, הוספה, חיפוש, מחיקה
-*📧 Gmail* — קריאה, שליחה, תשובה, מחיקה, כוכב (RTL)
-*📇 אנשי קשר* — חיפוש, רשימה, פרטים מלאים
-*📲 שליחת וואטסאפ* — עם אישור
-*🌐 חיפוש אינטרנט* — כל שאלה
-*🖼️ תמונות* — ניתוח תמונות
-*💻 מחשב* — סוללה, קבצים, תהליכים, פקודות
-*🧠 זיכרון* — שומר מה שלימדת, לא שוכח
-*⚠️ אישור* — לפני שליחה/מחיקה. קריאה — חופשי
+• תמלול Whisper · אחרי תמלול — כל הכלים
 
 ━━━━━━━━━━━━━━━━━━━━
-💡 _פשוט תכתוב לי בשפה רגילה ואני אבין!_`;
+*⚙️ בסיס תמיד פעיל:*
+📅 יומן · 📧 Gmail · 📲 וואטסאפ · 🌐 אינטרנט
+🖼️ תמונות · 💻 מחשב · 🧠 זיכרון · ⚠️ אישור
+
+━━━━━━━━━━━━━━━━━━━━
+💡 _/עדכון לרשימה זו · /תפריט לעזרה_`;
 }
 
 // ─── Reminder ────────────────────────────────────────────────────
@@ -1417,6 +2087,68 @@ server.listen(PORT, () => {
 // ─── Health endpoint (for hosting keep-alive) ──────────────────
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', bot: botStatus, uptime: Math.round(process.uptime()), mem: Math.round(process.memoryUsage.rss?.() / 1048576 || process.memoryUsage().rss / 1048576) + 'MB' });
+});
+
+// ─── Google OAuth2 re-auth endpoints ───────────────────────────
+// For installed apps, Google allows any localhost port even if only "http://localhost" is registered.
+function _makeGoogleWebAuth() {
+  if (!process.env.GOOGLE_CREDENTIALS) throw new Error('GOOGLE_CREDENTIALS לא מוגדר');
+  const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+  const { client_id, client_secret } = creds.installed || creds.web;
+  const { google: googl } = require('googleapis');
+  const callbackUri = `http://localhost:${process.env.PORT || 3000}/auth/google/callback`;
+  return new googl.auth.OAuth2(client_id, client_secret, callbackUri);
+}
+
+app.get('/auth/google', (_req, res) => {
+  try {
+    const auth = _makeGoogleWebAuth();
+    const url = auth.generateAuthUrl({
+      access_type: 'offline',
+      prompt: 'consent',          // always forces new refresh_token
+      scope: [
+        'https://www.googleapis.com/auth/calendar',
+        'https://www.googleapis.com/auth/gmail.modify',
+        'https://www.googleapis.com/auth/contacts.readonly',
+      ],
+    });
+    res.redirect(url);
+  } catch (e) {
+    res.status(500).send(`<h2>שגיאה</h2><pre>${e.message}</pre>`);
+  }
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+  const { code, error } = req.query;
+  if (error) return res.status(400).send(`<html dir="rtl"><body><h2>גישה נדחתה</h2><p>${error}</p></body></html>`);
+  if (!code) return res.status(400).send('<html dir="rtl"><body><h2>קוד חסר</h2></body></html>');
+  try {
+    const auth = _makeGoogleWebAuth();
+    const { tokens } = await auth.getToken(code);
+    googleUpdateEnvToken(tokens);
+    googleResetAuthClient(); // force singleton rebuild with new token on next call
+    gmailResetAuth();        // same for Gmail
+    logger.info('✅ Google OAuth token refreshed via web callback');
+
+    // Notify owner via WhatsApp
+    setImmediate(async () => {
+      try {
+        const oc = await client.getChatById(OWNER_ID);
+        await botSend(oc, '✅ *Google מחובר מחדש!*\nהגישה ליומן ו-Gmail חודשה בהצלחה 🎉\nהטוקן נשמר אוטומטית.');
+      } catch (_) {}
+    });
+
+    res.send(`
+      <html dir="rtl"><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f0fdf4">
+        <h1 style="color:#16a34a">✅ Google מחובר מחדש!</h1>
+        <p>הגישה ליומן ו-Gmail חודשה בהצלחה.</p>
+        <p style="color:#6b7280">הטוקן נשמר אוטומטית. אפשר לסגור את החלון הזה.</p>
+      </body></html>
+    `);
+  } catch (e) {
+    logger.error('❌ Google OAuth callback error:', e.message);
+    res.status(500).send(`<html dir="rtl"><body><h2>שגיאה</h2><pre>${e.message}</pre></body></html>`);
+  }
 });
 
 // ─── Keep-alive self-ping (prevents free-tier hosting from sleeping) ─
