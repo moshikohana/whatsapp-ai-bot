@@ -36,4 +36,16 @@ seed /app/bot-memory.json            /app/data-seed/bot-memory.json       '[]'
 seed /app/bot-context.json           /app/data-seed/bot-context.json      '{"lastTopics":[]}'
 
 echo "✅ Data seeded — launching bot"
+
+# ─── Remove stale Chromium lock files ────────────────────────────
+# When a container crashes ungracefully (e.g. OOM, SIGKILL) the Chromium
+# SingletonLock stays on the persistent volume.  The next container sees
+# the lock from "another computer" (different hostname) and refuses to start.
+# Deleting it here is safe — Railway only ever runs one replica at a time.
+echo "🔓 Clearing any stale Chromium locks..."
+find /app/.wwebjs_auth -name "SingletonLock"   -delete 2>/dev/null || true
+find /app/.wwebjs_auth -name "SingletonCookie" -delete 2>/dev/null || true
+find /app/.wwebjs_auth -name "SingletonSocket" -delete 2>/dev/null || true
+echo "✅ Locks cleared"
+
 exec dumb-init node index.js
