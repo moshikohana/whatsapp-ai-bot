@@ -657,13 +657,14 @@ const client = new Client({
   puppeteer: {
     headless: true,
     executablePath: process.env.CHROMIUM_PATH || undefined,
+    // Increase CDP protocol timeout for cloud environments (Railway/Render are slower than local)
+    protocolTimeout: 120000, // 2 minutes (default is 30s)
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-extensions',
-      '--disable-background-networking',
       '--disable-default-apps',
       '--disable-translate',
       '--no-first-run',
