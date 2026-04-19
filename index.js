@@ -854,8 +854,9 @@ client.on('message_create', async (msg) => {
 
     // ── Owner-sent group photo → ownerGroups face recognition ──────
     // Must run BEFORE the self-chat-only check below.
-    // When owner sends a photo to a group: msg.from or msg.to ends with @g.us
-    const _isGroupMsg = msg.from?.endsWith('@g.us') || msg.to?.endsWith('@g.us');
+    // Supports: @g.us (modern groups), @g (legacy groups), @newsletter (WhatsApp Channels)
+    const _isGroupJid = (jid) => jid && (jid.endsWith('@g.us') || jid.endsWith('@g') || jid.includes('@newsletter') || jid.includes('@newsle'));
+    const _isGroupMsg = _isGroupJid(msg.from) || _isGroupJid(msg.to);
     if (msg.fromMe && msg.type === 'image' && _isGroupMsg) {
       // Guard: skip the bot's own result photos to prevent infinite loop
       if (msg.body?.includes(BOT_MARKER)) return;
@@ -1604,7 +1605,10 @@ async function handleFaceTest(msg, withBlur = false, withHighlight = false, high
 client.on('message', async (msg) => {
   try {
     if (msg.type !== 'image') return;
-    if (!msg.from?.endsWith('@g.us')) return;
+    // Support @g.us (modern groups), @g (legacy groups), @newsletter / @newsle (WhatsApp Channels)
+    const _fromJid = msg.from || '';
+    const _isGroup = _fromJid.endsWith('@g.us') || _fromJid.endsWith('@g') || _fromJid.includes('@newsletter') || _fromJid.includes('@newsle');
+    if (!_isGroup) return;
 
     const status = getFaceStatus();
     if (!status.enabled || status.totalReferences === 0) return;
