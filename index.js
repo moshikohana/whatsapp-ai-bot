@@ -2110,6 +2110,33 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', bot: botStatus, uptime: Math.round(process.uptime()), mem: Math.round(process.memoryUsage.rss?.() / 1048576 || process.memoryUsage().rss / 1048576) + 'MB' });
 });
 
+// ─── Test-send endpoint (diagnostic) ───────────────────────────
+// Hit /test-send from browser to verify the bot can send a WhatsApp message.
+app.get('/test-send', async (_req, res) => {
+  try {
+    const chat = await client.getChatById(OWNER_ID);
+    await chat.sendMessage(`🧪 *בדיקת חיבור מ-Railway*\n⏰ ${new Date().toLocaleTimeString('he-IL')}` + BOT_MARKER);
+    res.json({ ok: true, status: botStatus });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Restart-WA endpoint ────────────────────────────────────────
+// If the WhatsApp connection is alive but not delivering events (broken session),
+// hit /restart-wa from the browser → bot logs out, deletes session, exits cleanly.
+// Railway restarts the container and shows a fresh QR code.
+app.get('/restart-wa', async (_req, res) => {
+  logger.info('🔄 Manual WA restart triggered via /restart-wa');
+  res.json({ ok: true, msg: 'מתנתק מ-WhatsApp ומאתחל מחדש — סרוק QR חדש בעוד ~30 שניות' });
+  setTimeout(async () => {
+    try {
+      await client.logout(); // logs out + deletes local session files
+    } catch (_) {}
+    process.exit(0);        // Railway restarts, starts fresh with new QR
+  }, 1000);
+});
+
 // ─── Google OAuth2 re-auth endpoints ───────────────────────────
 // For installed apps, Google allows any localhost port even if only "http://localhost" is registered.
 function _makeGoogleWebAuth() {
@@ -2171,6 +2198,28 @@ app.get('/auth/google/callback', async (req, res) => {
     res.status(500).send(`<html dir="rtl"><body><h2>שגיאה</h2><pre>${e.message}</pre></body></html>`);
   }
 });
+
+// ─── Connection Watchdog ─────────────────────────────────────────
+// Checks every 20 min whether the WhatsApp Web page is truly alive.
+// If it becomes unresponsive (page crashed, WebSocket died) we logout
+// and exit so Railway restarts the container with a clean session.
+setInterval(async () => {
+  if (botStatus !== 'connected') return;
+  try {
+    // Ask the Chromium page to evaluate a tiny expression.
+    // If the CDP connection is dead this will throw/timeout.
+    const pageAlive = await Promise.race([
+      client.pupPage.evaluate(() => typeof window.Store !== 'undefined'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('watchdog-timeout')), 15000)),
+    ]);
+    logger.info(`🔍 Watchdog: page=${pageAlive ? 'alive' : 'dead'}`);
+    if (!pageAlive) throw new Error('Store not found');
+  } catch (e) {
+    logger.warn(`⚠️ Watchdog: connection dead (${e.message?.substring(0, 60)}) — restarting`);
+    try { await client.logout(); } catch (_) {}
+    process.exit(0); // Railway will restart cleanly
+  }
+}, 20 * 60 * 1000);
 
 // ─── Keep-alive self-ping (prevents free-tier hosting from sleeping) ─
 {
