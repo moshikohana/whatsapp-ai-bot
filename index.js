@@ -842,8 +842,23 @@ async function botSend(chat, text) {
   }
 }
 
+// ─── Face-recognition queue ───────────────────────────────────────
+// TensorFlow.js is single-threaded. Running 20+ detections concurrently
+// (e.g. when a burst of photos arrives) saturates the CPU and causes silent
+// failures. This queue serialises all face-detection work so photos are
+// processed one at a time.
+let _faceQueue = Promise.resolve();
+function _queueFace(fn) {
+  const next = _faceQueue
+    .then(fn)
+    .catch((err) => console.error('Face queue error:', err.message?.substring(0, 80)));
+  _faceQueue = next.catch(() => {}); // never let the chain break
+  return next;
+}
+
 // ─── Message Handler ─────────────────────────────────────────────
-const ALLOWED_TYPES = new Set(['chat', 'image', 'sticker', 'ptt', 'audio', 'document']);
+// album = multiple photos sent at once (WhatsApp bundles them)
+const ALLOWED_TYPES = new Set(['chat', 'image', 'sticker', 'ptt', 'audio', 'document', 'album']);
 
 client.on('message_create', async (msg) => {
   // 🔍 Early diagnostic log — visible in Railway/cloud logs
@@ -857,9 +872,11 @@ client.on('message_create', async (msg) => {
     // Supports: @g.us (modern groups), @g (legacy groups), @newsletter (WhatsApp Channels)
     const _isGroupJid = (jid) => jid && (jid.endsWith('@g.us') || jid.endsWith('@g') || jid.includes('@newsletter') || jid.includes('@newsle'));
     const _isGroupMsg = _isGroupJid(msg.from) || _isGroupJid(msg.to);
-    if (msg.fromMe && msg.type === 'image' && _isGroupMsg) {
+    if (msg.fromMe && (msg.type === 'image' || msg.type === 'album') && _isGroupMsg) {
       // Guard: skip the bot's own result photos to prevent infinite loop
       if (msg.body?.includes(BOT_MARKER)) return;
+      // Queue — don't run concurrent face detections (CPU saturation)
+      _queueFace(async () => {
       try {
         const status = getFaceStatus();
         if (status.enabled && status.totalReferences > 0 && (status.ownerGroups || []).length > 0) {
@@ -920,6 +937,7 @@ client.on('message_create', async (msg) => {
           console.error('Owner group photo error:', ownerGrpErr.message?.substring(0, 80));
         }
       }
+      }); // closes _queueFace
       return; // done — don't fall through to self-chat handler
     }
 
@@ -1603,8 +1621,10 @@ async function handleFaceTest(msg, withBlur = false, withHighlight = false, high
 // IMPORTANT: Only READS from groups. NEVER sends to groups.
 // Only forwards matching photos to OWNER's self-chat.
 client.on('message', async (msg) => {
+  // Queue — share the same face-detection queue to avoid concurrent TF.js
+  if (msg.type !== 'image' && msg.type !== 'album') return;
+  _queueFace(async () => {
   try {
-    if (msg.type !== 'image') return;
     // Support @g.us (modern groups), @g (legacy groups), @newsletter / @newsle (WhatsApp Channels)
     const _fromJid = msg.from || '';
     const _isGroup = _fromJid.endsWith('@g.us') || _fromJid.endsWith('@g') || _fromJid.includes('@newsletter') || _fromJid.includes('@newsle');
@@ -1727,6 +1747,7 @@ client.on('message', async (msg) => {
     if (err.message?.includes('not initialized')) return; // models still loading
     console.error('Photo filter error:', (err.message || '').substring(0, 80));
   }
+  }); // closes _queueFace
 });
 
 // ─── Image Handler ───────────────────────────────────────────────
