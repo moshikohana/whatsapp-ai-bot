@@ -1625,9 +1625,12 @@ client.on('message', async (msg) => {
   if (msg.type !== 'image' && msg.type !== 'album') return;
   _queueFace(async () => {
   try {
-    // Support @g.us (modern groups), @g (legacy groups), @newsletter / @newsle (WhatsApp Channels)
+    // Support @g.us (modern groups) and @g (legacy groups).
+    // NOTE: @newsletter JIDs are excluded here — getChat() on newsletters returns
+    // a different structure (no .description) and crashes this handler.
+    // Owner-sent newsletter photos are handled by message_create instead.
     const _fromJid = msg.from || '';
-    const _isGroup = _fromJid.endsWith('@g.us') || _fromJid.endsWith('@g') || _fromJid.includes('@newsletter') || _fromJid.includes('@newsle');
+    const _isGroup = _fromJid.endsWith('@g.us') || _fromJid.endsWith('@g');
     if (!_isGroup) return;
 
     const status = getFaceStatus();
@@ -2241,8 +2244,9 @@ setInterval(async () => {
     if (!pageAlive) throw new Error('Store not found');
   } catch (e) {
     logger.warn(`⚠️ Watchdog: connection dead (${e.message?.substring(0, 60)}) — restarting`);
-    try { await client.logout(); } catch (_) {}
-    process.exit(0); // Railway will restart cleanly
+    // Do NOT logout — that deletes the WhatsApp session (forces QR re-scan).
+    // Just exit; Railway/pm2 restarts the process with the session intact.
+    process.exit(1);
   }
 }, 20 * 60 * 1000);
 
