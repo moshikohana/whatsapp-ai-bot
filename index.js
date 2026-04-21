@@ -407,8 +407,8 @@ registerToolHandlers({
                 const rec = msgs.filter(m => m.body && m.timestamp > day);
                 groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
                 if (!rec.length) { sum += `*${ch.name}:* אין חדש\n\n`; continue; }
-                const d = rec.map(m => `${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,300)}`).join('\n');
-                const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות 24ש):\n${d}`, []);
+                const d = rec.map(m => `[${new Date(m.timestamp*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}] ${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,300)}`).join('\n');
+                const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות). כלול שעה ליד כל ידיעה עיקרית:\n${d}`, []);
                 sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
                 allGroupContent.push(`📌 ${ch.name}:\n${s}`);
               }
@@ -822,8 +822,8 @@ client.on('ready', () => {
             const rec = msgs.filter(m => m.body && m.timestamp > day);
             groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
             if (!rec.length) { sum += `*${ch.name}:* אין חדש\n\n`; continue; }
-            const dump = rec.map(m => `${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,300)}`).join('\n');
-            const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות 24ש):\n${dump}`, []);
+            const dump = rec.map(m => `[${new Date(m.timestamp*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}] ${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,300)}`).join('\n');
+            const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות). כלול שעה ליד כל ידיעה עיקרית:\n${dump}`, []);
             sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
             allGroupContent.push(`📌 ${ch.name}:\n${s}`);
           }
@@ -1026,6 +1026,26 @@ client.on('message_create', async (msg) => {
       }
       }); // closes _queueFace
       return; // done — don't fall through to self-chat handler
+    }
+
+    // ── Keyword alert for owner's OWN messages to groups ─────────────
+    // (messages fromMe=true to groups bypass the self-chat check below)
+    if (msg.fromMe && _isGroupMsg && msg.body && msg.body.length > 2 && !msg.body.includes(BOT_MARKER)) {
+      const { checkMessage: _ckOwner } = require('./src/keyword-alerts');
+      const _matchOwner = _ckOwner(msg.body, msg.to || msg.from);
+      if (_matchOwner) {
+        try {
+          const _grpCht = await msg.getChat();
+          const _ownerC = await client.getChatById(OWNER_ID);
+          const _preview = msg.body.substring(0, 120);
+          await botSend(_ownerC,
+            `🚨 *התראה — מילת מפתח: "${_matchOwner}"*\n` +
+            `📍 *${_grpCht.name || msg.to}*\n` +
+            `👤 אתה\n` +
+            `💬 "${_preview}${msg.body.length > 120 ? '...' : ''}"`
+          );
+        } catch (_oe) { /* silent */ }
+      }
     }
 
     const chatId = msg.from;
@@ -1279,7 +1299,7 @@ client.on('message_create', async (msg) => {
     }
 
     // ── Manual briefing trigger — runs scheduled group_summary now ─
-    if (/^(סקירה עכשיו|הרץ סקירה|סקירת קבוצות עכשיו|run briefing|briefing now|תסרוק קבוצות|תעשה סקירה עכשיו)/i.test(text)) {
+    if (/^(סקירה עכשיו|הרץ סקירה|סריקת קבוצות|סקירת קבוצות|run briefing|briefing now|תסרוק קבוצות|תסרוק לי|תעשה סקירה|תעשה לי סריקה)/i.test(text)) {
       const summaryTask = [...dailyTasks.values()].find(d => d.action === 'group_summary');
       if (!summaryTask) {
         await botSend(chat, `❌ לא נמצאה משימת סקירה מתוזמנת. הגדר אחת קודם.`);
@@ -1307,8 +1327,8 @@ client.on('message_create', async (msg) => {
               const rec = msgs.filter(m => m.body && m.timestamp > day);
               groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
               if (!rec.length) { sum += `*${ch.name}:* אין חדש מהיום\n\n`; continue; }
-              const d = rec.map(m => `${m._data?.notifyName || 'משתתף'}: ${m.body.substring(0, 300)}`).join('\n');
-              const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות):\n${d}`, []);
+              const d = rec.map(m => `[${new Date(m.timestamp*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}] ${m._data?.notifyName || 'משתתף'}: ${m.body.substring(0, 300)}`).join('\n');
+              const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות). כלול שעה ליד כל ידיעה עיקרית:\n${d}`, []);
               sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
               allGroupContent.push(`📌 ${ch.name}:\n${s}`);
             } catch (ge) { sum += `⚠️ "${gn}" — שגיאה: ${ge.message?.substring(0,40)}\n\n`; }
