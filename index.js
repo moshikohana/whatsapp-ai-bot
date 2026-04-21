@@ -1700,9 +1700,11 @@ client.on('message', async (msg) => {
           });
           registerFeedbackMsg(sentMsg);
         } catch (hlErr) {
-          console.error('Highlight failed, forwarding original:', hlErr.message?.substring(0, 60));
-          await msg.forward(OWNER_ID);
-          const sentMsg = await ownerChat.sendMessage(baseCaption + feedbackNote + BOT_MARKER);
+          console.error('Highlight failed, sending original:', hlErr.message?.substring(0, 60));
+          const origMedia = new MessageMedia(media.mimetype || 'image/jpeg', media.data, 'photo.jpg');
+          const sentMsg = await ownerChat.sendMessage(origMedia, {
+            caption: baseCaption + feedbackNote + BOT_MARKER,
+          });
           registerFeedbackMsg(sentMsg);
         }
       } else if (isBlurEnabled()) {
@@ -1715,14 +1717,19 @@ client.on('message', async (msg) => {
           });
           registerFeedbackMsg(sentMsg);
         } catch (blurErr) {
-          console.error('Blur failed, forwarding original:', blurErr.message?.substring(0, 60));
-          await msg.forward(OWNER_ID);
-          const sentMsg = await ownerChat.sendMessage(baseCaption + feedbackNote + BOT_MARKER);
+          console.error('Blur failed, sending original:', blurErr.message?.substring(0, 60));
+          const origMedia = new MessageMedia(media.mimetype || 'image/jpeg', media.data, 'photo.jpg');
+          const sentMsg = await ownerChat.sendMessage(origMedia, {
+            caption: baseCaption + feedbackNote + BOT_MARKER,
+          });
           registerFeedbackMsg(sentMsg);
         }
       } else {
-        await msg.forward(OWNER_ID);
-        const sentMsg = await ownerChat.sendMessage(baseCaption + feedbackNote + BOT_MARKER);
+        // Send media directly with BOT_MARKER in caption so message_create won't re-process it
+        const origMedia = new MessageMedia(media.mimetype || 'image/jpeg', media.data, 'photo.jpg');
+        const sentMsg = await ownerChat.sendMessage(origMedia, {
+          caption: baseCaption + feedbackNote + BOT_MARKER,
+        });
         registerFeedbackMsg(sentMsg);
       }
       // ── ownerGroup: reply directly to the photo with highlighted result ──
