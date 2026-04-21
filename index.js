@@ -646,6 +646,7 @@ registerToolHandlers({
         const s = ka.getStatus();
         return `🚨 *התראות מילות מפתח:*\n${s.enabled ? '✅ פעיל' : '❌ כבוי'}\n\nמילות מפתח (${s.keywords.length}):\n${s.keywords.map(k => `• ${k}`).join('\n')}`;
       }
+      case 'stats': return ka.getStats();
       case 'add': ka.addKeyword(keyword); return `✅ נוסף: "${keyword}"`;
       case 'remove': ka.removeKeyword(keyword); return `🗑️ הוסר: "${keyword}"`;
       case 'enable': ka.setEnabled(true); return '✅ התראות הופעלו';
@@ -1044,6 +1045,7 @@ client.on('message_create', async (msg) => {
             `👤 אתה\n` +
             `💬 "${_preview}${msg.body.length > 120 ? '...' : ''}"`
           );
+          require('./src/keyword-alerts').logAlert(_matchOwner, _grpCht.name || msg.to, 'אתה', _preview);
         } catch (_oe) { /* silent */ }
       }
     }
@@ -1056,7 +1058,7 @@ client.on('message_create', async (msg) => {
     if (!chatId.endsWith('@c.us') || !toId.endsWith('@c.us')) return;
     if (chatId !== OWNER_ID || toId !== OWNER_ID) return;
 
-    const rawBody = msg.body || '';
+    let rawBody = msg.body || '';
     if (rawBody.includes(BOT_MARKER)) return;
 
     // ── Bot sleep/wake toggle ─────────────────────────────────────
@@ -1076,8 +1078,9 @@ client.on('message_create', async (msg) => {
     }
     if (botSleeping) return;
 
-    // ── Reply-based feedback on forwarded photos ──────────────────
+    // ── Reply-based feedback on forwarded photos / quoted context ────
     // Any reply to a bot photo message → smart feedback handler
+    // Any other reply → include quoted text as context for Claude
     if (msg.hasQuotedMsg) {
       try {
         const quotedMsg = await msg.getQuotedMessage();
@@ -1091,6 +1094,11 @@ client.on('message_create', async (msg) => {
           stats.sent++;
           log({ time: ts(), from: 'בוטי', text: reply.substring?.(0, 120) || '📸', direction: 'out' });
           return;
+        }
+        // Not a photo — prepend quoted text as context so Claude understands the reply
+        const quotedText = (quotedMsg?.body || '').replace(BOT_MARKER, '').trim();
+        if (quotedText) {
+          rawBody = `[בתגובה ל: "${quotedText.substring(0, 300)}"]\n${rawBody}`;
         }
       } catch (quotedErr) {
         console.warn('Quoted msg lookup failed:', quotedErr.message?.substring(0, 60));
@@ -1826,6 +1834,7 @@ client.on('message', async (msg) => {
             `👤 ${_sender}\n` +
             `💬 "${_preview}${msg.body.length > 120 ? '...' : ''}"`
           );
+          require('./src/keyword-alerts').logAlert(_matchedKw, _groupNameForAlert, _sender, _preview);
         } catch (_alertErr) { /* silent */ }
       }
     }
@@ -2155,6 +2164,12 @@ async function route(chatId, text) {
   if (/מה (חדש|יש חדש|נשתנה|הוסף)|עדכונ(ים|י בוט)|changelog|פיצ'רים חדשים|מה בוצע/i.test(text.trim())) {
     const { formatChangelog } = require('./src/changelog');
     return formatChangelog(3);
+  }
+
+  // ─── Keyword alert stats / log ───────────────────────────────────
+  if (/^(דוח התראות|התראות מילות מפתח|דוח מילים|keyword stats|דוח מפתח|אזכורים)/i.test(text.trim())) {
+    const { getStats: _kwStats } = require('./src/keyword-alerts');
+    return _kwStats();
   }
 
   // ─── Stats command ───────────────────────────────────────────────
