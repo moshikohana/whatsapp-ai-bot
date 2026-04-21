@@ -398,22 +398,31 @@ registerToolHandlers({
             if (daily_action === 'group_summary') {
               let sum = `📋 *סקירה יומית — ${time}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
               const allGroupContent = [];
+              const groupStats = [];
               const {smartChat:sc} = require('./src/claude');
               for (const gn of (params.groups||[])) {
                 const cs = await client.getChats(); const ch = findChatByName(cs, gn);
-                if (!ch) { sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
-                const msgs = await safeFetchMessages(ch, 50); const day = Date.now()/1000-86400;
+                if (!ch) { groupStats.push({name:gn,count:0,lastTs:0}); sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
+                const msgs = await safeFetchMessages(ch, 150); const day = Date.now()/1000-86400;
                 const rec = msgs.filter(m => m.body && m.timestamp > day);
+                groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
                 if (!rec.length) { sum += `*${ch.name}:* אין חדש\n\n`; continue; }
-                const d = rec.map(m => `${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,150)}`).join('\n');
+                const d = rec.map(m => `${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,300)}`).join('\n');
                 const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות 24ש):\n${d}`, []);
                 sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
                 allGroupContent.push(`📌 ${ch.name}:\n${s}`);
               }
+              if (groupStats.length) {
+                const totalM = groupStats.reduce((a,g)=>a+g.count,0);
+                const hot = [...groupStats].sort((a,b)=>b.count-a.count)[0];
+                const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
+                const meter = `🌡️ *מד פעילות:* ${lvl}\n🏆 הכי פעיל: *${hot.name}* (${hot.count} הודעות)\n📊 סה"כ: *${totalM}* הודעות מ-${groupStats.filter(g=>g.count>0).length} קבוצות\n\n`;
+                sum = sum.replace('━━━━━━━━━━━━━━━━━━━━\n\n', '━━━━━━━━━━━━━━━━━━━━\n\n' + meter);
+              }
               await botSend(oc, sum);
               if (allGroupContent.length > 0) {
                 try {
-                  const synthesisPrompt = `אתה עוזר חכם לדובר ח"כ אריאל קלנר (ליכוד). קראת את הסיכומים מהקבוצות הפוליטיות. כתוב ניתוח מודיעין פוליטי תמציתי:\n\n${allGroupContent.join('\n\n')}\n\nכתוב בדיוק בפורמט הזה:\n\n🔥🔥 *נושאים חוצי-קבוצות (הכי חם):*\n• [נושא]: מוזכר ב-[N] קבוצות ([שמות])\n(אם אין נושאים שחוזרים ב-3 קבוצות ומעלה — דלג על הסעיף הזה לגמרי)\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא ראשון + שם הקבוצה]\n2. [נושא שני + שם הקבוצה]\n3. [נושא שלישי + שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא אחד שקלנר יכול להגיב עליו בהתאם לעמדותיו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית אחת — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
+                  const synthesisPrompt = `אתה עוזר מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד). קראת סיכומים מהקבוצות הבאות:\n\n${allGroupContent.join('\n\n')}\n\nכתוב ניתוח בפורמט זה בדיוק:\n\n🔁 *כפילויות — ידיעות שחוזרות ביותר מקבוצה אחת:*\n• [ידיעה מדויקת]: ([שם קבוצה א], [שם קבוצה ב])\n(אם אין כפילויות — כתוב: "אין ידיעות כפולות")\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא — מקור: שם הקבוצה]\n2. [נושא — מקור: שם הקבוצה]\n3. [נושא — מקור: שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא שקלנר יכול להגיב עליו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
                   const synthesis = await sc(synthesisPrompt, []);
                   await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
                   // ── Post drafts ────────────────────────────────────────────
@@ -804,22 +813,31 @@ client.on('ready', () => {
         if (d.action === 'group_summary') {
           let sum = `📋 *סקירה יומית — ${d.time}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
           const allGroupContent = [];
+          const groupStats = [];
           const {smartChat:sc} = require('./src/claude');
           for (const gn of (d.params.groups||[])) {
             const cs = await client.getChats(); const ch = findChatByName(cs, gn);
-            if (!ch) { sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
-            const msgs = await safeFetchMessages(ch, 50); const day = Date.now()/1000-86400;
+            if (!ch) { groupStats.push({name:gn,count:0,lastTs:0}); sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
+            const msgs = await safeFetchMessages(ch, 150); const day = Date.now()/1000-86400;
             const rec = msgs.filter(m => m.body && m.timestamp > day);
+            groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
             if (!rec.length) { sum += `*${ch.name}:* אין חדש\n\n`; continue; }
-            const dump = rec.map(m => `${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,150)}`).join('\n');
+            const dump = rec.map(m => `${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,300)}`).join('\n');
             const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות 24ש):\n${dump}`, []);
             sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
             allGroupContent.push(`📌 ${ch.name}:\n${s}`);
           }
+          if (groupStats.length) {
+            const totalM = groupStats.reduce((a,g)=>a+g.count,0);
+            const hot = [...groupStats].sort((a,b)=>b.count-a.count)[0];
+            const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
+            const meter = `🌡️ *מד פעילות:* ${lvl}\n🏆 הכי פעיל: *${hot.name}* (${hot.count} הודעות)\n📊 סה"כ: *${totalM}* הודעות מ-${groupStats.filter(g=>g.count>0).length} קבוצות\n\n`;
+            sum = sum.replace('━━━━━━━━━━━━━━━━━━━━\n\n', '━━━━━━━━━━━━━━━━━━━━\n\n' + meter);
+          }
           await botSend(oc, sum);
           if (allGroupContent.length > 0) {
             try {
-              const synthesisPrompt = `אתה עוזר חכם לדובר ח"כ אריאל קלנר (ליכוד). קראת את הסיכומים מהקבוצות הפוליטיות. כתוב ניתוח מודיעין פוליטי תמציתי:\n\n${allGroupContent.join('\n\n')}\n\nכתוב בדיוק בפורמט הזה:\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא ראשון + שם הקבוצה]\n2. [נושא שני + שם הקבוצה]\n3. [נושא שלישי + שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא אחד שקלנר יכול להגיב עליו בהתאם לעמדותיו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית אחת — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
+              const synthesisPrompt = `אתה עוזר מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד). קראת סיכומים מהקבוצות הבאות:\n\n${allGroupContent.join('\n\n')}\n\nכתוב ניתוח בפורמט זה בדיוק:\n\n🔁 *כפילויות — ידיעות שחוזרות ביותר מקבוצה אחת:*\n• [ידיעה מדויקת]: ([שם קבוצה א], [שם קבוצה ב])\n(אם אין כפילויות — כתוב: "אין ידיעות כפולות")\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא — מקור: שם הקבוצה]\n2. [נושא — מקור: שם הקבוצה]\n3. [נושא — מקור: שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא שקלנר יכול להגיב עליו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
               const synthesis = await sc(synthesisPrompt, []);
               await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
             } catch (synthErr) { logger.warn('⚠️ synthesis failed:', synthErr.message); }
@@ -1272,27 +1290,39 @@ client.on('message_create', async (msg) => {
       setImmediate(async () => {
         try {
           const oc = await client.getChatById(OWNER_ID);
+          // Smart time window: from midnight today (not 24h ago) so morning scans cover today only
+          const nowHour = new Date().getHours();
+          const todayStart = (() => { const _d = new Date(); _d.setHours(0,0,0,0); return _d.getTime() / 1000; })();
+          const day = nowHour < 20 ? todayStart : Date.now() / 1000 - 86400;
           let sum = `📋 *סקירה ידנית — ${new Date().toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
           const allGroupContent = [];
+          const groupStats = [];
           const { smartChat: sc } = require('./src/claude');
-          const day = Date.now() / 1000 - 86400;
           for (const gn of (summaryTask.params.groups || [])) {
             try {
               const cs = await client.getChats();
               const ch = findChatByName(cs, gn);
-              if (!ch) { sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
-              const msgs = await safeFetchMessages(ch, 50);
+              if (!ch) { groupStats.push({name:gn,count:0,lastTs:0}); sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
+              const msgs = await safeFetchMessages(ch, 150);
               const rec = msgs.filter(m => m.body && m.timestamp > day);
-              if (!rec.length) { sum += `*${ch.name}:* אין חדש ב-24 שעות\n\n`; continue; }
-              const d = rec.map(m => `${m._data?.notifyName || 'משתתף'}: ${m.body.substring(0, 150)}`).join('\n');
+              groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
+              if (!rec.length) { sum += `*${ch.name}:* אין חדש מהיום\n\n`; continue; }
+              const d = rec.map(m => `${m._data?.notifyName || 'משתתף'}: ${m.body.substring(0, 300)}`).join('\n');
               const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות):\n${d}`, []);
               sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
               allGroupContent.push(`📌 ${ch.name}:\n${s}`);
             } catch (ge) { sum += `⚠️ "${gn}" — שגיאה: ${ge.message?.substring(0,40)}\n\n`; }
           }
+          if (groupStats.length) {
+            const totalM = groupStats.reduce((a,g)=>a+g.count,0);
+            const hot = [...groupStats].sort((a,b)=>b.count-a.count)[0];
+            const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
+            const meter = `🌡️ *מד פעילות:* ${lvl}\n🏆 הכי פעיל: *${hot.name}* (${hot.count} הודעות)\n📊 סה"כ: *${totalM}* הודעות מ-${groupStats.filter(g=>g.count>0).length} קבוצות\n\n`;
+            sum = sum.replace('━━━━━━━━━━━━━━━━━━━━\n\n', '━━━━━━━━━━━━━━━━━━━━\n\n' + meter);
+          }
           await botSend(oc, sum);
           if (allGroupContent.length > 0) {
-            const synthPrompt = `אתה עוזר לדובר ח"כ אריאל קלנר (ליכוד). כתוב ניתוח מודיעין פוליטי תמציתי:\n\n${allGroupContent.join('\n\n')}\n\n🔥 *TOP 3 — הכי חם:*\n1.\n2.\n3.\n\n💡 *זווית קלנר:*\n\n📲 *פעולה מוצעת:*`;
+            const synthPrompt = `אתה עוזר מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד). קראת סיכומים מהקבוצות הבאות:\n\n${allGroupContent.join('\n\n')}\n\nכתוב ניתוח בפורמט זה בדיוק:\n\n🔁 *כפילויות — ידיעות שחוזרות ביותר מקבוצה אחת:*\n• [ידיעה מדויקת]: ([שם קבוצה א], [שם קבוצה ב])\n(אם אין כפילויות — כתוב: "אין ידיעות כפולות")\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא — מקור: שם הקבוצה]\n2. [נושא — מקור: שם הקבוצה]\n3. [נושא — מקור: שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא שקלנר יכול להגיב עליו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
             const synthesis = await sc(synthPrompt, []);
             await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
           }
@@ -1756,26 +1786,17 @@ async function handleFaceTest(msg, withBlur = false, withHighlight = false, high
 // IMPORTANT: Only READS from groups. NEVER sends to groups.
 // Only forwards matching photos to OWNER's self-chat.
 client.on('message', async (msg) => {
-  // Queue — share the same face-detection queue to avoid concurrent TF.js
-  if (msg.type !== 'image' && msg.type !== 'album') return;
-  _queueFace(async () => {
-  try {
-    // Support @g.us (modern groups) and @g (legacy groups).
-    // NOTE: @newsletter JIDs are excluded here — getChat() on newsletters returns
-    // a different structure (no .description) and crashes this handler.
-    // Owner-sent newsletter photos are handled by message_create instead.
-    const _fromJid = msg.from || '';
-    const _isGroup = _fromJid.endsWith('@g.us') || _fromJid.endsWith('@g');
-    if (!_isGroup) return;
-
-    // ── Keyword alert ─────────────────────────────────────────────
-    if (msg.body && msg.body.length > 2) {
+  // ── Keyword alert — runs for ALL message types (text, image, video…) ────────
+  {
+    const _kFromJid = msg.from || '';
+    const _kIsGroup = _kFromJid.endsWith('@g.us') || _kFromJid.endsWith('@g');
+    if (_kIsGroup && msg.body && msg.body.length > 2) {
       const { checkMessage: _checkKw } = require('./src/keyword-alerts');
-      const _matchedKw = _checkKw(msg.body, _fromJid);
+      const _matchedKw = _checkKw(msg.body, _kFromJid);
       if (_matchedKw) {
         try {
           const _alertChat = await msg.getChat();
-          const _groupNameForAlert = _alertChat.name || _fromJid;
+          const _groupNameForAlert = _alertChat.name || _kFromJid;
           const _sender = msg._data?.notifyName || 'מישהו';
           const _preview = msg.body.substring(0, 120);
           const _ownerC = await client.getChatById(OWNER_ID);
@@ -1788,7 +1809,18 @@ client.on('message', async (msg) => {
         } catch (_alertErr) { /* silent */ }
       }
     }
-    // ── End keyword alert ─────────────────────────────────────────
+  }
+  // Queue — share the same face-detection queue to avoid concurrent TF.js
+  if (msg.type !== 'image' && msg.type !== 'album') return;
+  _queueFace(async () => {
+  try {
+    // Support @g.us (modern groups) and @g (legacy groups).
+    // NOTE: @newsletter JIDs are excluded here — getChat() on newsletters returns
+    // a different structure (no .description) and crashes this handler.
+    // Owner-sent newsletter photos are handled by message_create instead.
+    const _fromJid = msg.from || '';
+    const _isGroup = _fromJid.endsWith('@g.us') || _fromJid.endsWith('@g');
+    if (!_isGroup) return;
 
     const status = getFaceStatus();
     if (!status.enabled || status.totalReferences === 0) return;
