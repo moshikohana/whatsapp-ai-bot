@@ -413,9 +413,15 @@ registerToolHandlers({
               await botSend(oc, sum);
               if (allGroupContent.length > 0) {
                 try {
-                  const synthesisPrompt = `אתה עוזר חכם לדובר ח"כ אריאל קלנר (ליכוד). קראת את הסיכומים מהקבוצות הפוליטיות. כתוב ניתוח מודיעין פוליטי תמציתי:\n\n${allGroupContent.join('\n\n')}\n\nכתוב בדיוק בפורמט הזה:\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא ראשון + שם הקבוצה]\n2. [נושא שני + שם הקבוצה]\n3. [נושא שלישי + שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא אחד שקלנר יכול להגיב עליו בהתאם לעמדותיו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית אחת — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
+                  const synthesisPrompt = `אתה עוזר חכם לדובר ח"כ אריאל קלנר (ליכוד). קראת את הסיכומים מהקבוצות הפוליטיות. כתוב ניתוח מודיעין פוליטי תמציתי:\n\n${allGroupContent.join('\n\n')}\n\nכתוב בדיוק בפורמט הזה:\n\n🔥🔥 *נושאים חוצי-קבוצות (הכי חם):*\n• [נושא]: מוזכר ב-[N] קבוצות ([שמות])\n(אם אין נושאים שחוזרים ב-3 קבוצות ומעלה — דלג על הסעיף הזה לגמרי)\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא ראשון + שם הקבוצה]\n2. [נושא שני + שם הקבוצה]\n3. [נושא שלישי + שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא אחד שקלנר יכול להגיב עליו בהתאם לעמדותיו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית אחת — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
                   const synthesis = await sc(synthesisPrompt, []);
                   await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
+                  // ── Post drafts ────────────────────────────────────────────
+                  try {
+                    const draftsPrompt = `בהתבסס על הניתוח הפוליטי הבא, כתוב שתי טיוטות פוסט עבור ח"כ אריאל קלנר (ליכוד) בגוף ראשון:\n\n${synthesis}\n\nכתוב בדיוק בפורמט הזה:\n\n🐦 *טיוטה ל-X (טוויטר):*\n[טקסט קצר, מקסימום 240 תווים, גוף ראשון, ישיר ואגרסיבי, ציוני, ללא האשטאגים]\n\n📘 *טיוטה לפייסבוק:*\n[2-3 משפטים, גוף ראשון, עם הקשר ורקע, אישי יותר]`;
+                    const drafts = await sc(draftsPrompt, []);
+                    await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n✍️ *טיוטות פוסטים:*\n\n${drafts}`);
+                  } catch (draftsErr) { logger.warn('⚠️ drafts generation failed:', draftsErr.message); }
                 } catch (synthErr) { logger.warn('⚠️ synthesis failed:', synthErr.message); }
               }
             } else if (daily_action === 'media_briefing') {
@@ -610,6 +616,18 @@ registerToolHandlers({
       default: return `פעולה לא מוכרת: ${action}`;
     }
   },
+
+  // ─── Media Tracker ────────────────────────────────────────────
+  media_tracker: async ({ action, contact_id, topic }) => {
+    const { listContacts, logOutreach, markReplied, resetContact } = require('./src/media-tracker');
+    switch (action) {
+      case 'list':    return listContacts();
+      case 'log':     return logOutreach(contact_id, topic);
+      case 'replied': return markReplied(contact_id);
+      case 'reset':   return resetContact(contact_id);
+      default:        return `פעולה לא מוכרת: ${action}`;
+    }
+  },
 });
 
 // ─── Express ─────────────────────────────────────────────────────
@@ -641,6 +659,21 @@ const OWNER_ID = '972524243250@c.us';
 const BOT_MARKER = '\u200B\u200C\u200B';
 const BOT_SIG = '\n\n— *🤖 בוטי*';
 let lastVideoPath = null;
+
+// ─── Bot sleep mode ──────────────────────────────────────────────
+let botSleeping = false;
+
+// ─── Daily face match tracker (resets each day) ──────────────────
+const _dailyFaceMatches = new Map(); // "YYYY-MM-DD" → Map<name, {count, groups:Set}>
+function _trackFaceMatch(name, groupName) {
+  const day = new Date().toISOString().slice(0, 10);
+  if (!_dailyFaceMatches.has(day)) _dailyFaceMatches.set(day, new Map());
+  const dayMap = _dailyFaceMatches.get(day);
+  if (!dayMap.has(name)) dayMap.set(name, { count: 0, groups: new Set() });
+  const entry = dayMap.get(name);
+  entry.count++;
+  entry.groups.add(groupName);
+}
 
 // ─── Scheduled messages system ──────────────────────────────────
 const scheduledMessages = new Map(); // id → { type, target, message, subject?, timer, sendAt, label }
@@ -951,6 +984,23 @@ client.on('message_create', async (msg) => {
 
     const rawBody = msg.body || '';
     if (rawBody.includes(BOT_MARKER)) return;
+
+    // ── Bot sleep/wake toggle ─────────────────────────────────────
+    if (rawBody.trim() === 'היי בוטי') {
+      botSleeping = false;
+      try { await msg.react('✅'); } catch (_) {}
+      const _wakeChat = await client.getChatById(OWNER_ID);
+      await botSend(_wakeChat, 'בוטי ער ומוכן לפקודות! 🤖✅');
+      return;
+    }
+    if (rawBody.trim() === 'ביי בוטי') {
+      botSleeping = true;
+      try { await msg.react('💤'); } catch (_) {}
+      const _sleepChat = await client.getChatById(OWNER_ID);
+      await botSend(_sleepChat, 'בוטי הולך לישון... 💤 שלח "היי בוטי" כדי להעיר אותי.');
+      return;
+    }
+    if (botSleeping) return;
 
     // ── Reply-based feedback on forwarded photos ──────────────────
     // Any reply to a bot photo message → smart feedback handler
@@ -1661,6 +1711,7 @@ client.on('message', async (msg) => {
     if (matches.length > 0) {
       const match = matches[0];
       console.log(`🎀 Match: ${match.name} (${match.confidence}%) from "${groupName}"`);
+      _trackFaceMatch(match.name, groupName);
 
       const ownerChat = await client.getChatById(OWNER_ID);
       const sender = msg._data?.notifyName || 'מישהו';
@@ -1928,6 +1979,12 @@ async function route(chatId, text) {
 
   // Reminder (keep as special — needs setTimeout)
   if (/^\/(תזכורת|remind)\s+/i.test(text)) return handleReminder(chatId, text.replace(/^\/(תזכורת|remind)\s+/i, ''));
+
+  // ─── "מה חדש בבוט" natural language detection ───────────────────
+  if (/מה (חדש|יש חדש|נשתנה|הוסף)|עדכונ(ים|י בוט)|changelog|פיצ'רים חדשים|מה בוצע/i.test(text.trim())) {
+    const { formatChangelog } = require('./src/changelog');
+    return formatChangelog(3);
+  }
 
   // ─── Ruflo-inspired: Tiered routing ─────────────────────────
   // Tier 1: Fast-path simple greetings without API call
@@ -2256,6 +2313,31 @@ setInterval(async () => {
     process.exit(1);
   }
 }, 20 * 60 * 1000);
+
+// ─── Daily 20:00 face-match summary ─────────────────────────────
+nodeCron.schedule('0 20 * * *', async () => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const dayMap = _dailyFaceMatches.get(today);
+    // Clean up days older than today
+    for (const key of _dailyFaceMatches.keys()) {
+      if (key !== today) _dailyFaceMatches.delete(key);
+    }
+    if (!dayMap || dayMap.size === 0) return; // nothing detected today — silent
+    let lines = ['📊 *סיכום יומי — זיהוי פנים*', ''];
+    for (const [name, { count, groups }] of dayMap.entries()) {
+      const groupList = [...groups].join(', ');
+      lines.push(`👤 *${name}* — זוהה *${count}* פעמים`);
+      lines.push(`   📍 קבוצות: ${groupList}`);
+    }
+    lines.push('');
+    lines.push(`🗓️ ${new Date().toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' })}`);
+    const ownerChat = await client.getChatById(OWNER_ID);
+    await botSend(ownerChat, lines.join('\n'));
+  } catch (cronErr) {
+    console.error('Daily face summary cron error:', cronErr.message?.substring(0, 80));
+  }
+}, { timezone: 'Asia/Jerusalem' });
 
 // ─── Keep-alive self-ping (prevents free-tier hosting from sleeping) ─
 {
