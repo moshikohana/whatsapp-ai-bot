@@ -628,6 +628,37 @@ registerToolHandlers({
       default:        return `פעולה לא מוכרת: ${action}`;
     }
   },
+
+  // ─── Keyword Alerts ──────────────────────────────────────────
+  keyword_alerts: async ({ action, keyword, enabled }) => {
+    const ka = require('./src/keyword-alerts');
+    switch (action) {
+      case 'status': {
+        const s = ka.getStatus();
+        return `🚨 *התראות מילות מפתח:*\n${s.enabled ? '✅ פעיל' : '❌ כבוי'}\n\nמילות מפתח (${s.keywords.length}):\n${s.keywords.map(k => `• ${k}`).join('\n')}`;
+      }
+      case 'add': ka.addKeyword(keyword); return `✅ נוסף: "${keyword}"`;
+      case 'remove': ka.removeKeyword(keyword); return `🗑️ הוסר: "${keyword}"`;
+      case 'enable': ka.setEnabled(true); return '✅ התראות הופעלו';
+      case 'disable': ka.setEnabled(false); return '🔕 התראות כובו';
+      default: return `פעולה לא מוכרת: ${action}`;
+    }
+  },
+
+  // ─── Templates Library ────────────────────────────────────────
+  templates: async ({ action, name, content }) => {
+    const tmpl = require('./src/templates');
+    switch (action) {
+      case 'save': return tmpl.saveTemplate(name, content);
+      case 'get': {
+        const t = tmpl.getTemplate(name);
+        return t || `❌ תבנית "${name}" לא נמצאה. הצג רשימה עם "תבניות"`;
+      }
+      case 'list': return tmpl.listTemplates();
+      case 'delete': return tmpl.deleteTemplate(name);
+      default: return `פעולה לא מוכרת: ${action}`;
+    }
+  },
 });
 
 // ─── Express ─────────────────────────────────────────────────────
@@ -665,6 +696,11 @@ let botSleeping = false;
 
 // ─── Daily face match tracker (resets each day) ──────────────────
 const _dailyFaceMatches = new Map(); // "YYYY-MM-DD" → Map<name, {count, groups:Set}>
+
+// ─── Weekly face photo buffer (for Saturday album) ────────────────
+const _weeklyFacePhotos = []; // { name, base64, groupName, date, confidence }
+const MAX_WEEKLY_PHOTOS = 50; // keep max 50 photos
+
 function _trackFaceMatch(name, groupName) {
   const day = new Date().toISOString().slice(0, 10);
   if (!_dailyFaceMatches.has(day)) _dailyFaceMatches.set(day, new Map());
@@ -1376,6 +1412,28 @@ async function handleVoice(msg, chatId) {
 
     updateContext(`[הודעה קולית]: ${transcript}`, reply);
 
+    // ── Auto-extract action items from voice note ──────────────────
+    if (transcript.length > 50) {
+      setImmediate(async () => {
+        try {
+          const { smartChat: _scv } = require('./src/claude');
+          const extractPrompt = `מהתמלול הבא, אם יש פריטים שדורשים פעולה — חלץ אותם בלבד. אם אין — השב "none".
+תמלול: "${transcript}"
+חלץ אם קיים:
+- 📅 אירועי יומן: [שם, תאריך/שעה] → השתמש ב-calendar add
+- ✅ משימות: [מה לעשות]
+- 📞 להתקשר ל: [שם]
+אם חלצת פריטים — הוסף לזיכרון עם save_memory ולוח שנה עם calendar.
+אם "none" — אל תשלח כלום.`;
+          const extracted = await _scv(extractPrompt, []);
+          if (extracted && extracted.toLowerCase() !== 'none' && extracted.trim().length > 10) {
+            const _oc = await client.getChatById(OWNER_ID);
+            await botSend(_oc, `📋 *חולץ מהודעה קולית:*\n${extracted}`);
+          }
+        } catch (_) { /* silent */ }
+      });
+    }
+
     return `🎤 _"${transcript}"_\n\n${reply}`;
   } catch (err) {
     console.error('שגיאת הודעה קולית:', err.message);
@@ -1509,6 +1567,33 @@ async function handlePhotoFeedback(feedbackText, photoData, quotedMsgId) {
     } catch {}
 
     console.log(`📣 Feedback intent: ${intent.intent} → action: ${intent.action}`);
+
+    // ─── Auto-calibration tracking ──────────────────────────────────────
+    try {
+      const _fbStatsPath = require('path').join(__dirname, 'data', 'face-feedback-stats.json');
+      const _fbStats = require('fs').existsSync(_fbStatsPath)
+        ? JSON.parse(require('fs').readFileSync(_fbStatsPath, 'utf8'))
+        : { correct: 0, incorrect: 0, threshold: null };
+
+      if (intent.intent === 'confirmed' || intent.action === 'confirmed' || intent.intent === 'correct' || intent.action === 'add_reference') _fbStats.correct++;
+      if (intent.intent === 'rejected' || intent.action === 'rejected' || intent.intent === 'wrong_person' || intent.action === 'false_positive') _fbStats.incorrect++;
+      _fbStats.threshold = getFaceStatus().threshold;
+
+      require('fs').writeFileSync(_fbStatsPath, JSON.stringify(_fbStats, null, 2));
+
+      // Suggest calibration if enough data
+      const total = _fbStats.correct + _fbStats.incorrect;
+      if (total > 0 && total % 10 === 0) {
+        const fpRate = _fbStats.incorrect / total;
+        if (fpRate > 0.4) {
+          const _oc2 = await client.getChatById(OWNER_ID);
+          await botSend(_oc2, `💡 *הצעת כיול:* ${Math.round(fpRate * 100)}% מהזיהויים אינם נכונים (${_fbStats.incorrect}/${total}).\nכדאי להעלות את הסף. אמור "העלה סף זיהוי" לכיוון.`);
+        } else if (fpRate < 0.1 && _fbStats.correct > 5) {
+          const _oc2 = await client.getChatById(OWNER_ID);
+          await botSend(_oc2, `💡 *הצעת כיול:* ${Math.round(fpRate * 100)}% שגיאות בלבד — הזיהוי מדויק מאוד! אפשר להוריד מעט את הסף לתפוס יותר תמונות.`);
+        }
+      }
+    } catch (_calibErr) { /* silent */ }
 
     // ── Execute the action ─────────────────────────────────────
     if (intent.action === 'add_reference' || intent.intent === 'correct') {
@@ -1683,6 +1768,28 @@ client.on('message', async (msg) => {
     const _isGroup = _fromJid.endsWith('@g.us') || _fromJid.endsWith('@g');
     if (!_isGroup) return;
 
+    // ── Keyword alert ─────────────────────────────────────────────
+    if (msg.body && msg.body.length > 2) {
+      const { checkMessage: _checkKw } = require('./src/keyword-alerts');
+      const _matchedKw = _checkKw(msg.body, _fromJid);
+      if (_matchedKw) {
+        try {
+          const _alertChat = await msg.getChat();
+          const _groupNameForAlert = _alertChat.name || _fromJid;
+          const _sender = msg._data?.notifyName || 'מישהו';
+          const _preview = msg.body.substring(0, 120);
+          const _ownerC = await client.getChatById(OWNER_ID);
+          await botSend(_ownerC,
+            `🚨 *התראה — מילת מפתח: "${_matchedKw}"*\n` +
+            `📍 *${_groupNameForAlert}*\n` +
+            `👤 ${_sender}\n` +
+            `💬 "${_preview}${msg.body.length > 120 ? '...' : ''}"`
+          );
+        } catch (_alertErr) { /* silent */ }
+      }
+    }
+    // ── End keyword alert ─────────────────────────────────────────
+
     const status = getFaceStatus();
     if (!status.enabled || status.totalReferences === 0) return;
     if (status.monitoredGroups.length === 0) return;
@@ -1712,6 +1819,18 @@ client.on('message', async (msg) => {
       const match = matches[0];
       console.log(`🎀 Match: ${match.name} (${match.confidence}%) from "${groupName}"`);
       _trackFaceMatch(match.name, groupName);
+
+      // Save for weekly album
+      if (_weeklyFacePhotos.length < MAX_WEEKLY_PHOTOS) {
+        _weeklyFacePhotos.push({
+          name: match.name,
+          base64: media.data,
+          mimetype: media.mimetype || 'image/jpeg',
+          groupName,
+          date: new Date().toLocaleDateString('he-IL'),
+          confidence: match.confidence,
+        });
+      }
 
       const ownerChat = await client.getChatById(OWNER_ID);
       const sender = msg._data?.notifyName || 'מישהו';
@@ -1984,6 +2103,40 @@ async function route(chatId, text) {
   if (/מה (חדש|יש חדש|נשתנה|הוסף)|עדכונ(ים|י בוט)|changelog|פיצ'רים חדשים|מה בוצע/i.test(text.trim())) {
     const { formatChangelog } = require('./src/changelog');
     return formatChangelog(3);
+  }
+
+  // ─── Stats command ───────────────────────────────────────────────
+  if (/^סטטיסטיקות|^stats|^כמה הודעות/i.test(text.trim())) {
+    const _uptime = process.uptime();
+    const _uptimeStr = _uptime > 3600
+      ? `${Math.floor(_uptime / 3600)}ש׳ ${Math.floor((_uptime % 3600) / 60)}ד׳`
+      : `${Math.floor(_uptime / 60)}ד׳`;
+    return `📊 *סטטיסטיקות בוטי*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `⏱️ זמן פעילות: ${_uptimeStr}\n` +
+      `📨 הודעות שהתקבלו: ${stats.received || 0}\n` +
+      `📤 תשובות שנשלחו: ${stats.sent || 0}\n` +
+      `🎀 זיהויי פנים היום: ${[..._dailyFaceMatches.values()].reduce((s, m) => s + [...m.values()].reduce((a, e) => a + e.count, 0), 0)}`;
+  }
+
+  // ─── Quote accuracy checker ──────────────────────────────────────
+  const _quoteMatch = text.match(/^(?:בדוק ציטוט|האם קלנר אמר|נכון ש)[:\s]*["״]?(.+?)["״]?$/i)
+    || text.match(/^ציטוט[:\s]+(.+)/i);
+  if (_quoteMatch) {
+    const _quote = _quoteMatch[1].trim();
+    const { smartChat: _sc } = require('./src/claude');
+    const _checkPrompt = `בדוק את הדיוק של הציטוט הבא המיוחס לח"כ אריאל קלנר:\n\n"${_quote}"\n\n1. חפש ברשת (web_search) אם קלנר אמר את זה — ציין מקור ותאריך\n2. השווה לעמדותיו הידועות מהזיכרון\n3. קבע: ✅ נכון | ⚠️ חלקי/מוצא מהקשר | ❌ שגוי/המצאה\n\nפרמט:\n🔍 *בדיקת ציטוט*\n"${_quote}"\n\n📊 *תוצאה:* [✅/⚠️/❌]\n📝 *הסבר:* [מה מצאת]\n📎 *מקור:* [קישור אם נמצא]\n💬 *מה הוא אמר בפועל:* [אם נמצא גרסה מדויקת יותר]`;
+    return _sc(_checkPrompt, []);
+  }
+
+  // ─── Interview prep ──────────────────────────────────────────────
+  const _interviewMatch = text.match(/^הכן אות[יי] לראיון(?:\s+(?:ב-?|על\s+))(.+)/i)
+    || text.match(/^הכנת ראיון[:\s]+(.+)/i)
+    || text.match(/^interview prep[:\s]+(.+)/i);
+  if (_interviewMatch) {
+    const _topic = _interviewMatch[1].trim();
+    const { smartChat: _sc } = require('./src/claude');
+    const _prepPrompt = `הכן ח"כ אריאל קלנר (ליכוד) לראיון על הנושא: "${_topic}".\nבהתבסס על עמדותיו הידועות.\n\nכתוב בדיוק בפורמט הזה:\n\n🎙️ *הכנה לראיון: ${_topic}*\n\n📌 *3 נקודות מפתח לפתוח בהן:*\n1. [נקודה ראשונה — חזקה, בגוף ראשון]\n2. [נקודה שנייה]\n3. [נקודה שלישית]\n\n❓ *שאלות צפויות + תשובות מוכנות:*\nש: [שאלה קשה צפויה]\nת: [תשובה חדה ומוכנה, בגוף ראשון]\n\nש: [שאלה נוספת]\nת: [תשובה]\n\nש: [שאלה נוספת]\nת: [תשובה]\n\n⚠️ *מה לא להגיד:*\n• [נקודה לעקוף]\n• [נקודה נוספת]\n\n💡 *ציטוט מוכן לסיום:*\n"[משפט חזק לסיום ראיון]"`;
+    return _sc(_prepPrompt, []);
   }
 
   // ─── Ruflo-inspired: Tiered routing ─────────────────────────
@@ -2336,6 +2489,162 @@ nodeCron.schedule('0 20 * * *', async () => {
     await botSend(ownerChat, lines.join('\n'));
   } catch (cronErr) {
     console.error('Daily face summary cron error:', cronErr.message?.substring(0, 80));
+  }
+}, { timezone: 'Asia/Jerusalem' });
+
+// ─── Auto follow-up reminder (every 3h) ──────────────────────────
+nodeCron.schedule('0 */3 * * *', async () => {
+  try {
+    const { getPendingContacts } = require('./src/media-tracker');
+    const pending = getPendingContacts(6);
+    if (!pending.length) return;
+
+    const oc = await client.getChatById(OWNER_ID);
+    let msg = `⏰ *תזכורת — ממתינים לתשובה:*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+    for (const c of pending) {
+      const hoursAgo = Math.floor((Date.now() - new Date(c.lastOutreach).getTime()) / 3600000);
+      msg += `📞 *${c.name}* | ${c.outlet}\n`;
+      msg += `   נושא: ${c.lastTopic || 'לא צוין'} | לפני ${hoursAgo}ש׳\n\n`;
+    }
+    msg += `_אמור "פנינו ל[שם] ענה" לעדכן סטטוס_`;
+    await botSend(oc, msg);
+  } catch (e) {
+    console.error('Follow-up cron error:', e.message?.substring(0, 60));
+  }
+}, { timezone: 'Asia/Jerusalem' });
+
+// ─── Weekly spokesperson report (Sunday 20:00) ───────────────────
+nodeCron.schedule('0 20 * * 0', async () => {
+  try {
+    const { loadContacts } = require('./src/media-tracker');
+    const contacts = loadContacts();
+    const oc = await client.getChatById(OWNER_ID);
+
+    const week = `${new Date(Date.now() - 7 * 86400000).toLocaleDateString('he-IL')}–${new Date().toLocaleDateString('he-IL')}`;
+
+    const total = contacts.length;
+    const replied = contacts.filter(c => c.status === 'replied').length;
+    const pending = contacts.filter(c => c.status === 'pending').length;
+    const idle = contacts.filter(c => c.status === 'idle').length;
+
+    // Count outreach from past 7 days
+    const weekAgo = Date.now() - 7 * 86400000;
+    const weeklyOutreach = contacts.filter(c => c.lastOutreach && new Date(c.lastOutreach).getTime() > weekAgo).length;
+
+    // Face recognition weekly count
+    let faceCount = 0;
+    for (const [, dayMap] of _dailyFaceMatches) {
+      for (const [, entry] of dayMap) faceCount += entry.count;
+    }
+
+    let report = `📊 *דוח שבועי דוברות*\n${week}\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+    report += `📞 *פניות תקשורת:*\n`;
+    report += `  • פניות שנשלחו השבוע: ${weeklyOutreach}\n`;
+    report += `  • ✅ ענו: ${replied} | ⏳ ממתינים: ${pending} | ⬜ לא פנינו: ${idle}\n\n`;
+    report += `🎀 *זיהוי פנים:*\n  • זיהויים שבועיים: ${faceCount}\n\n`;
+    report += `💡 *לסיכום:* ${replied > pending ? 'שבוע טוב — רוב הכתבים ענו! 💪' : 'יש ממתינים — כדאי לעקוב 📞'}`;
+
+    await botSend(oc, report);
+  } catch (e) {
+    console.error('Weekly report cron error:', e.message?.substring(0, 60));
+  }
+}, { timezone: 'Asia/Jerusalem' });
+
+// ─── Weekly Mia photo album (Saturday 19:00) ─────────────────────
+nodeCron.schedule('0 19 * * 6', async () => {
+  try {
+    if (!_weeklyFacePhotos.length) return;
+    const { MessageMedia } = require('whatsapp-web.js');
+    const oc = await client.getChatById(OWNER_ID);
+
+    await botSend(oc, `🎀 *אלבום שבועי — זיהוי פנים*\n${_weeklyFacePhotos.length} תמונות מהשבוע:`);
+
+    // Send up to 10 photos (WhatsApp limitation)
+    const toSend = _weeklyFacePhotos.slice(-10);
+    for (const photo of toSend) {
+      try {
+        const mm = new MessageMedia(photo.mimetype, photo.base64, 'photo.jpg');
+        await oc.sendMessage(mm, {
+          caption: `🎀 ${photo.name} (${photo.confidence}%) — ${photo.groupName} · ${photo.date}`,
+        });
+        await new Promise(r => setTimeout(r, 1000)); // 1s between photos
+      } catch (_) { /* skip failed */ }
+    }
+
+    // Clear for next week
+    _weeklyFacePhotos.length = 0;
+    await botSend(oc, `✅ האלבום הושלם! שבוע טוב 🌟`);
+  } catch (e) {
+    console.error('Weekly album cron error:', e.message?.substring(0, 60));
+  }
+}, { timezone: 'Asia/Jerusalem' });
+
+// ─── Daily Twitter/X + News monitoring (08:00) ───────────────────
+nodeCron.schedule('0 8 * * *', async () => {
+  try {
+    const { smartChat: _sc } = require('./src/claude');
+    const oc = await client.getChatById(OWNER_ID);
+    const today = new Date().toLocaleDateString('he-IL');
+
+    const twitterPrompt = `חפש אזכורים חדשים של ח"כ אריאל קלנר ב-X (טוויטר) ובחדשות מה-24 שעות האחרונות.
+בצע את החיפושים הבאים:
+1. site:x.com "ArielKallner" OR "קלנר"
+2. "אריאל קלנר" חדשות site:ynet.co.il OR site:maariv.co.il OR site:walla.co.il OR site:nrg.co.il
+3. @ArielKallner twitter
+
+פרמט התשובה:
+🐦 *אזכורי X/טוויטר:*
+[רשימת ציוצים/תגובות עם שם המצייץ, תוכן, קישור]
+
+📰 *אזכורים בחדשות:*
+[כותרת, מקור, תאריך, קישור]
+
+⚡ *פעולה מוצעת:*
+[האם יש משהו שדורש תגובה מיידית? אם כן — מה?]
+
+אם לא נמצא כלום — כתוב רק "אין אזכורים חדשים ל-${today}"`;
+
+    const result = await _sc(twitterPrompt, []);
+    await botSend(oc, `🔍 *מעקב מדיה יומי — ${today}*\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
+  } catch (e) {
+    console.error('Twitter monitor cron error:', e.message?.substring(0, 80));
+  }
+}, { timezone: 'Asia/Jerusalem' });
+
+// ─── Morning briefing cron (07:00) ───────────────────────────────
+nodeCron.schedule('0 7 * * *', async () => {
+  try {
+    const oc = await client.getChatById(OWNER_ID);
+    const { getTodaySchedule } = require('./src/calendar');
+    const { getUnreadEmails } = require('./src/gmail');
+    const { listContacts } = require('./src/media-tracker');
+
+    // Calendar
+    let calendarSection = '📅 *לוח שנה — היום:*\n';
+    try {
+      const events = await getTodaySchedule();
+      calendarSection += events || '_אין אירועים_';
+    } catch { calendarSection += '_לא זמין_'; }
+
+    // Emails
+    let emailSection = '\n\n📧 *מיילים חדשים:*\n';
+    try {
+      const emails = await getUnreadEmails();
+      emailSection += emails ? emails.substring(0, 400) : '_אין מיילים_';
+    } catch { emailSection += '_לא זמין_'; }
+
+    // Pending media contacts
+    let mediaSection = '\n\n📞 *ממתינים לתשובה:*\n';
+    try {
+      const contacts = listContacts();
+      const pendingMatch = contacts.match(/⏳[^\n]+(\n[^\n]+)*/g);
+      mediaSection += pendingMatch?.length ? pendingMatch.slice(0, 3).join('\n') : '_אין ממתינים_';
+    } catch { mediaSection += '_לא זמין_'; }
+
+    const greeting = `☀️ *בוקר טוב מושיקו!*\n━━━━━━━━━━━━━━━━━━━━\n`;
+    await botSend(oc, greeting + calendarSection + emailSection + mediaSection);
+  } catch (e) {
+    console.error('Morning briefing cron error:', e.message?.substring(0, 80));
   }
 }, { timezone: 'Asia/Jerusalem' });
 

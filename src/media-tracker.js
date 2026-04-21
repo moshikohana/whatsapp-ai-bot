@@ -142,6 +142,20 @@ function getBulkDraftContext() {
   return contacts.map(c => ({ name: c.name, outlet: c.outlet, phone: c.phone }));
 }
 
+/**
+ * Returns contacts with status 'pending' where lastOutreach was more than
+ * hoursThreshold hours ago. Used by the auto follow-up cron.
+ */
+function getPendingContacts(hoursThreshold = 6) {
+  const contacts = loadContacts();
+  const cutoff = Date.now() - hoursThreshold * 60 * 60 * 1000;
+  return contacts.filter(c =>
+    c.status === 'pending' &&
+    c.lastOutreach &&
+    new Date(c.lastOutreach).getTime() < cutoff
+  );
+}
+
 module.exports = {
   loadContacts,
   saveContacts,
@@ -150,4 +164,5 @@ module.exports = {
   markReplied,
   resetContact,
   getBulkDraftContext,
+  getPendingContacts,
 };
