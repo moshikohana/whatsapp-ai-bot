@@ -235,7 +235,7 @@ const TOOLS = [
   // ─── WhatsApp ─────────────────────────────────────────────────
   {
     name: 'whatsapp',
-    description: 'וואטסאפ. פעולות: send (שלח הודעה — אישור!), chats (רשימת שיחות), read (קרא שיחה), search (חפש הודעות), summarize (סכם קבוצה), forward (העבר הודעה — אישור!).',
+    description: 'וואטסאפ. פעולות: send (שלח הודעה — אישור!), chats (רשימת שיחות), read (קרא שיחה), search (חפש הודעות), summarize (סכם קבוצה — תמיד העבר sinceMinutes כשהמשתמש מציין טווח זמן!), forward (העבר הודעה — אישור!).',
     input_schema: {
       type: 'object',
       properties: {
@@ -244,9 +244,10 @@ const TOOLS = [
         message: { type: 'string', description: 'תוכן (send)' },
         chatName: { type: 'string', description: 'שם שיחה (read/search/summarize/forward)' },
         query: { type: 'string', description: 'חיפוש (search)' },
-        limit: { type: 'number', description: 'כמה להציג' },
+        limit: { type: 'number', description: 'כמה להציג (summarize: עד 300)' },
         toPhone: { type: 'string', description: 'יעד (forward)' },
         messageIndex: { type: 'number', description: 'מספר הודעה (forward, 1=אחרונה)' },
+        sinceMinutes: { type: 'number', description: 'summarize בלבד: סנן הודעות מ-X דקות אחרונות. דוגמאות: "מהבוקר"=מהשעה 06:00 (חשב לפי השעה הנוכחית), "אתמול"=1440-2880, "השעה האחרונה"=60, "היום"=מאז חצות. תמיד חישוב יחסית לעכשיו.' },
       },
       required: ['action'],
     },
@@ -392,6 +393,58 @@ ACTIONS:
         content: { type: 'string', description: 'תוכן התבנית (save)' },
       },
       required: ['action'],
+    },
+  },
+  // ─── Navigation (Waze + ETA) ──────────────────────────────────
+  {
+    name: 'navigation',
+    description: `ניווט Waze + Google Maps וזמני נסיעה. פעולות:
+
+• waze_link — שולח קישור Waze למשתמש בוואטסאפ. כשהמשתמש מקיש עליו בטלפון — Waze נפתח אוטומטית עם היעד ומתחיל ניווט (navigate=yes). השתמש כש: "בוא נסע ל...", "פתח Waze ל...", "נווט ל...", "לך ל...", "שלח לי קישור Waze ל...".
+• maps_link — שולח קישור Google Maps למשתמש בוואטסאפ. המשתמש מקיש → נפתחת אפליקציית Google Maps. חלופה ל-Waze.
+• eta — זמן ומרחק נסיעה. "כמה זמן לוקח לי לאילת", "כמה זמן עד חיפה מתל אביב".
+• set_home — קבע כתובת בית. "הבית שלי ב..." / "קבע את הבית שלי ב...".
+
+⚠️ *התנהגות:*
+1. אם היעד לא ברור (שם לא מלא, מקום עם כפילויות — למשל "רמת גן" בלי שכונה) — שאל קודם: "איזה [מקום]? [אופציות]"
+2. אחרי שהיעד ברור — קרא מיד ל-waze_link / maps_link. הקישור נשלח למשתמש והוא מקיש עליו בטלפון → Waze/Maps נפתח שם אוטומטית. אין צורך באישור נוסף לפני שליחת הקישור.
+3. ⚠️ הבוט לא פותח שום דבר על המחשב. הכל מתבצע בטלפון של המשתמש על ידי הקשה על הקישור.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['waze_link', 'maps_link', 'eta', 'set_home'] },
+        destination: { type: 'string', description: 'יעד (waze_link, maps_link, eta). לדוגמה: "ירושלים", "כנסת", "כיכר רבין תל אביב"' },
+        from: { type: 'string', description: 'נקודת מוצא (eta, maps_link). אם ריק — משתמש בכתובת הבית השמורה' },
+        home_address: { type: 'string', description: 'כתובת בית חדשה (set_home)' },
+      },
+      required: ['action'],
+    },
+  },
+  // ─── Collective Memory (search across scans+chats+calls+memory) ─
+  {
+    name: 'memory_search',
+    description: `חיפוש מאוחד בזיכרון של הבוט: סריקות קבוצות, לוגים של שיחות, תמלולי הקלטות, ובסיס הזיכרון. שולף קטעים רלוונטיים ומסכם בעברית.
+
+מתי להשתמש:
+• "מתי דיברנו על X?" / "מה היה עם X?" / "תזכיר לי על X"
+• "מצא לי שיחות על X" / "מה אמרו על X בקבוצות?"
+• "תחפש בזיכרון" / "תזכיר אזכורים של X"
+• כל בקשה לאחזור היסטורי של מידע שעבר דרך הבוט
+
+הכלי מחזיר תשובה אנושית עם ציטוט מקורות (תאריך + סוג מקור).
+אל תשתמש לתשובות בזמן אמת — לזה יש כלים אחרים (calendar, gmail, וכו').`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'מילות חיפוש בעברית/אנגלית. לדוגמה: "בגץ", "ראיון בערוץ 14", "אריאל קלנר ועדת חקירה"' },
+        days: { type: 'number', description: 'כמה ימים אחורה לחפש. ברירת מחדל: 30. ניתן להגדיל ל-90 לחיפוש רחב' },
+        sources: {
+          type: 'array',
+          items: { type: 'string', enum: ['scan', 'chat', 'call', 'memory'] },
+          description: 'סינון מקורות. ברירת מחדל: כל המקורות. דוגמה: ["call"] לחיפוש רק בתמלולי הקלטות',
+        },
+      },
+      required: ['query'],
     },
   },
 ];
@@ -543,6 +596,32 @@ function isOverBudget() {
   return usageTracker.inputTokens >= usageTracker.dailyLimit;
 }
 
+// ─── Generic retry with exponential backoff for transient API errors ───
+// Handles 529 (overloaded), 503 (service unavailable), 429 (rate limit),
+// and network errors (ETIMEDOUT, ECONNRESET). Non-retryable errors rethrow immediately.
+function isRetryableError(err) {
+  if (!err) return false;
+  if (err.status === 529 || err.status === 503 || err.status === 429) return true;
+  const msg = err.message || '';
+  return /overloaded|service unavailable|rate limit|ETIMEDOUT|ECONNRESET/i.test(msg);
+}
+
+async function callWithRetry(fn, opts = {}) {
+  const { maxRetries = 3, baseDelayMs = 2000, label = 'api' } = opts;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isLast = i === maxRetries - 1;
+      if (!isRetryableError(err) || isLast) throw err;
+      const delay = baseDelayMs * Math.pow(2, i);
+      const snippet = (err.message || '').substring(0, 80);
+      console.warn(`⏳ [${label}] retry ${i + 1}/${maxRetries} in ${delay}ms: ${snippet}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
 // ─── API call with retry + cooldown ─────────────────────────────
 let lastCallTime = 0;
 const MIN_INTERVAL = 3000; // 3s between API calls
@@ -567,7 +646,7 @@ async function callClaude(params, retries = 2) {
       const apiStart = Date.now();
       console.log(`📡 API call (timeout: ${timeoutMs / 1000}s, attempt ${i + 1}/${maxRetries + 1})...`);
       const result = await Promise.race([
-        anthropic.messages.create(params),
+        callWithRetry(() => anthropic.messages.create(params), { label: 'smartChat', maxRetries: 3, baseDelayMs: 2000 }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('API timeout')), timeoutMs)),
       ]);
       const apiDuration = Date.now() - apiStart;
@@ -635,6 +714,13 @@ async function smartChat(userMessage, history = []) {
   const allMessages = [...messages];
   let maxLoops = 8;
 
+  // ── Verbatim outputs ──
+  // Some tools (e.g. navigation/waze_link) return a fully-formatted, user-facing
+  // message that must reach the user verbatim. Claude tends to summarize tool
+  // results ("here's the link 👆") and drop the actual URL. We track these
+  // outputs and use them as a safety-net after the loop.
+  const verbatimOutputs = [];
+
   while (response.stop_reason === 'tool_use' && maxLoops-- > 0) {
     // Check global timeout
     if (Date.now() - startTime > GLOBAL_TIMEOUT) {
@@ -654,6 +740,14 @@ async function smartChat(userMessage, history = []) {
       let content = typeof result === 'string' ? result : JSON.stringify(result ?? null);
       if (!content || content === 'undefined' || content === 'null') {
         content = '(אין תוצאה)';
+      }
+      // Capture verbatim outputs from navigation waze_link/maps_link.
+      // Identified by: navigation tool + content contains a Waze/Maps URL.
+      if (tool.name === 'navigation' && /https?:\/\/(www\.)?(waze\.com|google\.com\/maps|maps\.google\.com)/.test(content)) {
+        const urlMatch = content.match(/https?:\/\/[^\s)]+/);
+        if (urlMatch) {
+          verbatimOutputs.push({ url: urlMatch[0], text: content });
+        }
       }
       // Cap individual tool results to avoid oversized requests
       if (content.length > 8000) {
@@ -682,10 +776,41 @@ async function smartChat(userMessage, history = []) {
   console.log(`📦 Response blocks: [${blockTypes.join(', ')}]`);
 
   // Collect ALL text blocks (web search returns multiple text blocks)
-  const textBlocks = response.content.filter(b => b.type === 'text');
-  const reply = textBlocks.length > 0
+  let textBlocks = response.content.filter(b => b.type === 'text');
+
+  // If no text (e.g. loop ended on tool_use or Claude returned only tool blocks),
+  // make one extra call with tool_choice:none to force a text summary
+  if (textBlocks.length === 0 && allMessages.length > 1) {
+    console.warn('⚠️ No text blocks — making final summary call');
+    try {
+      const summaryResp = await callClaude({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1500,
+        system: getSystemPrompt(),
+        tool_choice: { type: 'none' },
+        messages: [...allMessages, { role: 'assistant', content: response.content },
+          { role: 'user', content: 'סכם בקצרה מה ביצעת עכשיו.' }],
+      });
+      textBlocks = summaryResp.content.filter(b => b.type === 'text');
+    } catch (_) { /* silent */ }
+  }
+
+  let reply = textBlocks.length > 0
     ? textBlocks.map(b => b.text.trim()).filter(Boolean).join('\n\n')
-    : 'לא הצלחתי לעבד, נסה שוב אחי 🤷';
+    : '✅ בוצע';
+
+  // ── Safety net for verbatim tool outputs ──
+  // If a navigation tool returned a Waze/Maps URL but Claude's reply doesn't
+  // include the URL, replace the reply with the tool's pre-formatted output.
+  // Without this, Claude says "here's the link 👆" with no actual link.
+  if (verbatimOutputs.length > 0) {
+    const lastOutput = verbatimOutputs[verbatimOutputs.length - 1];
+    if (!reply.includes(lastOutput.url)) {
+      console.warn(`⚠️ Reply missing URL ${lastOutput.url.substring(0, 60)}... — using verbatim tool output`);
+      reply = lastOutput.text;
+    }
+  }
+
   console.log(`💬 Reply (${reply.length} chars): ${reply.substring(0, 150)}`);
   return reply;
   } catch (err) {
@@ -740,14 +865,14 @@ async function thinkWithClaude(userMessage, history = []) {
   const messages = [...trimmed, { role: 'user', content: userMessage }];
 
   try {
-    const response = await anthropic.messages.create({
+    const response = await callWithRetry(() => anthropic.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 4096,
       thinking: { type: 'adaptive' },
       output_config: { effort: 'high' },
       system: 'אתה "בוטי" — מנתח מומחה. נתח לעומק, הצג כל זוויות הבעיה, ותן תשובה מקיפה. ענה בשפה שבה שאלו אותך. היה אנושי וחם.',
       messages,
-    });
+    }), { label: 'thinkWithClaude', maxRetries: 3, baseDelayMs: 2000 });
 
     const textBlock = response.content.find(b => b.type === 'text');
     return '🧠 *ניתוח מעמיק:*\n\n' + (textBlock ? textBlock.text.trim() : 'לא הצלחתי');

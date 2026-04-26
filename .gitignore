@@ -11,3 +11,13 @@ data/conversations.json
 data/scheduled.json
 bot-memory.json
 bot-context.json
+
+# Local-only runtime state (regenerated on the server)
+backups/
+data/msg-cache.json
+data/scans/
+data/keyword-alerts-log.json
+data/blocked-groups.json
+data/bot-down-notify.json
+data/command-center-state.json
+data/user-location.json

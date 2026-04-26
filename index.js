@@ -8,6 +8,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const os = require('os');
 
 const { smartChat, thinkWithClaude, registerToolHandlers, getUsageSummary } = require('./src/claude');
 const {
@@ -28,6 +29,9 @@ const { renderVideo, getTemplates } = require('./src/video');
 const { loadConversations, saveConversations, flushConversations, loadScheduledTasks, saveScheduledTasks, loadDailyTasks, saveDailyTasks } = require('./src/persistence');
 const { withCache, cache } = require('./src/cache');
 const logger = require('./src/logger');
+const { appendChatLog } = require('./src/chat-log');
+const { saveScan: saveScanHistory } = require('./src/scan-history');
+const fs = require('fs');
 const { formatContextForClaude, matchTopicToPositions, getBriefingSearchQueries } = require('./src/spokesperson');
 const {
   initFaceAPI, addReference, findMatches, blurNonMatchingFaces, highlightMatchingFaces,
@@ -38,10 +42,93 @@ const {
   loadConfig: loadFaceConfig,
 } = require('./src/face-recognition');
 
+// ─── Message cache: persist group messages across bot restarts ───
+// Groups that return sparse results after restart are supplemented from this
+// disk cache. Keyed by WhatsApp JID (ends with @g.us). 48h TTL, 250 msgs/group.
+const _MSG_CACHE_FILE = path.join(__dirname, 'data', 'msg-cache.json');
+const _MSG_CACHE_TTL = 48 * 3600; // seconds
+let _msgCache = {}; // { [chatJid]: [{id, ts, sender, body}] }
+
+// Blocked groups — spam/noise groups excluded from caching (substring match on name)
+const _BLOCKED_GROUP_FILE = path.join(__dirname, 'data', 'blocked-groups.json');
+let _BLOCKED_GROUP_PATTERNS = [];
+try { _BLOCKED_GROUP_PATTERNS = JSON.parse(fs.readFileSync(_BLOCKED_GROUP_FILE, 'utf8')); } catch { _BLOCKED_GROUP_PATTERNS = []; }
+const _blockedJids = new Set(); // populated lazily when group names resolve
+const _jidNames = new Map();    // JID -> name cache (avoid repeat lookups)
+
+(function _loadMsgCache() {
+  try {
+    const raw = fs.readFileSync(_MSG_CACHE_FILE, 'utf8');
+    _msgCache = JSON.parse(raw);
+    const cutoff = Math.floor(Date.now() / 1000) - _MSG_CACHE_TTL;
+    let pruned = 0;
+    for (const cid of Object.keys(_msgCache)) {
+      const before = _msgCache[cid].length;
+      _msgCache[cid] = _msgCache[cid].filter(m => m.ts > cutoff);
+      pruned += before - _msgCache[cid].length;
+      if (!_msgCache[cid].length) delete _msgCache[cid];
+    }
+    logger.info(`📦 Msg cache loaded: ${Object.keys(_msgCache).length} groups, pruned ${pruned} old msgs`);
+  } catch { _msgCache = {}; }
+})();
+
+let _msgCacheDirty = false;
+function _cacheGroupMsg(msg) {
+  if (!msg?.from?.endsWith('@g.us')) return;
+  if (!msg.body || msg.body.length < 5) return;
+  const cid = msg.from;
+  if (_blockedJids.has(cid)) return; // known blocked group — skip
+
+  // Lazy name resolution — first time we see a JID, check against blocklist
+  if (!_jidNames.has(cid) && _BLOCKED_GROUP_PATTERNS.length > 0) {
+    _jidNames.set(cid, null); // mark as "resolving" to avoid duplicates
+    (async () => {
+      try {
+        const chat = await msg.getChat();
+        const name = chat?.name || '';
+        _jidNames.set(cid, name);
+        if (_BLOCKED_GROUP_PATTERNS.some(p => name.includes(p))) {
+          _blockedJids.add(cid);
+          if (_msgCache[cid]?.length) {
+            logger.info(`🚫 Blocked group "${name}" — cache purged (${_msgCache[cid].length} msgs)`);
+            delete _msgCache[cid];
+            _msgCacheDirty = true;
+          }
+        }
+      } catch {}
+    })();
+  }
+
+  const id = msg.id?._serialized || '';
+  if (!_msgCache[cid]) _msgCache[cid] = [];
+  if (id && _msgCache[cid].some(m => m.id === id)) return; // deduplicate
+  _msgCache[cid].push({
+    id,
+    ts: msg.timestamp || Math.floor(Date.now() / 1000),
+    sender: (msg._data?.notifyName || msg._data?.pushName || '').substring(0, 30),
+    body: (msg.body || '').substring(0, 500),
+  });
+  if (_msgCache[cid].length > 250) {
+    _msgCache[cid].sort((a, b) => a.ts - b.ts);
+    _msgCache[cid] = _msgCache[cid].slice(-250);
+  }
+  _msgCacheDirty = true;
+}
+
+// Flush cache to disk every 30s (only if dirty) — limits message loss on crash
+setInterval(() => {
+  if (!_msgCacheDirty) return;
+  try {
+    fs.writeFileSync(_MSG_CACHE_FILE, JSON.stringify(_msgCache));
+    _msgCacheDirty = false;
+  } catch (e) { logger.warn('⚠️ msg-cache flush failed:', e.message?.substring(0, 60)); }
+}, 30_000);
+
 // ─── Helper: fetch messages — 3-strategy robust loader ──────────
 // Strategy 1: chat.fetchMessages (official API)
 // Strategy 2: Store.Chat.get + looped loadEarlierMsgs (best fallback)
 // Strategy 3: WWebJS.getChat (last resort)
+// Strategy 4: Disk message cache (survives restarts)
 // Returns array with ._usedFallback flag so callers detect partial data.
 async function safeFetchMessages(chat, limit) {
   const chatId = chat.id._serialized || chat.id;
@@ -56,16 +143,38 @@ async function safeFetchMessages(chat, limit) {
     logger.warn(`fetchMessages S1 failed for "${chat.name}": ${e1.message?.substring(0, 60)}`);
   }
 
-  // ── Strategy 2: Direct Store access with iterative loading ────
+  // ── Strategy 2: Direct Store access — tries Msg.find (server fetch) then loadEarlierMsgs ──
   try {
     const rawMsgs = await client.pupPage.evaluate(async (cid, lim) => {
       const chat = window.Store?.Chat?.get(cid);
       if (!chat) return null;
+
+      // S2a: Try Store.Msg.find — fetches recent messages directly from server
+      // This loads messages that arrived before the current session (missed during restart)
+      try {
+        if (typeof window.Store?.Msg?.find === 'function') {
+          const found = await Promise.race([
+            window.Store.Msg.find({ chatId: cid, count: lim }),
+            new Promise(r => setTimeout(r, 6000))
+          ]);
+          if (found && found.length >= 5) {
+            const msgs = found.filter(m => !m.isNotification);
+            msgs.sort((a, b) => a.t - b.t);
+            return msgs.slice(-lim).map(m => window.WWebJS.getMessageModel(m));
+          }
+        }
+      } catch {}
+
+      // S2b: Fallback — iterative loadEarlierMsgs (loads historical from server)
       let prev = 0;
       for (let i = 0; i < 5 && chat.msgs.length < lim; i++) {
         prev = chat.msgs.length;
         try {
-          await window.Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs);
+          // 5s cap per iteration — prevents infinite hang on broken groups (e.g. המדמונים)
+          await Promise.race([
+            window.Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs),
+            new Promise(r => setTimeout(r, 5000))
+          ]);
           await new Promise(r => setTimeout(r, 400));
         } catch { break; }
         if (chat.msgs.length === prev) break; // nothing new loaded
@@ -78,43 +187,88 @@ async function safeFetchMessages(chat, limit) {
 
     if (rawMsgs !== null) {
       const result = rawMsgs.map(m => new Message(client, m));
-      result._usedFallback = result.length < Math.min(limit * 0.3, 10);
-      if (!result._usedFallback) logger.info(`fetchMessages S2 ok for "${chat.name}": ${result.length} msgs`);
-      return result;
+      result._usedFallback = result.length < Math.min(limit * 0.05, 5); // sparse if < 5 msgs
+      if (!result._usedFallback) {
+        logger.info(`fetchMessages S2 ok for "${chat.name}": ${result.length} msgs`);
+        return result; // good data — return immediately
+      }
+      logger.warn(`fetchMessages S2 sparse for "${chat.name}": only ${result.length} msgs → trying S3`);
+      // fall through to S3 — do NOT return sparse result here
+    } else {
+      logger.warn(`fetchMessages S2 chat not in Store for "${chat.name}" → trying S3`);
     }
   } catch (e2) {
     logger.warn(`fetchMessages S2 failed for "${chat.name}": ${e2.message?.substring(0, 60)}`);
   }
 
-  // ── Strategy 3: WWebJS fallback ──────────────────────────────
+  // ── Strategy 3: WWebJS.getChat + iterated loading (with timeout) ──
+  let _s3live = null;
   try {
     const rawMsgs = await client.pupPage.evaluate(async (cid, lim) => {
       const chat = await window.WWebJS.getChat(cid, { getAsModel: false });
-      let msgs = chat.msgs.getModelsArray().filter(m => !m.isNotification);
-      for (let i = 0; i < 3 && msgs.length < lim; i++) {
+      if (!chat) return null;
+      // Iteratively load earlier messages (8s cap per iteration, same as S2)
+      for (let i = 0; i < 4; i++) {
+        if (chat.msgs.length >= lim) break;
+        const prev = chat.msgs.length;
         try {
-          const loaded = await window.Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs);
-          if (!loaded?.length) break;
-          msgs = [...loaded.filter(m => !m.isNotification), ...msgs];
+          await Promise.race([
+            window.Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs),
+            new Promise(r => setTimeout(r, 8000))
+          ]);
+          await new Promise(r => setTimeout(r, 300));
         } catch { break; }
+        if (chat.msgs.length === prev) break; // no new messages loaded
       }
+      let msgs = chat.msgs.getModelsArray().filter(m => !m.isNotification);
       msgs.sort((a, b) => a.t - b.t);
       if (msgs.length > lim) msgs = msgs.slice(-lim);
       return msgs.map(m => window.WWebJS.getMessageModel(m));
     }, chatId, limit);
+    if (rawMsgs === null) throw new Error('WWebJS.getChat returned null');
     const result = rawMsgs.map(m => new Message(client, m));
-    result._usedFallback = true;
-    logger.warn(`fetchMessages S3 (last resort) for "${chat.name}": ${result.length} msgs`);
-    return result;
+    result._usedFallback = result.length < Math.min(limit * 0.05, 5);
+    logger.warn(`fetchMessages S3 for "${chat.name}": ${result.length} msgs`);
+    if (!result._usedFallback) return result; // good data — skip S4
+    _s3live = result; // sparse — fall through to S4
   } catch (e3) {
     logger.error(`fetchMessages all strategies failed for "${chat.name}": ${e3.message?.substring(0, 60)}`);
-    const empty = []; empty._usedFallback = true; return empty;
   }
+
+  // ── Strategy 4: Disk message cache (survives restarts) ────────
+  // Fills in groups that WhatsApp Web hasn't had time to sync yet.
+  try {
+    const _dc = (_msgCache[chatId] || []);
+    if (_dc.length >= 3) {
+      const _inMem = new Set((_s3live || []).map(m => m.id?._serialized).filter(Boolean));
+      const _fc = _dc.filter(m => !_inMem.has(m.id)).map(m => ({
+        body: m.body, timestamp: m.ts,
+        _data: { notifyName: m.sender }, id: { _serialized: m.id }, _fromCache: true,
+      }));
+      if (_fc.length > 0) {
+        const combined = [..._fc, ...(_s3live || [])];
+        combined.sort((a, b) => a.timestamp - b.timestamp);
+        combined._usedFallback = combined.length < Math.min(limit * 0.05, 5);
+        logger.info(`📦 fetchMessages S4 (disk cache) for "${chat.name}": +${_fc.length} cached (total ${combined.length})`);
+        return combined;
+      }
+    }
+  } catch {}
+  if (_s3live) return _s3live;
+  const _empty = []; _empty._usedFallback = true; return _empty;
 }
 
 // Returns true when fallback was used AND returned suspiciously few messages
 function isFetchIncomplete(msgs, requested) {
   return msgs._usedFallback && msgs.length < Math.max(3, requested * 0.15);
+}
+
+// Strip URLs from text before showing in alerts/previews
+function stripUrls(text) {
+  return (text || '')
+    .replace(/(?:https?:\/\/|www\.)\S+/gi, '[קישור]')
+    .replace(/(?:chat\.whatsapp\.com|t\.me|wa\.me)\/\S+/gi, '[קישור]')
+    .trim();
 }
 
 // ─── Smart chat finder: exact > prefix > shortest-include ────────
@@ -270,7 +424,7 @@ registerToolHandlers({
     }
   },
   // ─── WhatsApp (unified) ──────────────────────────────────────
-  whatsapp: async ({ action, phone, message, chatName, query, limit, toPhone, messageIndex }) => {
+  whatsapp: async ({ action, phone, message, chatName, query, limit, toPhone, messageIndex, sinceMinutes }) => {
     switch (action) {
       case 'send': {
         let num = phone.replace(/[\s\-\+\(\)]/g, '');
@@ -302,7 +456,7 @@ registerToolHandlers({
         const reqLimit = Math.min(limit || 20, 50);
         const msgs = await safeFetchMessages(ch, reqLimit);
         if (isFetchIncomplete(msgs, reqLimit)) {
-          return `❌ *שגיאה בטעינת ההיסטוריה של "${ch.name}"*\nWhatsApp Web לא הצליח לגשת להודעות הישנות יותר.\n💡 _פתח את הקבוצה ב-WhatsApp ולחץ על גלול למעלה, ואז שאל שוב._`;
+          return `⚠️ *אין גישה להודעות של "${ch.name}"*\nWhatsApp Web לא מצא הודעות — הקבוצה לא נטענה לזיכרון.\n\n💡 *מה לעשות:*\n1. פתח את הקבוצה ב-WhatsApp ✓\n2. גלול למעלה מעט כדי לטעון הודעות ✓\n3. חכה 10 שניות ושאל שוב\n\nאם הבעיה ממשיכה — ייתכן שזו קבוצה פרטית / מוגבלת שWhatsApp Web לא יכול לגשת אליה.`;
         }
         let text = `💬 *${ch.name || chatName}${ch.isGroup ? ' 👥' : ''}* — ${msgs.length} הודעות:\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         for (const m of msgs) {
@@ -334,15 +488,45 @@ registerToolHandlers({
           const chats = await client.getChats();
           const ch = findChatByName(chats, chatName);
           if (!ch) return `❌ לא נמצאה "${chatName}"`;
-          const reqLim = Math.min(limit||50, 100);
+          // When filtering by time, fetch more messages so we don't lose old-but-in-window ones
+          const reqLim = Math.min(limit || (sinceMinutes ? 300 : 50), 300);
           const rawMsgs = await safeFetchMessages(ch, reqLim);
           if (isFetchIncomplete(rawMsgs, reqLim)) {
-            return `❌ *שגיאה בטעינת ההיסטוריה של "${ch.name}"*\nWhatsApp Web לא הצליח לגשת להודעות הישנות יותר.\n💡 _פתח את הקבוצה ב-WhatsApp ולחץ על גלול למעלה, ואז שאל שוב._`;
+            return `⚠️ *אין גישה להודעות של "${ch.name}"*\nWhatsApp Web לא מצא הודעות — הקבוצה לא נטענה לזיכרון.\n\n💡 *מה לעשות:*\n1. פתח את הקבוצה ב-WhatsApp ✓\n2. גלול למעלה מעט כדי לטעון הודעות ✓\n3. חכה 10 שניות ושאל שוב\n\nאם הבעיה ממשיכה — ייתכן שזו קבוצה פרטית / מוגבלת שWhatsApp Web לא יכול לגשת אליה.`;
           }
-          const msgs = rawMsgs.filter(m => m.body?.trim().length > 2);
-          if (!msgs.length) return `📋 אין הודעות ב-"${ch.name}" לסיכום.`;
-          const dump = msgs.map(m => `[${new Date(m.timestamp*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}] ${m.fromMe?'מושיקו':(m._data?.notifyName||'משתתף')}: ${m.body}`).join('\n');
-          return `📋 *"${ch.name}"* (${msgs.length} הודעות):\n━━━━━━━━━━━━━━━━━━━━\n\n${dump}\n\n━━━━━━━━━━━━━━━━━━━━\n_סכם בנקודות תמציתיות. נושאים עיקריים, החלטות, פעולות._`;
+          let msgs = rawMsgs.filter(m => m.body?.trim().length > 2);
+          const totalAvailable = msgs.length;
+
+          // Israel-locale formatters (force timezone so Node TZ doesn't matter)
+          const TZ = 'Asia/Jerusalem';
+          const fmtT = ts => new Date(ts * 1000).toLocaleTimeString('he-IL', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+          const fmtD = ts => new Date(ts * 1000).toLocaleDateString('he-IL', { timeZone: TZ, day: '2-digit', month: '2-digit' });
+
+          // Time filter
+          let filterNote = '';
+          if (sinceMinutes && sinceMinutes > 0) {
+            const sinceTs = Math.floor(Date.now() / 1000) - sinceMinutes * 60;
+            msgs = msgs.filter(m => m.timestamp >= sinceTs);
+            const hrs = sinceMinutes / 60;
+            const human = sinceMinutes < 60
+              ? `${sinceMinutes} דק׳ אחרונות`
+              : (hrs < 24 ? `${Math.round(hrs * 10) / 10} שעות אחרונות` : `${Math.round(hrs / 24 * 10) / 10} ימים אחרונים`);
+            filterNote = `\n_מסונן: ${human} (${msgs.length}/${totalAvailable} הודעות)_`;
+          }
+
+          if (!msgs.length) {
+            return `📋 אין הודעות ב-"${ch.name}" בטווח המבוקש.${filterNote}\n_זמין סה"כ במטמון: ${totalAvailable} הודעות_`;
+          }
+
+          const firstTs = msgs[0].timestamp;
+          const lastTs = msgs[msgs.length - 1].timestamp;
+          const sameDay = fmtD(firstTs) === fmtD(lastTs);
+          const rangeLabel = sameDay
+            ? `${fmtD(firstTs)} ${fmtT(firstTs)}–${fmtT(lastTs)}`
+            : `${fmtD(firstTs)} ${fmtT(firstTs)} → ${fmtD(lastTs)} ${fmtT(lastTs)}`;
+
+          const dump = msgs.map(m => `[${fmtT(m.timestamp)}] ${m.fromMe ? 'מושיקו' : (m._data?.notifyName || 'משתתף')}: ${m.body}`).join('\n');
+          return `📋 *"${ch.name}"* — ${msgs.length} הודעות${filterNote}\n*טווח זמן בפועל:* ${rangeLabel} (זמן ישראל)\n━━━━━━━━━━━━━━━━━━━━\n\n${dump}\n\n━━━━━━━━━━━━━━━━━━━━\n_סכם בנקודות תמציתיות. נושאים עיקריים, החלטות, פעולות. **חובה לציין בתשובה את טווח הזמן שנסרק בפועל (לפי "טווח זמן בפועל" למעלה), לא לנחש.**_`;
         } catch (e) {
           logger.error(`WhatsApp summarize error for "${chatName}":`, e.message || e.toString());
           return `❌ שגיאה בגישה לצ'אט "${chatName}": ${e.message || 'שגיאת WhatsApp פנימית'}. נסה שוב.`;
@@ -390,48 +574,80 @@ registerToolHandlers({
       }
       case 'daily': {
         const m = time.match(/^(\d{1,2}):(\d{2})$/); if (!m) return '❌ פורמט: HH:MM';
+        params = params || {}; // defensive — Claude may omit params entirely
+        if (daily_action === 'group_summary' && !(params.groups && params.groups.length)) {
+          return '❌ לסקירת קבוצות צריך לציין `params.groups` (מערך שמות קבוצות). דוגמה: `{groups: ["זירה מקומית", "חדשות 2026"]}`';
+        }
+        if (daily_action === 'send_message' && !params.target) {
+          return '❌ לשליחת הודעה יומית צריך `params.target` (מספר/אימייל) ו-`params.message`.';
+        }
+        // Dedup — refuse to create a duplicate of an existing daily task
+        for (const [existingId, existing] of dailyTasks) {
+          if (existing.time !== time || existing.action !== daily_action) continue;
+          let isDupe = false;
+          if (daily_action === 'group_summary') {
+            const a = (existing.params?.groups || []).slice().sort().join('|');
+            const b = (params.groups || []).slice().sort().join('|');
+            isDupe = a === b || (a && b && (a.includes(b) || b.includes(a)));
+          } else if (daily_action === 'send_message') {
+            isDupe = existing.params?.target === params.target;
+          } else if (daily_action === 'media_briefing') {
+            isDupe = true; // one briefing per time is enough
+          }
+          if (isDupe) {
+            return `⚠️ כבר קיים תזמון יומי דומה: *#${existingId}* ב-${existing.time} — ${existing.label}.\nאם לשנות — בטל תחילה: \`schedule action=cancel_daily id=${existingId}\``;
+          }
+        }
         const did = dailyIdCounter++; const tl = label || (daily_action==='group_summary'?'סקירת קבוצות':daily_action==='media_briefing'?'סקירת תקשורת בוקר':'שליחת הודעה');
         const cron = nodeCron.schedule(`${m[2]} ${m[1]} * * *`, async () => {
           console.log(`🔄 Daily #${did}: ${tl}`);
           try {
             const oc = await client.getChatById(OWNER_ID);
             if (daily_action === 'group_summary') {
-              let sum = `📋 *סקירה יומית — ${time}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
-              const allGroupContent = [];
               const groupStats = [];
+              const allMessages = [];
               const {smartChat:sc} = require('./src/claude');
+              const _scanDay = Date.now()/1000-86400;
+              const _cs1 = await client.getChats(); // fetch once
               for (const gn of (params.groups||[])) {
-                const cs = await client.getChats(); const ch = findChatByName(cs, gn);
-                if (!ch) { groupStats.push({name:gn,count:0,lastTs:0}); sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
-                const msgs = await safeFetchMessages(ch, 150); const day = Date.now()/1000-86400;
-                const rec = msgs.filter(m => m.body && m.timestamp > day);
-                groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
-                if (!rec.length) { sum += `*${ch.name}:* אין חדש\n\n`; continue; }
-                const d = rec.map(m => `[${new Date(m.timestamp*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}] ${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,300)}`).join('\n');
-                const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות). כלול שעה ליד כל ידיעה עיקרית:\n${d}`, []);
-                sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
-                allGroupContent.push(`📌 ${ch.name}:\n${s}`);
-              }
-              if (groupStats.length) {
-                const totalM = groupStats.reduce((a,g)=>a+g.count,0);
-                const hot = [...groupStats].sort((a,b)=>b.count-a.count)[0];
-                const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
-                const meter = `🌡️ *מד פעילות:* ${lvl}\n🏆 הכי פעיל: *${hot.name}* (${hot.count} הודעות)\n📊 סה"כ: *${totalM}* הודעות מ-${groupStats.filter(g=>g.count>0).length} קבוצות\n\n`;
-                sum = sum.replace('━━━━━━━━━━━━━━━━━━━━\n\n', '━━━━━━━━━━━━━━━━━━━━\n\n' + meter);
-              }
-              await botSend(oc, sum);
-              if (allGroupContent.length > 0) {
                 try {
-                  const synthesisPrompt = `אתה עוזר מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד). קראת סיכומים מהקבוצות הבאות:\n\n${allGroupContent.join('\n\n')}\n\nכתוב ניתוח בפורמט זה בדיוק:\n\n🔁 *כפילויות — ידיעות שחוזרות ביותר מקבוצה אחת:*\n• [ידיעה מדויקת]: ([שם קבוצה א], [שם קבוצה ב])\n(אם אין כפילויות — כתוב: "אין ידיעות כפולות")\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא — מקור: שם הקבוצה]\n2. [נושא — מקור: שם הקבוצה]\n3. [נושא — מקור: שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא שקלנר יכול להגיב עליו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
-                  const synthesis = await sc(synthesisPrompt, []);
-                  await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
-                  // ── Post drafts ────────────────────────────────────────────
-                  try {
-                    const draftsPrompt = `בהתבסס על הניתוח הפוליטי הבא, כתוב שתי טיוטות פוסט עבור ח"כ אריאל קלנר (ליכוד) בגוף ראשון:\n\n${synthesis}\n\nכתוב בדיוק בפורמט הזה:\n\n🐦 *טיוטה ל-X (טוויטר):*\n[טקסט קצר, מקסימום 240 תווים, גוף ראשון, ישיר ואגרסיבי, ציוני, ללא האשטאגים]\n\n📘 *טיוטה לפייסבוק:*\n[2-3 משפטים, גוף ראשון, עם הקשר ורקע, אישי יותר]`;
-                    const drafts = await sc(draftsPrompt, []);
-                    await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n✍️ *טיוטות פוסטים:*\n\n${drafts}`);
-                  } catch (draftsErr) { logger.warn('⚠️ drafts generation failed:', draftsErr.message); }
-                } catch (synthErr) { logger.warn('⚠️ synthesis failed:', synthErr.message); }
+                  const ch = findChatByName(_cs1, gn);
+                  if (!ch) { groupStats.push({name:gn,count:0,status:'not_found'}); continue; }
+                  const msgs = await safeFetchMessages(ch, 150);
+                  const rec = msgs.filter(m => m.body && m.timestamp > _scanDay);
+                  groupStats.push({name:ch.name, count:rec.length, status:'ok'});
+                  for (const m of rec.filter(m => m.body.trim().length > 15))
+                    allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,250), ts:m.timestamp});
+                } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0,60)}`); groupStats.push({name:gn,count:0,status:'error',error:ge.message?.substring(0,60)}); }
+              }
+              allMessages.sort((a,b)=>a.ts-b.ts);
+              const totalM = groupStats.reduce((a,g)=>a+g.count,0);
+              const activeGrps = groupStats.filter(g=>g.count>0);
+              const silentGrps = groupStats.filter(g=>g.count===0 && g.status==='ok').map(g=>g.name);
+              const notFoundGrps = groupStats.filter(g=>g.status==='not_found').map(g=>g.name);
+              const errorGrps = groupStats.filter(g=>g.status==='error').map(g=>g.name);
+              const hotG = [...groupStats].sort((a,b)=>b.count-a.count)[0];
+              const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
+              const _dailyFooter = [];
+              if (silentGrps.length) _dailyFooter.push(`🔇 _שקטות (${silentGrps.length}): ${silentGrps.join(', ')}_`);
+              if (notFoundGrps.length) _dailyFooter.push(`❓ _לא נמצאו (${notFoundGrps.length}): ${notFoundGrps.join(', ')}_`);
+              if (errorGrps.length) _dailyFooter.push(`⚠️ _שגיאה (${errorGrps.length}): ${errorGrps.join(', ')}_`);
+              const _dailyFooterLine = _dailyFooter.length ? '\n' + _dailyFooter.join('\n') : '';
+              const header = `📋 *סקירה יומית — ${time}*\n━━━━━━━━━━━━━━━━━━━━\n🌡️ ${lvl}  |  🏆 ${hotG?.name||'—'}\n📊 ${totalM} הודעות | ✅ ${activeGrps.length}/${groupStats.length} קבוצות עם תוכן${_dailyFooterLine}\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+              if (!allMessages.length) {
+                await botSend(oc, header + '_אין הודעות חדשות ב-24 השעות האחרונות_');
+                try { saveScanHistory({ kind: 'daily', windowLabel: '24 שעות אחרונות', totalMessages: 0, activeGroups: 0, groupStats, hotGroup: null, scanOutput: '' }); } catch {}
+              } else {
+                const pool = allMessages.map(m=>`⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
+                const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט נתונים: ⏰DD/MM HH:MM [שם-קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\n\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו על הנושא, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט ישיר]\"\n\n⚠️ שורה 2 חייבת תמיד:\n- כל שמות הקבוצות שהזכירו נושא זה (מתוך [שם-קבוצה] בנתונים — כולם, לא רק אחת)\n- שעת הפרסום הראשונה (מתוך ⏰ בנתונים)\n- ציטוט ישיר\nאסור להמציא.\n\nדוגמה — נושא שדווח ב-3 קבוצות:\n⚡ *ביטול היטל העברת כספים*\n📍 ממשלה בעבודה, זירה פוליטית, הימנים בליכוד | 🕐 09:15 — \"מדובר בביטול שיהיה מחר בבוקר\"\n\nדוגמה — נושא שדווח בקבוצה אחת:\n🔥 *גיוס חרדים נדחה בכנסת*\n📍 הודעות דוברות לתקשורת | 🕐 11:30 — \"הצבעה על חוק הגיוס נדחתה\"\n\nאחרי כל הנושאים:\n━━━━━━━━━━━━━━━━━━━━\n💡 *זווית קלנר:* [נושא מדויק לתגובה]\n📲 *פעולה מוצעת:* [הצהרה / פוסט / יוזמה — ספציפי]\n\nכללי: 3-7 נושאים מהחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ לפני הסמל אם רלוונטי במיוחד לקלנר. עברית בלבד. אין כותרות, הקדמות, הסברים.`;
+                const scanResult = await sc(scanPrompt, []);
+                await botSend(oc, header + scanResult);
+                try { saveScanHistory({ kind: 'daily', windowLabel: '24 שעות אחרונות', totalMessages: totalM, activeGroups: activeGrps.length, groupStats, hotGroup: hotG?.name || null, scanOutput: scanResult }); } catch (e) { logger.warn('scan-history save failed:', e.message?.substring(0,80)); }
+                try {
+                  const draftsPrompt = `בהתבסס על הסריקה הבאה, כתוב שתי טיוטות פוסט לח"כ קלנר בגוף ראשון:\n\n${scanResult}\n\nפורמט:\n🐦 *טיוטה ל-X:*\n[עד 240 תווים, ישיר, ציוני, ללא האשטאגים]\n\n📘 *טיוטה לפייסבוק:*\n[2-3 משפטים, עם הקשר, אישי יותר]`;
+                  const drafts = await sc(draftsPrompt, []);
+                  await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n✍️ *טיוטות פוסטים:*\n\n${drafts}`);
+                } catch (draftsErr) { logger.warn('⚠️ drafts failed:', draftsErr.message); }
               }
             } else if (daily_action === 'media_briefing') {
               // Morning media briefing
@@ -642,11 +858,9 @@ registerToolHandlers({
   keyword_alerts: async ({ action, keyword, enabled }) => {
     const ka = require('./src/keyword-alerts');
     switch (action) {
-      case 'status': {
-        const s = ka.getStatus();
-        return `🚨 *התראות מילות מפתח:*\n${s.enabled ? '✅ פעיל' : '❌ כבוי'}\n\nמילות מפתח (${s.keywords.length}):\n${s.keywords.map(k => `• ${k}`).join('\n')}`;
-      }
+      case 'status': return ka.getFullStatus();
       case 'stats': return ka.getStats();
+      case 'today': return ka.getTodayAlerts();
       case 'add': ka.addKeyword(keyword); return `✅ נוסף: "${keyword}"`;
       case 'remove': ka.removeKeyword(keyword); return `🗑️ הוסר: "${keyword}"`;
       case 'enable': ka.setEnabled(true); return '✅ התראות הופעלו';
@@ -669,6 +883,50 @@ registerToolHandlers({
       default: return `פעולה לא מוכרת: ${action}`;
     }
   },
+
+  // ─── Navigation (Waze/Maps links + ETA) ────────────────────────
+  // Bot sends links to user's WhatsApp; tapping on phone opens the app
+  // automatically (Waze universal link or Google Maps deep link).
+  navigation: async ({ action, destination, from, home_address }) => {
+    const nav = require('./src/navigation');
+    try {
+      switch (action) {
+        case 'waze_link':
+          if (!destination) return '❌ יעד חסר. לדוגמה: "בוא נסע לירושלים"';
+          logger.info(`🚗 waze_link → "${destination}"`);
+          return nav.wazeLinkOnly(destination);
+        case 'maps_link':
+          if (!destination) return '❌ יעד חסר. לדוגמה: "פתח מפות לכנסת"';
+          logger.info(`🗺️ maps_link → "${destination}"${from ? ' from ' + from : ''}`);
+          return nav.mapsLinkOnly(destination, from || null);
+        case 'eta':
+          if (!destination) return '❌ יעד חסר. לדוגמה: "כמה זמן לוקח לי לאילת"';
+          return await nav.eta(destination, { from: from || null });
+        case 'set_home':
+          if (!home_address) return '❌ כתובת חסרה. לדוגמה: "קבע את הבית שלי במודיעין"';
+          return nav.setHome(home_address);
+        default:
+          return `פעולה לא מוכרת: ${action}`;
+      }
+    } catch (e) {
+      logger.warn(`navigation error: ${e.message?.substring(0,80)}`);
+      return `❌ *שגיאה בניווט:* ${e.message?.substring(0, 120) || 'שגיאה לא ידועה'}`;
+    }
+  },
+  // ─── Collective Memory (search across scans+chats+calls+memory) ─
+  memory_search: async ({ query, days, sources }) => {
+    if (!query || !query.trim()) return '❌ צריך מילת חיפוש. לדוגמה: "תחפש בזיכרון: בגץ"';
+    const collMem = require('./src/collective-memory');
+    const since = new Date(Date.now() - (days || 30) * 24 * 60 * 60 * 1000);
+    try {
+      logger.info(`🧠 memory_search: "${query}" (${days || 30}d, sources=${sources ? sources.join(',') : 'all'})`);
+      const r = await collMem.searchMemory(query, { since, limit: 25, sources });
+      return r.answer;
+    } catch (e) {
+      logger.warn(`memory_search error: ${e.message?.substring(0, 100)}`);
+      return `❌ *שגיאה בחיפוש בזיכרון:* ${e.message?.substring(0, 120) || 'שגיאה'}`;
+    }
+  },
 });
 
 // ─── Express ─────────────────────────────────────────────────────
@@ -678,6 +936,8 @@ const io = new Server(server);
 app.use(express.static(path.join(__dirname, 'public')));
 
 let botStatus = 'disconnected';
+let botName = 'בוטי';
+let botPhone = '';
 let currentQR = null;
 const messageLog = [];
 const conversations = loadConversations();
@@ -770,6 +1030,8 @@ client.on('ready', () => {
   const info = client.info;
   logger.info(`✅ בוטי מחובר! | ${info.pushname} (+${info.wid.user})`);
   io.emit('status', 'connected');
+  botName = info.pushname || 'בוטי';
+  botPhone = info.wid.user || '';
   io.emit('botInfo', { name: info.pushname, phone: info.wid.user });
 
   // ── Initialize face recognition in background ──
@@ -812,36 +1074,36 @@ client.on('ready', () => {
       try {
         const oc = await client.getChatById(OWNER_ID);
         if (d.action === 'group_summary') {
-          let sum = `📋 *סקירה יומית — ${d.time}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
-          const allGroupContent = [];
           const groupStats = [];
+          const allMessages = [];
           const {smartChat:sc} = require('./src/claude');
+          const _scanDay = Date.now()/1000-86400;
+          const _cs2 = await client.getChats(); // fetch once
           for (const gn of (d.params.groups||[])) {
-            const cs = await client.getChats(); const ch = findChatByName(cs, gn);
-            if (!ch) { groupStats.push({name:gn,count:0,lastTs:0}); sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
-            const msgs = await safeFetchMessages(ch, 150); const day = Date.now()/1000-86400;
-            const rec = msgs.filter(m => m.body && m.timestamp > day);
-            groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
-            if (!rec.length) { sum += `*${ch.name}:* אין חדש\n\n`; continue; }
-            const dump = rec.map(m => `[${new Date(m.timestamp*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}] ${m._data?.notifyName||'משתתף'}: ${m.body.substring(0,300)}`).join('\n');
-            const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות). כלול שעה ליד כל ידיעה עיקרית:\n${dump}`, []);
-            sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
-            allGroupContent.push(`📌 ${ch.name}:\n${s}`);
-          }
-          if (groupStats.length) {
-            const totalM = groupStats.reduce((a,g)=>a+g.count,0);
-            const hot = [...groupStats].sort((a,b)=>b.count-a.count)[0];
-            const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
-            const meter = `🌡️ *מד פעילות:* ${lvl}\n🏆 הכי פעיל: *${hot.name}* (${hot.count} הודעות)\n📊 סה"כ: *${totalM}* הודעות מ-${groupStats.filter(g=>g.count>0).length} קבוצות\n\n`;
-            sum = sum.replace('━━━━━━━━━━━━━━━━━━━━\n\n', '━━━━━━━━━━━━━━━━━━━━\n\n' + meter);
-          }
-          await botSend(oc, sum);
-          if (allGroupContent.length > 0) {
             try {
-              const synthesisPrompt = `אתה עוזר מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד). קראת סיכומים מהקבוצות הבאות:\n\n${allGroupContent.join('\n\n')}\n\nכתוב ניתוח בפורמט זה בדיוק:\n\n🔁 *כפילויות — ידיעות שחוזרות ביותר מקבוצה אחת:*\n• [ידיעה מדויקת]: ([שם קבוצה א], [שם קבוצה ב])\n(אם אין כפילויות — כתוב: "אין ידיעות כפולות")\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא — מקור: שם הקבוצה]\n2. [נושא — מקור: שם הקבוצה]\n3. [נושא — מקור: שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא שקלנר יכול להגיב עליו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
-              const synthesis = await sc(synthesisPrompt, []);
-              await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
-            } catch (synthErr) { logger.warn('⚠️ synthesis failed:', synthErr.message); }
+              const ch = findChatByName(_cs2, gn);
+              if (!ch) { groupStats.push({name:gn,count:0}); continue; }
+              const msgs = await safeFetchMessages(ch, 150);
+              const rec = msgs.filter(m => m.body && m.timestamp > _scanDay);
+              groupStats.push({name:ch.name, count:rec.length});
+              for (const m of rec.filter(m => m.body.trim().length > 15))
+                allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,250), ts:m.timestamp});
+            } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0,60)}`); groupStats.push({name:gn,count:0}); }
+          }
+          allMessages.sort((a,b)=>a.ts-b.ts);
+          const totalM = groupStats.reduce((a,g)=>a+g.count,0);
+          const activeGrps = groupStats.filter(g=>g.count>0);
+          const hotG = [...groupStats].sort((a,b)=>b.count-a.count)[0];
+          const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
+          const header = `📋 *סקירה יומית — ${d.time}*\n━━━━━━━━━━━━━━━━━━━━\n🌡️ ${lvl}  |  🏆 ${hotG?.name||'—'}  |  📊 ${totalM} הודעות מ-${activeGrps.length} קבוצות\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+          if (!allMessages.length) {
+            await botSend(oc, header + '_אין הודעות חדשות ב-24 השעות האחרונות_');
+          } else {
+            const pool = allMessages.map(m=>`⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
+            const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט נתונים: ⏰DD/MM HH:MM [שם-קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\n\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו על הנושא, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט ישיר]\"\n\n⚠️ שורה 2 חייבת תמיד:\n- כל שמות הקבוצות שהזכירו נושא זה (מתוך [שם-קבוצה] בנתונים — כולם, לא רק אחת)\n- שעת הפרסום הראשונה (מתוך ⏰ בנתונים)\n- ציטוט ישיר\nאסור להמציא.\n\nדוגמה — נושא שדווח ב-3 קבוצות:\n⚡ *ביטול היטל העברת כספים*\n📍 ממשלה בעבודה, זירה פוליטית, הימנים בליכוד | 🕐 09:15 — \"מדובר בביטול שיהיה מחר בבוקר\"\n\nדוגמה — נושא שדווח בקבוצה אחת:\n🔥 *גיוס חרדים נדחה בכנסת*\n📍 הודעות דוברות לתקשורת | 🕐 11:30 — \"הצבעה על חוק הגיוס נדחתה\"\n\nאחרי כל הנושאים:\n━━━━━━━━━━━━━━━━━━━━\n💡 *זווית קלנר:* [נושא מדויק לתגובה]\n📲 *פעולה מוצעת:* [הצהרה / פוסט / יוזמה — ספציפי]\n\nכללי: 3-7 נושאים מהחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ לפני הסמל אם רלוונטי במיוחד לקלנר. עברית בלבד. אין כותרות, הקדמות, הסברים.`;
+            const scanResult = await sc(scanPrompt, []);
+            const _legend = `\n━━━━━━━━━━━━━━━━━━━━\n🔑 *מפתח:* ⚡ = נושא ב-2+ קבוצות | 🔥 = קבוצה אחת | ⭐ = רלוונטי במיוחד לקלנר`;
+            await botSend(oc, header + scanResult + _legend);
           }
         } else if (d.action === 'send_message') {
           const {target:t,message:msg,type:tp} = d.params;
@@ -856,6 +1118,62 @@ client.on('ready', () => {
 
   if (restoredScheduled || restoredDaily) {
     logger.info(`♻️ שוחזרו: ${restoredScheduled} תזמונים, ${restoredDaily} משימות יומיות`);
+  }
+
+  // ── Warm-up scan groups into WhatsApp Store ───────────────────
+  // After restart, Chromium cache is empty → groups return 0-1 msgs.
+  // Two-pass warm-up: first at 15s, retry sparse groups at 60s.
+  const _doWarmup = async (passLabel) => {
+    try {
+      const scanTask = [...dailyTasks.values()].find(d => d.action === 'group_summary');
+      if (!scanTask?.params?.groups?.length) return [];
+      const allChats = await client.getChats();
+      const sparseGroups = [];
+      logger.info(`🔥 Warming up ${scanTask.params.groups.length} scan groups (${passLabel})...`);
+      for (const gn of scanTask.params.groups) {
+        try {
+          const ch = findChatByName(allChats, gn);
+          if (!ch) { logger.warn(`⚠️ Warm-up: group not found: "${gn}"`); continue; }
+          const msgs = await safeFetchMessages(ch, 50);
+          if (msgs._usedFallback || msgs.length < 3) sparseGroups.push(gn);
+        } catch { sparseGroups.push(gn); }
+      }
+      logger.info(`✅ Warm-up (${passLabel}) complete — ${sparseGroups.length} sparse groups remain`);
+      return sparseGroups;
+    } catch (e) { logger.warn('⚠️ Warm-up failed:', e.message?.substring(0, 60)); return []; }
+  };
+  setTimeout(async () => {
+    const sparse = await _doWarmup('pass 1');
+    if (sparse.length > 0) {
+      // Give WhatsApp Web 45 more seconds to sync, then retry sparse groups
+      setTimeout(() => _doWarmup('pass 2'), 45000);
+    }
+  }, 15000);
+
+  // ── Blocklist sweep: purge cached messages from spam groups on startup ──
+  if (_BLOCKED_GROUP_PATTERNS.length > 0) {
+    setTimeout(async () => {
+      try {
+        let purgedGroups = 0, purgedMsgs = 0;
+        for (const cid of Object.keys(_msgCache)) {
+          if (_blockedJids.has(cid)) continue;
+          try {
+            const chat = await client.getChatById(cid);
+            const name = chat?.name || '';
+            _jidNames.set(cid, name);
+            if (_BLOCKED_GROUP_PATTERNS.some(p => name.includes(p))) {
+              _blockedJids.add(cid);
+              const n = _msgCache[cid]?.length || 0;
+              logger.info(`🚫 Blocked group "${name}" — purging ${n} cached msgs`);
+              delete _msgCache[cid];
+              _msgCacheDirty = true;
+              purgedGroups++; purgedMsgs += n;
+            }
+          } catch {}
+        }
+        if (purgedGroups > 0) logger.info(`🚫 Blocklist sweep: purged ${purgedGroups} group(s), ${purgedMsgs} msg(s)`);
+      } catch (e) { logger.warn('⚠️ Blocklist sweep failed:', e.message?.substring(0, 60)); }
+    }, 20000);
   }
 
   // ── Startup notification (cloud deploy only) ──────────────────
@@ -877,12 +1195,101 @@ client.on('ready', () => {
   }
 });
 
-client.on('disconnected', (reason) => { console.log('❌ נותק:', reason); botStatus = 'disconnected'; io.emit('status', 'disconnected'); });
+// ─── Owner notification (email) — rate-limited so we never spam ───────
+const OWNER_EMAIL = 'moshikoohana@gmail.com';
+const _notifyStateFile = path.join(__dirname, 'data', 'bot-down-notify.json');
+function _loadNotifyState() { try { return JSON.parse(fs.readFileSync(_notifyStateFile, 'utf8')); } catch { return { lastSent: 0 }; } }
+function _saveNotifyState(s) { try { fs.writeFileSync(_notifyStateFile, JSON.stringify(s)); } catch {} }
+let _reconnectAttempts = 0;
+
+async function notifyOwnerBotDown(kind, details) {
+  const now = Date.now();
+  const state = _loadNotifyState();
+  // Rate-limit: at most one email per 5 minutes (avoid spam on flap)
+  if (now - (state.lastSent || 0) < 5 * 60 * 1000) {
+    logger.info(`📧 Bot-down email suppressed (rate-limit) — ${kind}`);
+    return;
+  }
+  try {
+    const { sendEmail } = require('./src/gmail');
+    const hostName = os.hostname();
+    const whenIL = new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+    const subject = `🚨 בוטי נותק מוואטסאפ — ${kind}`;
+    const body = [
+      `<b>⚠️ הבוט איבד את החיבור לוואטסאפ</b>`,
+      ``,
+      `<b>סוג:</b> ${kind}`,
+      `<b>פרטים:</b> ${String(details || '').replace(/[<>]/g,'')}`,
+      `<b>שעה:</b> ${whenIL}`,
+      `<b>מחשב:</b> ${hostName}`,
+      `<b>PID:</b> ${process.pid}`,
+      `<b>Uptime:</b> ${Math.round(process.uptime()/60)} דקות`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━`,
+      `<b>מה לעשות:</b>`,
+      `1. פתח <a href="http://localhost:3000">http://localhost:3000</a>`,
+      `2. אם רואים QR — סרוק בוואטסאפ (מכשירים מקושרים)`,
+      `3. אם לא רואים כלום — הפעל מחדש את הבוט`,
+      ``,
+      `הבוט מנסה להתחבר אוטומטית כרגע (עד 5 ניסיונות).`,
+    ].join('\n');
+    await sendEmail(OWNER_EMAIL, subject, body);
+    _saveNotifyState({ lastSent: now, kind, details: String(details||'').substring(0,200) });
+    logger.info(`📧 Bot-down email sent to ${OWNER_EMAIL} — ${kind}`);
+  } catch (e) {
+    logger.warn(`📧 Bot-down email FAILED: ${e.message?.substring(0,120)}`);
+  }
+}
+
+// ─── Auto-reconnect: try to revive the client in-process before exiting ──
+async function attemptReconnect(reason) {
+  _reconnectAttempts++;
+  if (_reconnectAttempts > 5) {
+    logger.error(`💀 Reconnect exhausted (5 attempts). Exiting so process-supervisor can restart.`);
+    await notifyOwnerBotDown('reconnect-exhausted', `תם מכסת ניסיונות החיבור (5). סיבה אחרונה: ${reason}`);
+    process.exit(1);
+    return;
+  }
+  const delayS = Math.min(60, 5 * _reconnectAttempts); // 5s, 10s, 15s, 20s, 25s
+  logger.warn(`🔄 Reconnect attempt ${_reconnectAttempts}/5 in ${delayS}s — reason: ${reason}`);
+  setTimeout(async () => {
+    try {
+      await client.initialize();
+      logger.info(`✅ Reconnect attempt ${_reconnectAttempts} — initialize() resolved`);
+    } catch (e) {
+      logger.warn(`⚠️ Reconnect attempt ${_reconnectAttempts} failed: ${e.message?.substring(0,80)}`);
+      attemptReconnect(`init-fail: ${e.message?.substring(0,50)}`);
+    }
+  }, delayS * 1000);
+}
+
+client.on('disconnected', async (reason) => {
+  console.log('❌ נותק:', reason);
+  botStatus = 'disconnected';
+  io.emit('status', 'disconnected');
+  // Fire-and-forget — don't block the disconnect handler
+  notifyOwnerBotDown('disconnected', reason).catch(()=>{});
+  attemptReconnect(`disconnected: ${reason}`);
+});
+
+client.on('auth_failure', async (msg) => {
+  logger.error(`🔴 auth_failure: ${msg}`);
+  botStatus = 'disconnected';
+  io.emit('status', 'disconnected');
+  notifyOwnerBotDown('auth_failure', msg).catch(()=>{});
+  // auth_failure usually means session invalid — need QR; process-level restart helps
+  attemptReconnect(`auth_failure: ${msg}`);
+});
+
+// Reset reconnect counter once we're fully ready again
+client.on('ready', () => { _reconnectAttempts = 0; });
 
 // ─── Send helper (auto-split long messages) ────────────────────
 const MAX_MSG_LEN = 3000;
 
 async function botSend(chat, text) {
+  // Persist outgoing message to chat log (best-effort, never throws)
+  try { appendChatLog({ from: 'בוטי', text, direction: 'out', chatId: chat?.id?._serialized || '' }); } catch {}
   const full = text + BOT_SIG + BOT_MARKER;
   if (full.length <= MAX_MSG_LEN) {
     return chat.sendMessage(full);
@@ -951,6 +1358,8 @@ const ALLOWED_TYPES = new Set(['chat', 'image', 'sticker', 'ptt', 'audio', 'docu
 client.on('message_create', async (msg) => {
   // 🔍 Early diagnostic log — visible in Railway/cloud logs
   console.log(`📩 msg_create: type=${msg.type} from=${(msg.from||'').substring(0,25)} to=${(msg.to||'').substring(0,25)} fromMe=${msg.fromMe}`);
+  // Persist group messages to disk for scan resilience across restarts
+  if (!msg.fromMe) _cacheGroupMsg(msg);
   try {
     // Only handle text and images
     if (!ALLOWED_TYPES.has(msg.type)) return;
@@ -1038,12 +1447,12 @@ client.on('message_create', async (msg) => {
         try {
           const _grpCht = await msg.getChat();
           const _ownerC = await client.getChatById(OWNER_ID);
-          const _preview = msg.body.substring(0, 120);
+          const _preview = stripUrls(msg.body.substring(0, 150));
           await botSend(_ownerC,
             `🚨 *התראה — מילת מפתח: "${_matchOwner}"*\n` +
             `📍 *${_grpCht.name || msg.to}*\n` +
             `👤 אתה\n` +
-            `💬 "${_preview}${msg.body.length > 120 ? '...' : ''}"`
+            `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
           );
           require('./src/keyword-alerts').logAlert(_matchOwner, _grpCht.name || msg.to, 'אתה', _preview);
         } catch (_oe) { /* silent */ }
@@ -1171,6 +1580,25 @@ client.on('message_create', async (msg) => {
         const chat = await msg.getChat();
         await chat.sendMessage('🔍 _בודק פנים בתמונה..._' + BOT_MARKER);
         const response = await handleFaceTest(msg, isBlurTest, isHighlight || isHighlightBlur, isHighlightBlur);
+        await botSend(chat, response);
+        stats.sent++;
+        log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
+        return;
+      }
+
+      // ── If the caption is a WhatsApp/bot command, ignore the image and route as text ──
+      // e.g. user sends a group screenshot with "סרוק לי את 50 ההודעות האחרונות בקבוצת X"
+      const _isWACmd = caption.length > 5 && (
+        /סריקת קבוצות|סקירת קבוצות|תסרוק|סרוק לי|הודעות אחרונות בקבוצת|סכם קבוצת|סכם את הקבוצה/i.test(caption) ||
+        /שלח הודעה ל|תזמן הודעה|דוח התראות|התראות היום|מה חדש בבוט|סטטוס ניטור|תעשה סקירה|תעשה לי סריקה/i.test(caption)
+      );
+      if (_isWACmd) {
+        console.log(`📨 [${ts()}] 🖼️→📝 כיתוב=פקודה: ${caption.substring(0, 80)}`);
+        stats.received++;
+        log({ time: ts(), from: 'מושיקו', text: caption, direction: 'in' });
+        const chat = await msg.getChat();
+        await chat.sendStateTyping();
+        const response = await route(chatId, caption);
         await botSend(chat, response);
         stats.sent++;
         log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
@@ -1307,54 +1735,142 @@ client.on('message_create', async (msg) => {
     }
 
     // ── Manual briefing trigger — runs scheduled group_summary now ─
-    if (/^(סקירה עכשיו|הרץ סקירה|סריקת קבוצות|סקירת קבוצות|run briefing|briefing now|תסרוק קבוצות|תסרוק לי|תעשה סקירה|תעשה לי סריקה)/i.test(text)) {
+    // Match scan request: either exact start-phrase OR "סריקת/סקירת קבוצות" anywhere in message
+    // Catch every scan-request variation — skips scheduling commands
+    // Only block when user explicitly wants to SCHEDULE (not when describing existing routine)
+    const _isSchedCmd = /(?:תזמן|צור תזמון|הגדר תזמון)/i.test(text) ||
+      /כל (?:יום|בוקר|ערב|לילה)\s+ב-?\d{1,2}:\d{2}/i.test(text);
+    // Skip multi-group scan if user asked about a specific single group — let Claude route to whatsapp.summarize
+    // Catches: "קבוצת X", "את הקבוצה X", "של קבוצת X", "סכם את X", "מהקבוצה X"
+    // Note: Hebrew chars aren't \w in JS regex, so we avoid \b and rely on explicit prefixes
+    const _mentionsSingleGroup =
+      // "(את) (ה)קבוצה/קבוצת X" — where X is a letter/digit (not space/punct)
+      /(?:^|\s)(?:את\s+)?ה?קבוצ[הת]\s+["״']?[\u0590-\u05FFa-zA-Z0-9]/i.test(text) ||
+      // "של/מה/ב + קבוצה/קבוצת X"
+      /(?:של|מה|\sב)ה?קבוצ[הת]\s+["״']?[\u0590-\u05FFa-zA-Z0-9]/i.test(text) ||
+      // "סכם את הקבוצה/קבוצת ..."
+      /סכם\s+(?:לי\s+)?(?:את\s+)?ה?קבוצ[הת]/i.test(text);
+    if (!_isSchedCmd && !_mentionsSingleGroup && (
+      // user says "תעשה/עשה/תריץ/תן לי/רוצה... סריקה/סקירה" — bare, no specific group
+      /(?:תעשה|עשה|תריץ|הרץ|תן לי|תוציא|רוצה|צריך|אפשר|בצע|תפעיל|תשלח|הפעל)\s+(?:לי\s+)?(?:סריקה|סקירה)\b/i.test(text) ||
+      // starts with סריקה/סקירה (any suffix: יומית, עכשיו, ידנית, מהירה...)
+      /^(?:סריקה|סקירה)\b/i.test(text) ||
+      // classic exact phrases — explicit multi-group wording
+      /סריקת קבוצות|סקירת קבוצות|תסרוק קבוצות|תסרוק לי את הקבוצות/i.test(text) ||
+      // "תסרוק לי" alone — only when followed by time-window or nothing (not by a specific target)
+      /תסרוק לי(?:\s+(?:מ|עד|עכשיו|את הקבוצות|קבוצות)|$|[\?\.!])/i.test(text) ||
+      // english
+      /^(?:run briefing|briefing now|run scan)/i.test(text)
+    )) {
       const summaryTask = [...dailyTasks.values()].find(d => d.action === 'group_summary');
       if (!summaryTask) {
         await botSend(chat, `❌ לא נמצאה משימת סקירה מתוזמנת. הגדר אחת קודם.`);
         stats.sent++; return;
       }
-      await botSend(chat, `⏳ *מריץ סקירת קבוצות עכשיו...*\n_${(summaryTask.params.groups||[]).length} קבוצות — זה ייקח כמה שניות_`);
+      // ── Parse time window from user request ──────────────────────
+      // "4 שעות אחרונות" | "שעה אחרונה" | "מאתמול" | "24 שעות" | "מהבוקר" | "מ-8" | "מ-8:30" | default
+      let _scanDay, _windowLabel;
+      const _hoursM = text.match(/(\d+)\s*שעות?\s*(?:אחרונות?|האחרונות?|אחרוני)/i);
+      const _fromHourM = text.match(/מ-?(\d{1,2})(?::(\d{2}))?(?!\s*שעות?)(?:\s*(?:בבוקר|בצהריים|בערב|לפנה"צ|אחה"צ))?/i);
+      if (_hoursM) {
+        const h = parseInt(_hoursM[1]);
+        _scanDay = Date.now()/1000 - h * 3600;
+        _windowLabel = `${h} שעות אחרונות`;
+      } else if (/שעה\s*(?:אחרונה|האחרונה)/i.test(text)) {
+        _scanDay = Date.now()/1000 - 3600;
+        _windowLabel = 'שעה אחרונה';
+      } else if (/מ?-?אתמול|מ?-?אמש/i.test(text)) {
+        const _yd = new Date(); _yd.setDate(_yd.getDate()-1); _yd.setHours(0,0,0,0);
+        _scanDay = _yd.getTime()/1000;
+        _windowLabel = 'מאתמול (מחצות אתמול)';
+      } else if (/48\s*שעות?|יומיים/i.test(text)) {
+        _scanDay = Date.now()/1000 - 172800;
+        _windowLabel = '48 שעות אחרונות';
+      } else if (/24\s*שעות?/i.test(text)) {
+        _scanDay = Date.now()/1000 - 86400;
+        _windowLabel = '24 שעות אחרונות';
+      } else if (/מה?בוקר|מ?-?הבוקר/i.test(text)) {
+        const _md = new Date(); _md.setHours(6,0,0,0);
+        _scanDay = _md.getTime()/1000;
+        _windowLabel = 'מהבוקר (06:00)';
+      } else if (/מ?-?חצות/i.test(text)) {
+        const _md = new Date(); _md.setHours(0,0,0,0);
+        _scanDay = _md.getTime()/1000;
+        _windowLabel = 'מחצות הלילה';
+      } else if (_fromHourM && parseInt(_fromHourM[1]) <= 23) {
+        // "מ-8" / "מ-8:30" / "מ-20:00" — specific hour today
+        const _fh = parseInt(_fromHourM[1]);
+        const _fm = parseInt(_fromHourM[2] || '0');
+        const _ft = new Date(); _ft.setHours(_fh, _fm, 0, 0);
+        _scanDay = _ft.getTime()/1000;
+        _windowLabel = `מ-${String(_fh).padStart(2,'0')}:${String(_fm).padStart(2,'0')} היום`;
+      } else {
+        // default: from midnight today, or last 24h if evening
+        const _nowH = new Date().getHours();
+        const _todayStart = (() => { const _d = new Date(); _d.setHours(0,0,0,0); return _d.getTime()/1000; })();
+        _scanDay = _nowH < 20 ? _todayStart : Date.now()/1000 - 86400;
+        _windowLabel = _nowH < 20 ? 'מחצות הלילה' : '24 שעות אחרונות';
+      }
+      await botSend(chat, `⏳ *מריץ סקירת קבוצות עכשיו...*\n⏱ _${_windowLabel}_\n_${(summaryTask.params.groups||[]).length} קבוצות — זה ייקח כמה שניות_`);
       // Run the same logic as the cron job, in background
       setImmediate(async () => {
+        let oc;
         try {
-          const oc = await client.getChatById(OWNER_ID);
-          // Smart time window: from midnight today (not 24h ago) so morning scans cover today only
-          const nowHour = new Date().getHours();
-          const todayStart = (() => { const _d = new Date(); _d.setHours(0,0,0,0); return _d.getTime() / 1000; })();
-          const day = nowHour < 20 ? todayStart : Date.now() / 1000 - 86400;
-          let sum = `📋 *סקירה ידנית — ${new Date().toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
-          const allGroupContent = [];
+          oc = await client.getChatById(OWNER_ID);
+          const day = _scanDay;
+          const nowT = (()=>{const _n=new Date();return`${String(_n.getHours()).padStart(2,'0')}:${String(_n.getMinutes()).padStart(2,'0')}`;})();
           const groupStats = [];
+          const allMessages = [];
           const { smartChat: sc } = require('./src/claude');
+          const cs = await client.getChats(); // fetch once outside loop
+          const _totalG = (summaryTask.params.groups || []).length;
+          let _doneG = 0;
           for (const gn of (summaryTask.params.groups || [])) {
             try {
-              const cs = await client.getChats();
               const ch = findChatByName(cs, gn);
-              if (!ch) { groupStats.push({name:gn,count:0,lastTs:0}); sum += `❌ "${gn}" — לא נמצאה\n\n`; continue; }
+              if (!ch) { groupStats.push({name:gn,count:0,status:'not_found'}); _doneG++; continue; }
               const msgs = await safeFetchMessages(ch, 150);
               const rec = msgs.filter(m => m.body && m.timestamp > day);
-              groupStats.push({name:ch.name, count:rec.length, lastTs: msgs.length ? msgs[msgs.length-1].timestamp : 0});
-              if (!rec.length) { sum += `*${ch.name}:* אין חדש מהיום\n\n`; continue; }
-              const d = rec.map(m => `[${new Date(m.timestamp*1000).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}] ${m._data?.notifyName || 'משתתף'}: ${m.body.substring(0, 300)}`).join('\n');
-              const s = await sc(`סכם בקצרה "${ch.name}" (${rec.length} הודעות). כלול שעה ליד כל ידיעה עיקרית:\n${d}`, []);
-              sum += `*📌 ${ch.name}* (${rec.length}):\n${s}\n\n`;
-              allGroupContent.push(`📌 ${ch.name}:\n${s}`);
-            } catch (ge) { sum += `⚠️ "${gn}" — שגיאה: ${ge.message?.substring(0,40)}\n\n`; }
+              groupStats.push({name:ch.name, count:rec.length, status:'ok'});
+              for (const m of rec.filter(m => m.body.trim().length > 15))
+                allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,250), ts:m.timestamp});
+              _doneG++;
+            } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0,60)}`); groupStats.push({name:gn,count:0,status:'error',error:ge.message?.substring(0,60)}); _doneG++; }
+            // Progress indicator — emit at halfway through a long scan
+            if (_totalG >= 6 && _doneG === Math.ceil(_totalG / 2)) {
+              try { await botSend(oc, `⏳ *סריקה בעיצומה:* ${_doneG}/${_totalG} קבוצות נסרקו...`); } catch {}
+            }
           }
-          if (groupStats.length) {
-            const totalM = groupStats.reduce((a,g)=>a+g.count,0);
-            const hot = [...groupStats].sort((a,b)=>b.count-a.count)[0];
-            const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
-            const meter = `🌡️ *מד פעילות:* ${lvl}\n🏆 הכי פעיל: *${hot.name}* (${hot.count} הודעות)\n📊 סה"כ: *${totalM}* הודעות מ-${groupStats.filter(g=>g.count>0).length} קבוצות\n\n`;
-            sum = sum.replace('━━━━━━━━━━━━━━━━━━━━\n\n', '━━━━━━━━━━━━━━━━━━━━\n\n' + meter);
+          allMessages.sort((a,b)=>a.ts-b.ts);
+          const totalM = groupStats.reduce((a,g)=>a+g.count,0);
+          const activeGrps = groupStats.filter(g=>g.count>0);
+          const silentGrps = groupStats.filter(g=>g.count===0 && g.status==='ok').map(g=>g.name);
+          const notFoundGrps = groupStats.filter(g=>g.status==='not_found').map(g=>g.name);
+          const errorGrps = groupStats.filter(g=>g.status==='error').map(g=>g.name);
+          const skippedGrps = [...notFoundGrps, ...errorGrps]; // kept for scan history backward-compat
+          const hotG = [...groupStats].sort((a,b)=>b.count-a.count)[0];
+          const lvl = totalM>300?'🔴🔴🔴🔴🔴 סוער':totalM>150?'🔴🔴🔴🟡 פעיל מאוד':totalM>50?'🟡🟡🟡 בינוני':'🟢🟢 שקט';
+          const _footerLines = [];
+          if (silentGrps.length) _footerLines.push(`🔇 _שקטות (${silentGrps.length}): ${silentGrps.join(', ')}_`);
+          if (notFoundGrps.length) _footerLines.push(`❓ _לא נמצאו בוואטסאפ (${notFoundGrps.length}): ${notFoundGrps.join(', ')}_`);
+          if (errorGrps.length) _footerLines.push(`⚠️ _שגיאה (${errorGrps.length}): ${errorGrps.join(', ')}_`);
+          const skippedLine = _footerLines.length ? '\n' + _footerLines.join('\n') : '';
+          const header = `📋 *סקירה ידנית — ${nowT}*\n⏱ _${_windowLabel}_\n━━━━━━━━━━━━━━━━━━━━\n🌡️ ${lvl}  |  🏆 ${hotG?.name||'—'}\n📊 ${totalM} הודעות | ✅ ${activeGrps.length}/${groupStats.length} קבוצות עם תוכן${skippedLine}\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+          if (!allMessages.length) {
+            await botSend(oc, header + `_אין הודעות ב${_windowLabel}_`);
+            try { saveScanHistory({ kind: 'manual', windowLabel: _windowLabel, totalMessages: 0, activeGroups: 0, groupStats, skippedGroups: skippedGrps, hotGroup: null, scanOutput: '' }); } catch {}
+          } else {
+            const pool = allMessages.map(m=>`⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
+            const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט נתונים: ⏰DD/MM HH:MM [שם-קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\n\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו על הנושא, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט ישיר]\"\n\n⚠️ שורה 2 חייבת תמיד:\n- כל שמות הקבוצות שהזכירו נושא זה (מתוך [שם-קבוצה] בנתונים — כולם, לא רק אחת)\n- שעת הפרסום הראשונה (מתוך ⏰ בנתונים)\n- ציטוט ישיר\nאסור להמציא.\n\nדוגמה — נושא שדווח ב-3 קבוצות:\n⚡ *ביטול היטל העברת כספים*\n📍 ממשלה בעבודה, זירה פוליטית, הימנים בליכוד | 🕐 09:15 — \"מדובר בביטול שיהיה מחר בבוקר\"\n\nדוגמה — נושא שדווח בקבוצה אחת:\n🔥 *גיוס חרדים נדחה בכנסת*\n📍 הודעות דוברות לתקשורת | 🕐 11:30 — \"הצבעה על חוק הגיוס נדחתה\"\n\nאחרי כל הנושאים:\n━━━━━━━━━━━━━━━━━━━━\n💡 *זווית קלנר:* [נושא מדויק לתגובה]\n📲 *פעולה מוצעת:* [הצהרה / פוסט / יוזמה — ספציפי]\n\nכללי: 3-7 נושאים מהחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ לפני הסמל אם רלוונטי במיוחד לקלנר. עברית בלבד. אין כותרות, הקדמות, הסברים.`;
+            const scanResult = await sc(scanPrompt, []);
+            const _legend = `\n━━━━━━━━━━━━━━━━━━━━\n🔑 *מפתח:* ⚡ = נושא ב-2+ קבוצות | 🔥 = קבוצה אחת | ⭐ = רלוונטי במיוחד לקלנר`;
+            await botSend(oc, header + scanResult + _legend);
+            try { saveScanHistory({ kind: 'manual', windowLabel: _windowLabel, totalMessages: totalM, activeGroups: activeGrps.length, groupStats, skippedGroups: skippedGrps, hotGroup: hotG?.name || null, scanOutput: scanResult }); } catch (e) { logger.warn('scan-history save failed:', e.message?.substring(0,80)); }
           }
-          await botSend(oc, sum);
-          if (allGroupContent.length > 0) {
-            const synthPrompt = `אתה עוזר מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד). קראת סיכומים מהקבוצות הבאות:\n\n${allGroupContent.join('\n\n')}\n\nכתוב ניתוח בפורמט זה בדיוק:\n\n🔁 *כפילויות — ידיעות שחוזרות ביותר מקבוצה אחת:*\n• [ידיעה מדויקת]: ([שם קבוצה א], [שם קבוצה ב])\n(אם אין כפילויות — כתוב: "אין ידיעות כפולות")\n\n🔥 *TOP 3 — הכי חם:*\n1. [נושא — מקור: שם הקבוצה]\n2. [נושא — מקור: שם הקבוצה]\n3. [נושא — מקור: שם הקבוצה]\n\n💡 *זווית קלנר:*\n[נושא שקלנר יכול להגיב עליו — ביטחון, שלטון חוק, כלכלה]\n\n📲 *פעולה מוצעת:*\n[פעולה ספציפית — פרסום, תגובה לתקשורת, פוסט, יוזמה]`;
-            const synthesis = await sc(synthPrompt, []);
-            await botSend(oc, `━━━━━━━━━━━━━━━━━━━━\n🧠 *ניתוח מודיעין פוליטי:*\n\n${synthesis}`);
-          }
-        } catch (err) { logger.error('Manual briefing error:', err.message); }
+        } catch (err) {
+          logger.error('Manual briefing error:', err.message);
+          try { if (oc) await botSend(oc, `❌ *שגיאה בסריקה:*\n_${err.message?.substring(0,120) || 'שגיאה לא ידועה'}_\n\nנסה שוב בעוד כמה שניות.`); } catch {}
+        }
       });
       stats.sent++; return;
     }
@@ -1392,10 +1908,14 @@ client.on('message_create', async (msg) => {
     stats.sent++;
     log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
   } catch (err) {
-    console.error('שגיאה:', err.message);
+    // Persist to log file so we can actually diagnose crashes afterwards
+    const errMsg = err?.message || String(err);
+    const errStack = (err?.stack || '').split('\n').slice(0, 4).join(' | ');
+    logger.error(`❌ Message handler crashed for ${chatId}: ${errMsg} | ${errStack}`);
+    console.error('שגיאה:', errMsg);
     // If it's a 400 API error, clear history for this chat to recover
-    if (err.status === 400 || (err.message && err.message.includes('400'))) {
-      console.error('🔴 400 error detected — clearing conversation history for', chatId);
+    if (err.status === 400 || (errMsg && errMsg.includes('400'))) {
+      logger.warn(`🔴 400 error detected — clearing conversation history for ${chatId}`);
       conversations.delete(chatId);
       saveConversations(conversations);
     }
@@ -1520,10 +2040,33 @@ async function handleCallRecording(msg, caption, fileName, chatId) {
       ? transcript.substring(0, 12000) + '\n\n... (קוצר — הקלטה ארוכה)'
       : transcript;
 
+    // ── Command Center #1.5: pre-analyze for media-tracker auto-sync ──
+    // Run structured extraction *before* the conversational summary so we
+    // can apply tracker updates deterministically and pass a JSON hint to
+    // Claude (avoiding tool-use guesswork on "did this person reply?").
+    let cmdSyncSummary = '';
+    let cmdAnalysis = null;
+    try {
+      cmdAnalysis = await cmdCenter.analyzeCallTranscript(truncated);
+      if (cmdAnalysis) {
+        const applied = await cmdCenter.applyCallAnalysis(cmdAnalysis);
+        cmdSyncSummary = applied.summary;
+        if (applied.trackerUpdated) {
+          logger.info(`📞 CommandCenter #1.5: media-tracker updated for ${cmdAnalysis.mediaContactId}`);
+        }
+      }
+    } catch (e) {
+      logger.warn(`CommandCenter #1.5 analyze error: ${e.message?.substring(0, 80)}`);
+    }
+
+    const cmdHint = cmdSyncSummary
+      ? `\n\n[🤖 *Command Center — סינכרון אוטומטי כבר בוצע:*\n${cmdSyncSummary}\n— אל תכפיל פעולות שכבר בוצעו (כמו markReplied). אם זוהה ראיון מתוזמן, אשר/הוסף ליומן.]`
+      : '';
+
     // If user provided caption, follow their intent; otherwise full analysis
     const prompt = caption
-      ? `[🎙️ הקלטת שיחה — ${fileName} (${sizeMB}MB, ~${estMinutes} דק׳)]\n\nתמלול:\n${truncated}\n\n---\nבקשת המשתמש: ${caption}`
-      : `[🎙️ הקלטת שיחת טלפון — ${fileName} (${sizeMB}MB, ~${estMinutes} דק׳)]\n\nתמלול השיחה:\n${truncated}\n\n---\nזו הקלטת שיחת טלפון. בבקשה:\n1. 📝 *סכם* את השיחה — מי דיבר, על מה, מה סוכם\n2. ✅ *חלץ משימות* — כל דבר שסוכם/הובטח/נדרש פעולה. ציין אחראי ודדליין\n3. 📅 אם נקבעו *פגישות/מועדים* — הוסף ליומן אוטומטית (calendar add)\n4. ⏰ אם יש *משימות עם דדליין* — הצע תזכורת (schedule once)\n5. 🧠 *שמור בזיכרון* פרטים חשובים (memory save)\nפורמט מסודר עם אימוג'ים.`;
+      ? `[🎙️ הקלטת שיחה — ${fileName} (${sizeMB}MB, ~${estMinutes} דק׳)]\n\nתמלול:\n${truncated}\n\n---\nבקשת המשתמש: ${caption}${cmdHint}`
+      : `[🎙️ הקלטת שיחת טלפון — ${fileName} (${sizeMB}MB, ~${estMinutes} דק׳)]\n\nתמלול השיחה:\n${truncated}\n\n---\nזו הקלטת שיחת טלפון. בבקשה:\n1. 📝 *סכם* את השיחה — מי דיבר, על מה, מה סוכם\n2. ✅ *חלץ משימות* — כל דבר שסוכם/הובטח/נדרש פעולה. ציין אחראי ודדליין\n3. 📅 אם נקבעו *פגישות/מועדים* — הוסף ליומן אוטומטית (calendar add)\n4. ⏰ אם יש *משימות עם דדליין* — הצע תזכורת (schedule once)\n5. 🧠 *שמור בזיכרון* פרטים חשובים (memory save)\nפורמט מסודר עם אימוג'ים.${cmdHint}`;
 
     const history = getHistory(chatId);
     const reply = await smartChat(prompt, history);
@@ -1826,19 +2369,21 @@ client.on('message', async (msg) => {
           const _alertChat = await msg.getChat();
           const _groupNameForAlert = _alertChat.name || _kFromJid;
           const _sender = msg._data?.notifyName || 'מישהו';
-          const _preview = msg.body.substring(0, 120);
+          const _preview = stripUrls(msg.body.substring(0, 150));
           const _ownerC = await client.getChatById(OWNER_ID);
           await botSend(_ownerC,
             `🚨 *התראה — מילת מפתח: "${_matchedKw}"*\n` +
             `📍 *${_groupNameForAlert}*\n` +
             `👤 ${_sender}\n` +
-            `💬 "${_preview}${msg.body.length > 120 ? '...' : ''}"`
+            `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
           );
           require('./src/keyword-alerts').logAlert(_matchedKw, _groupNameForAlert, _sender, _preview);
         } catch (_alertErr) { /* silent */ }
       }
     }
   }
+  // Persist group text messages to disk — survives bot restarts for scan resilience
+  _cacheGroupMsg(msg);
   // Queue — share the same face-detection queue to avoid concurrent TF.js
   if (msg.type !== 'image' && msg.type !== 'album') return;
   _queueFace(async () => {
@@ -1897,7 +2442,7 @@ client.on('message', async (msg) => {
       const sender = msg._data?.notifyName || 'מישהו';
       const time = new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
 
-      const photoData = { name: match.name, imageBuffer, confidence: match.confidence, groupName };
+      const photoData = { name: match.name, imageBuffer, confidence: match.confidence, groupName, sentAt: Date.now() };
       lastForwardedPhoto.set(OWNER_ID, photoData); // for text-only "פידבק כן/לא"
 
       // Helper: register a sent message for reply-based feedback
@@ -2137,17 +2682,22 @@ async function route(chatId, text) {
   }
 
   // ── Face recognition feedback — natural language ────────────────
-  // Any short message after a forwarded photo → route directly to Claude vision feedback handler.
-  // No keyword gating — Claude inside handlePhotoFeedback understands ANY phrasing:
-  //   "זאת לא שי", "זה מיה", "טעות", "נכון", "כן", "לא הוא" etc.
+  // Short message after a forwarded photo → Claude feedback handler.
+  // ALWAYS cleared after first use to prevent feedback loops.
+  // TTL: 3 minutes (if user doesn't respond in time, they should reply directly to the photo).
   const lastPhoto = lastForwardedPhoto.get(chatId);
+  const FEEDBACK_TTL = 3 * 60 * 1000; // 3 minutes
   if (lastPhoto && text.length < 150 && !text.startsWith('/')) {
-    const reply = await handlePhotoFeedback(text.trim(), lastPhoto, null);
-    // Clear pending photo only after meaningful action (confirm / deny)
-    if (reply.startsWith('✅') || reply.startsWith('📝 *')) {
+    // Expire stale entries
+    if (lastPhoto.sentAt && Date.now() - lastPhoto.sentAt > FEEDBACK_TTL) {
       lastForwardedPhoto.delete(chatId);
+    } else {
+      // Always delete after one attempt — prevents endless feedback loop.
+      // On temp API error (⏳), user can still reply directly to the forwarded photo.
+      lastForwardedPhoto.delete(chatId);
+      const reply = await handlePhotoFeedback(text.trim(), lastPhoto, null);
+      return reply;
     }
-    return reply;
   }
 
   // Quick commands (still work for power users)
@@ -2166,10 +2716,70 @@ async function route(chatId, text) {
     return formatChangelog(3);
   }
 
+  // ─── Keyword alert — today's hits ────────────────────────────────
+  if (/^(התראות היום|מה ניטרתי היום|מה קרה היום בניטור|ניטור היום|מילות מפתח היום|alerts today)/i.test(text.trim()) ||
+      /התראות של היום|מה התראות היום|כמה התראות היום/i.test(text.trim())) {
+    const { getTodayAlerts: _kwToday } = require('./src/keyword-alerts');
+    return _kwToday();
+  }
+
+  // ─── Keyword alert — monitoring status (which groups, which keywords) ─
+  if (/^(סטטוס ניטור|מצב ניטור|ניטור סטטוס|סטטוס מילות מפתח|מצב מילות מפתח|keyword status)/i.test(text.trim())) {
+    const { getFullStatus: _kwStatus } = require('./src/keyword-alerts');
+    return _kwStatus();
+  }
+
   // ─── Keyword alert stats / log ───────────────────────────────────
   if (/^(דוח התראות|התראות מילות מפתח|דוח מילים|keyword stats|דוח מפתח|אזכורים)/i.test(text.trim())) {
     const { getStats: _kwStats } = require('./src/keyword-alerts');
     return _kwStats();
+  }
+
+  // ─── Keyword alert trends (today vs yesterday) ───────────────────
+  if (/^(מגמות|trends|מגמות היום|מה בולט היום|שינויים)/i.test(text.trim())) {
+    const { getTrends: _kwTrends, formatTrendsMessage: _fmtTrends } = require('./src/keyword-alerts');
+    try {
+      const trends = _kwTrends({ minHits: 3, minRatio: 2 });
+      return _fmtTrends(trends);
+    } catch (e) {
+      logger.warn('trends failed:', e.message?.substring(0, 80));
+      return '⚠️ שגיאה בחישוב מגמות';
+    }
+  }
+
+  // ─── Manual backup ───────────────────────────────────────────────
+  if (/^(גיבוי|גבה עכשיו|backup now|run backup)/i.test(text.trim())) {
+    try {
+      const { runBackup: _rb } = require('./src/backup');
+      const r = await _rb();
+      if (r.success) {
+        const kb = (r.size / 1024).toFixed(1);
+        return `✅ *גיבוי הושלם*\n📦 ${r.path.split(/[\\/]/).pop()}\n📊 ${kb} KB · ${r.durationMs}ms`;
+      }
+      return `❌ *גיבוי נכשל*\n${r.error?.substring(0, 120) || 'שגיאה לא ידועה'}`;
+    } catch (e) {
+      return `❌ שגיאה בגיבוי: ${e.message?.substring(0, 100)}`;
+    }
+  }
+
+  // ─── Scan history — list recent scans ────────────────────────────
+  if (/^(היסטוריית סריקות|סריקות אחרונות|scan history)/i.test(text.trim())) {
+    try {
+      const { listScans: _ls } = require('./src/scan-history');
+      const scans = _ls({ limit: 10 });
+      if (!scans.length) return '📭 אין סריקות שמורות עדיין.';
+      let out = `🗂️ *סריקות אחרונות (${scans.length}):*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+      for (const s of scans) {
+        const kind = s.kind === 'daily' ? '🔄 יומית' : '⚡ ידנית';
+        const when = `${s.date} ${s.time}`;
+        const msgs = s.totalMessages ?? 0;
+        const groups = s.activeGroups ?? 0;
+        out += `${kind} · ${when}\n   📊 ${msgs} הודעות מ-${groups} קבוצות · ${s.filename}\n\n`;
+      }
+      return out.trim();
+    } catch (e) {
+      return `❌ שגיאה בהיסטוריית סריקות: ${e.message?.substring(0, 100)}`;
+    }
   }
 
   // ─── Stats command ───────────────────────────────────────────────
@@ -2297,6 +2907,20 @@ function whatsNew() {
 ╰───────────────────────╯
 
 ━━━━━━━━━━━━━━━━━━━━
+📅 *22/4/2026 — גרסה 1.9.0*
+━━━━━━━━━━━━━━━━━━━━
+
+*🛡️ חבילת יציבות + אוטומציה*
+
+📈 *"מגמות"* — מילים שקופצות היום X2+ מאתמול
+🗂️ *"היסטוריית סריקות"* — רשימת 10 הסריקות האחרונות
+📦 *גיבוי אוטומטי 23:00* — כל data/ ל-ZIP (7 ימים אחורה). "גיבוי" = ידני
+⏳ אינדיקטור התקדמות בסריקה ארוכה (6+ קבוצות)
+🔄 Auto-retry ל-529/503/429 + timeout (backoff מעריכי)
+📝 לוג צ'אט קבוע → logs/chat-YYYY-MM-DD.log
+🛡️ הגנה מפני משימות יומיות כפולות (schedule_daily)
+
+━━━━━━━━━━━━━━━━━━━━
 📅 *18/4/2026 — 23:15*
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -2393,6 +3017,15 @@ function log(entry) {
   messageLog.unshift(entry);
   if (messageLog.length > 100) messageLog.pop();
   io.emit('newMessage', { ...entry, stats });
+  // Persist to daily chat log file (JSONL) — best-effort, never throws
+  try {
+    appendChatLog({
+      from: entry?.from,
+      text: entry?.text,
+      direction: entry?.direction,
+      chatId: entry?.chatId || OWNER_ID,
+    });
+  } catch {}
 }
 
 function ts() {
@@ -2415,6 +3048,15 @@ server.listen(PORT, () => {
   console.log(`╠══════════════════════════════════════╣`);
   console.log(`║  סרוק QR: http://localhost:${PORT}       ║`);
   console.log(`╚══════════════════════════════════════╝\n`);
+
+  // ── Schedule daily backup (23:00 Israel time) ──
+  try {
+    const { scheduleDailyBackup } = require('./src/backup');
+    scheduleDailyBackup(nodeCron);
+    logger.info('📦 Daily backup scheduled — 23:00 Asia/Jerusalem');
+  } catch (err) {
+    logger.warn('⚠️ Daily backup scheduling failed:', err.message);
+  }
 });
 
 // ─── Health endpoint (for hosting keep-alive) ──────────────────
@@ -2527,12 +3169,115 @@ setInterval(async () => {
     logger.info(`🔍 Watchdog: page=${pageAlive ? 'alive' : 'dead'}`);
     if (!pageAlive) throw new Error('Store not found');
   } catch (e) {
-    logger.warn(`⚠️ Watchdog: connection dead (${e.message?.substring(0, 60)}) — restarting`);
-    // Do NOT logout — that deletes the WhatsApp session (forces QR re-scan).
-    // Just exit; Railway/pm2 restarts the process with the session intact.
-    process.exit(1);
+    const why = e.message?.substring(0, 60) || 'unknown';
+    logger.warn(`⚠️ Watchdog: connection dead (${why}) — trying in-process reconnect`);
+    // Email owner BEFORE we try reconnect (so they know even if reconnect silently hangs)
+    notifyOwnerBotDown('watchdog-dead', why).catch(()=>{});
+    // Try to revive the client WITHOUT exiting the process.
+    // Only exit after 5 reconnect attempts fail (see attemptReconnect).
+    attemptReconnect(`watchdog: ${why}`);
   }
 }, 20 * 60 * 1000);
+
+// ─── Command Center: proactive layer (#1 in feature roadmap) ─────
+// 1.1 Pending media follow-up: every 1h, if any contact is pending 6h+
+//     without reply, send Moshiko a nudge. Cooldown 12h per alert.
+const cmdCenter = require('./src/command-center');
+
+async function runPendingMediaCheck() {
+  if (botStatus !== 'connected') return;
+  try {
+    const alerts = cmdCenter.checkPendingMedia({ hoursThreshold: 6, reAlertHours: 12 });
+    if (!alerts.length) return;
+    logger.info(`🔔 CommandCenter: ${alerts.length} pending media alert(s) firing`);
+    const oc = await client.getChatById(OWNER_ID);
+    for (const a of alerts) {
+      await botSend(oc, a.text);
+      // Small delay between alerts so they arrive in order, not as a burst
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  } catch (e) {
+    logger.warn(`CommandCenter pending-media error: ${e.message?.substring(0, 80)}`);
+  }
+}
+
+// First pass 90s after startup (give bot time to settle)
+setTimeout(runPendingMediaCheck, 90 * 1000);
+// Then every 60 minutes
+setInterval(runPendingMediaCheck, 60 * 60 * 1000);
+
+// 1.2 Interview brief: every 5 min, find interviews starting in ~30 min and
+//     send a brief (Kellner positions + current news + tip). One alert per event.
+async function runInterviewBriefCheck() {
+  if (botStatus !== 'connected') return;
+  try {
+    const alerts = await cmdCenter.checkUpcomingInterviews();
+    if (!alerts.length) return;
+    logger.info(`📺 CommandCenter: ${alerts.length} interview brief(s) firing`);
+    const oc = await client.getChatById(OWNER_ID);
+    for (const a of alerts) {
+      await botSend(oc, a.text);
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  } catch (e) {
+    logger.warn(`CommandCenter interview-brief error: ${e.message?.substring(0, 80)}`);
+  }
+}
+
+// First pass 60s after startup
+setTimeout(runInterviewBriefCheck, 60 * 1000);
+// Then every 5 minutes
+setInterval(runInterviewBriefCheck, 5 * 60 * 1000);
+
+// 1.3 Waze ETA proactive: every 5 min, find events starting in ~60 min with
+//     a physical location and send a "leave at X" alert with Waze link + ETA.
+async function runTravelETACheck() {
+  if (botStatus !== 'connected') return;
+  try {
+    const alerts = await cmdCenter.checkUpcomingTravelETA({ bufferMinutes: 10 });
+    if (!alerts.length) return;
+    logger.info(`🚦 CommandCenter: ${alerts.length} travel ETA alert(s) firing`);
+    const oc = await client.getChatById(OWNER_ID);
+    for (const a of alerts) {
+      await botSend(oc, a.text);
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  } catch (e) {
+    logger.warn(`CommandCenter travel-ETA error: ${e.message?.substring(0, 80)}`);
+  }
+}
+
+// First pass 75s after startup (offset from interview check to spread API load)
+setTimeout(runTravelETACheck, 75 * 1000);
+// Then every 5 minutes
+setInterval(runTravelETACheck, 5 * 60 * 1000);
+
+// 1.4 Trending keyword auto-pitch: every 30 min, find keywords appearing in
+//     5+ groups today and send a Kellner-style draft for owner approval.
+async function runTrendingKeywordCheck() {
+  if (botStatus !== 'connected') return;
+  try {
+    const alerts = await cmdCenter.checkTrendingKeywords({
+      minGroups: 5,
+      minHits: 3,
+      minRatio: 1.5,
+    });
+    if (!alerts.length) return;
+    logger.info(`🔥 CommandCenter: ${alerts.length} trending keyword pitch(es) firing`);
+    const oc = await client.getChatById(OWNER_ID);
+    for (const a of alerts) {
+      await botSend(oc, a.text);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  } catch (e) {
+    logger.warn(`CommandCenter trending-keyword error: ${e.message?.substring(0, 80)}`);
+  }
+}
+
+// First pass 5 min after startup (let the bot accumulate keyword hits)
+setTimeout(runTrendingKeywordCheck, 5 * 60 * 1000);
+// Then every 30 minutes
+setInterval(runTrendingKeywordCheck, 30 * 60 * 1000);
 
 // ─── Daily 20:00 face-match summary ─────────────────────────────
 nodeCron.schedule('0 20 * * *', async () => {
@@ -2686,19 +3431,45 @@ nodeCron.schedule('0 7 * * *', async () => {
     const { getUnreadEmails } = require('./src/gmail');
     const { listContacts } = require('./src/media-tracker');
 
+    // Track auth failures so we surface ONE consolidated alert + auth link
+    let authBroken = false;
+
     // Calendar
     let calendarSection = '📅 *לוח שנה — היום:*\n';
     try {
       const events = await getTodaySchedule();
-      calendarSection += events || '_אין אירועים_';
-    } catch { calendarSection += '_לא זמין_'; }
+      if (!events || !events.length) {
+        calendarSection += '_אין אירועים_';
+      } else {
+        calendarSection += events.map((e, i) => {
+          const time = e.allDay ? 'כל היום' : `${formatTimeOnly(e.start)}–${formatTimeOnly(e.end)}`;
+          return `${i + 1}. ${e.summary} (${time})${e.location ? ' 📍 ' + e.location : ''}`;
+        }).join('\n');
+      }
+    } catch (e) {
+      const msg = e.message || '';
+      if (msg.includes('invalid_grant') || msg.includes('Token has been expired') || msg.includes('Token has been revoked')) {
+        authBroken = true;
+        calendarSection += '⚠️ _הרשאת Google פגה_';
+      } else {
+        calendarSection += `_שגיאה: ${msg.substring(0, 80)}_`;
+      }
+    }
 
     // Emails
     let emailSection = '\n\n📧 *מיילים חדשים:*\n';
     try {
       const emails = await getUnreadEmails();
       emailSection += emails ? emails.substring(0, 400) : '_אין מיילים_';
-    } catch { emailSection += '_לא זמין_'; }
+    } catch (e) {
+      const msg = e.message || '';
+      if (msg.includes('invalid_grant') || msg.includes('Token has been expired') || msg.includes('Token has been revoked')) {
+        authBroken = true;
+        emailSection += '⚠️ _הרשאת Google/Gmail פגה_';
+      } else {
+        emailSection += `_שגיאה: ${msg.substring(0, 80)}_`;
+      }
+    }
 
     // Pending media contacts
     let mediaSection = '\n\n📞 *ממתינים לתשובה:*\n';
@@ -2706,10 +3477,20 @@ nodeCron.schedule('0 7 * * *', async () => {
       const contacts = listContacts();
       const pendingMatch = contacts.match(/⏳[^\n]+(\n[^\n]+)*/g);
       mediaSection += pendingMatch?.length ? pendingMatch.slice(0, 3).join('\n') : '_אין ממתינים_';
-    } catch { mediaSection += '_לא זמין_'; }
+    } catch (e) { mediaSection += `_שגיאה: ${(e.message || '').substring(0, 80)}_`; }
+
+    // If auth is broken, append a loud notice + auth URL so the user can fix it
+    let authNotice = '';
+    if (authBroken) {
+      // Reset auth singletons so the next call re-reads the new token after re-auth
+      try { googleResetAuthClient(); } catch (_) {}
+      try { gmailResetAuth(); } catch (_) {}
+      const authUrl = `http://localhost:${process.env.PORT || 3000}/auth/google`;
+      authNotice = `\n\n━━━━━━━━━━━━━━━━━━━━\n🔑 *הרשאת Google פגה!*\nהטוקן של Google (יומן + Gmail) פג או בוטל.\nלחץ לחידוש:\n${authUrl}`;
+    }
 
     const greeting = `☀️ *בוקר טוב מושיקו!*\n━━━━━━━━━━━━━━━━━━━━\n`;
-    await botSend(oc, greeting + calendarSection + emailSection + mediaSection);
+    await botSend(oc, greeting + calendarSection + emailSection + mediaSection + authNotice);
   } catch (e) {
     console.error('Morning briefing cron error:', e.message?.substring(0, 80));
   }
@@ -2745,6 +3526,44 @@ app.get('/perf', (_req, res) => {
   res.json({ ...perf, cache: cacheStats, usage });
 });
 
+// ─── Dashboard API endpoints ─────────────────────────────────────
+app.get('/api/keyword-alerts', (_req, res) => {
+  try {
+    const ka = require('./src/keyword-alerts');
+    const cfg = ka.getStatus();
+    const log = JSON.parse(require('fs').readFileSync(path.join(__dirname,'data','keyword-alerts-log.json'),'utf8'));
+    const today = new Date().toLocaleDateString('he-IL');
+    const todayEntries = log.entries.filter(e => e.date === today).slice(-50);
+    res.json({ enabled: cfg.enabled, keywords: cfg.keywords, today: todayEntries, total: log.entries.length });
+  } catch { res.json({ enabled: false, keywords: [], today: [], total: 0 }); }
+});
+
+app.get('/api/dashboard', (_req, res) => {
+  try {
+    const ka = require('./src/keyword-alerts');
+    const cfg = ka.getStatus();
+    const logPath = path.join(__dirname,'data','keyword-alerts-log.json');
+    const log = require('fs').existsSync(logPath) ? JSON.parse(require('fs').readFileSync(logPath,'utf8')) : { entries: [] };
+    const today = new Date().toLocaleDateString('he-IL');
+    const todayAlerts = log.entries.filter(e => e.date === today);
+    // Group activity
+    const groupMap = {};
+    log.entries.forEach(e => { groupMap[e.group] = (groupMap[e.group]||0)+1; });
+    const topGroups = Object.entries(groupMap).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([name,count])=>({name,count}));
+    // Keyword frequency
+    const kwMap = {};
+    todayAlerts.forEach(e => { kwMap[e.keyword] = (kwMap[e.keyword]||0)+1; });
+    const kwFreq = Object.entries(kwMap).sort((a,b)=>b[1]-a[1]).map(([kw,count])=>({kw,count}));
+    const dailyArr = [...dailyTasks.values()].map(d=>({label:d.label, time:d.time, action:d.action}));
+    res.json({
+      bot: { status: botStatus, name: botName, phone: botPhone },
+      alerts: { enabled: cfg.enabled, keywords: cfg.keywords, todayCount: todayAlerts.length, total: log.entries.length, recent: todayAlerts.slice(-20).reverse(), topGroups, kwFreq },
+      scheduled: { daily: dailyArr, oneTime: scheduledMessages.size },
+      uptime: Math.round(process.uptime()),
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Graceful shutdown ──────────────────────────────────────────
 function shutdown() {
   logger.info('🛑 Shutting down — saving data...');
@@ -2756,7 +3575,20 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-client.initialize().catch((err) => {
+client.initialize().catch(async (err) => {
   console.error('שגיאת אתחול:', err.message);
+  try { await notifyOwnerBotDown('init-crash', err.message?.substring(0, 200)); } catch {}
   process.exit(1);
+});
+
+// Catch last-resort unhandled errors so the bot doesn't die silently
+process.on('uncaughtException', (err) => {
+  logger.error(`💥 uncaughtException: ${err.message?.substring(0, 200)}`);
+  notifyOwnerBotDown('uncaught-exception', err.message?.substring(0, 200)).catch(()=>{});
+  // Don't exit — log and continue. The watchdog will catch true dead state.
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason?.message || String(reason);
+  logger.error(`💥 unhandledRejection: ${msg.substring(0, 200)}`);
+  // These are usually benign (API retries); don't email for every one — just log.
 });

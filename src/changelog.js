@@ -47,8 +47,24 @@ function formatChangelog(limit = 3) {
     return '📭 אין עדכונים רשומים עדיין.';
   }
 
-  // Sort by date descending (ISO strings compare lexicographically)
-  const sorted = [...entries].sort((a, b) => (b.date > a.date ? 1 : -1));
+  // Sort by date descending (ISO strings compare lexicographically), then by
+  // version descending as tiebreaker. Returning 0 for equal items would also
+  // work but explicit version sort is more predictable.
+  function compareVersions(va, vb) {
+    const pa = String(va || '').split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(vb || '').split('.').map(n => parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+      const a = pa[i] || 0;
+      const b = pb[i] || 0;
+      if (a !== b) return a - b;
+    }
+    return 0;
+  }
+  const sorted = [...entries].sort((a, b) => {
+    if (b.date !== a.date) return b.date > a.date ? 1 : -1;
+    return compareVersions(b.version, a.version); // newer version first
+  });
   const slice = sorted.slice(0, limit);
 
   let out = `╭──── *🆕 עדכוני בוטי* ────╮\n╰───────────────────────╯\n\n`;

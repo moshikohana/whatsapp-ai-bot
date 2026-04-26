@@ -517,6 +517,13 @@ function formatTimeOnly(eventTime) {
   });
 }
 
+// ─── Pure events fetch (no lastEvents side effect) ───────────────
+// Used by Command Center to peek at upcoming events without trampling
+// the user-facing lastEvents state used by "list/delete by index".
+async function fetchEventsRaw(timeMin, timeMax) {
+  return await fetchAllEvents(timeMin, timeMax);
+}
+
 module.exports = {
   getCalendarEvents,
   getTodaySchedule,
@@ -527,6 +534,7 @@ module.exports = {
   updateCalendarEvent,
   getEventByIndex,
   addCalendarEvent,
+  fetchEventsRaw,
   formatEventTime,
   formatTimeOnly,
   getAuthClient,

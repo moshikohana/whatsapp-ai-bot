@@ -1,8 +1,78 @@
 [
-  {"id":"eran14","name":"ליאור עודד מנשה","outlet":"ערוץ 14","phone":"972537263501","status":"idle","lastOutreach":null,"lastTopic":null,"history":[]},
-  {"id":"daniel14","name":"דניאל (בועז גולן)","outlet":"ערוץ 14","phone":"972503626668","status":"idle","lastOutreach":null,"lastTopic":null,"history":[]},
-  {"id":"kneset","name":"רונאל מורן אזולאי","outlet":"ערוץ הכנסת","phone":"972546609156","status":"idle","lastOutreach":null,"lastTopic":null,"history":[]},
-  {"id":"kolrama","name":"אבי מפיק","outlet":"קול ברמה (נתן משי)","phone":"972532471100","status":"idle","lastOutreach":null,"lastTopic":null,"history":[]},
-  {"id":"barda","name":"מאיר שמצוב","outlet":"ברדוגו","phone":"972507106390","status":"idle","lastOutreach":null,"lastTopic":null,"history":[]},
-  {"id":"keshet","name":"דניאל בשך","outlet":"קשת 12 (רפי רשף)","phone":"972546172126","status":"idle","lastOutreach":null,"lastTopic":null,"history":[]}
+  {
+    "id": "eran14",
+    "name": "ליאור עודד מנשה",
+    "outlet": "ערוץ 14",
+    "phone": "972537263501",
+    "status": "idle",
+    "lastOutreach": null,
+    "lastTopic": null,
+    "history": [
+      {
+        "date": "2026-04-25T03:54:48.955Z",
+        "topic": "בטחון",
+        "status": "pending"
+      },
+      {
+        "date": "2026-04-25T03:55:26.554Z",
+        "topic": "בדיקת מצב פיקוד — ביטחון לאומי",
+        "status": "pending"
+      },
+      {
+        "date": "2026-04-25T14:50:44.270Z",
+        "topic": "בג\"ץ",
+        "status": "replied"
+      }
+    ]
+  },
+  {
+    "id": "daniel14",
+    "name": "דניאל (בועז גולן)",
+    "outlet": "ערוץ 14",
+    "phone": "972503626668",
+    "status": "idle",
+    "lastOutreach": null,
+    "lastTopic": null,
+    "history": []
+  },
+  {
+    "id": "kneset",
+    "name": "רונאל מורן אזולאי",
+    "outlet": "ערוץ הכנסת",
+    "phone": "972546609156",
+    "status": "idle",
+    "lastOutreach": null,
+    "lastTopic": null,
+    "history": []
+  },
+  {
+    "id": "kolrama",
+    "name": "אבי מפיק",
+    "outlet": "קול ברמה (נתן משי)",
+    "phone": "972532471100",
+    "status": "idle",
+    "lastOutreach": null,
+    "lastTopic": null,
+    "history": []
+  },
+  {
+    "id": "barda",
+    "name": "מאיר שמצוב",
+    "outlet": "ברדוגו",
+    "phone": "972507106390",
+    "status": "idle",
+    "lastOutreach": null,
+    "lastTopic": null,
+    "history": []
+  },
+  {
+    "id": "keshet",
+    "name": "דניאל בשך",
+    "outlet": "קשת 12 (רפי רשף)",
+    "phone": "972546172126",
+    "status": "idle",
+    "lastOutreach": null,
+    "lastTopic": null,
+    "history": []
+  }
 ]
