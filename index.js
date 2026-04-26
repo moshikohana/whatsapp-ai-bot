@@ -1000,8 +1000,10 @@ const client = new Client({
   puppeteer: {
     headless: true,
     executablePath: process.env.CHROMIUM_PATH || undefined,
-    // Increase CDP protocol timeout for cloud environments (Railway/Render are slower than local)
-    protocolTimeout: 120000, // 2 minutes (default is 30s)
+    // Increase CDP protocol timeout for cloud environments (Railway/Render
+    // in distant regions like Singapore can be slow under load — 5 min
+    // headroom prevents Runtime.callFunctionOn timeouts during warm-up).
+    protocolTimeout: 300000, // 5 minutes (default is 30s)
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -1012,8 +1014,37 @@ const client = new Client({
       '--disable-translate',
       '--no-first-run',
       '--disable-software-rasterizer',
+      '--disable-blink-features=AutomationControlled',
+      '--no-zygote',
+      '--memory-pressure-off',
     ],
   },
+});
+
+// ─── Puppeteer-fatal detection ──────────────────────────────────
+// If protocolTimeout fires the underlying CDP connection is dead — express
+// keeps serving (so /health, /debug return "connected") but WhatsApp events
+// stop arriving. Detect & exit so Railway restarts cleanly.
+process.on('uncaughtException', (err) => {
+  const msg = err?.message || '';
+  if (msg.includes('Runtime.callFunctionOn timed out') ||
+      msg.includes('Protocol error') ||
+      msg.includes('Target closed') ||
+      msg.includes('Session closed')) {
+    console.error(`💥 Puppeteer-fatal: ${msg.substring(0, 120)} — exiting for Railway restart`);
+    setTimeout(() => process.exit(1), 1000);
+    return;
+  }
+  console.error(`💥 uncaughtException: ${msg}`);
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason?.message || String(reason);
+  if (msg.includes('Runtime.callFunctionOn timed out') ||
+      msg.includes('Protocol error') ||
+      msg.includes('Target closed')) {
+    console.error(`💥 Puppeteer-fatal (rejection): ${msg.substring(0, 120)} — exiting for Railway restart`);
+    setTimeout(() => process.exit(1), 1000);
+  }
 });
 
 client.on('qr', async (qr) => {
