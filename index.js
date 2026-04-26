@@ -939,6 +939,10 @@ let botStatus = 'disconnected';
 let botName = 'בוטי';
 let botPhone = '';
 let currentQR = null;
+let currentQRRaw = null;     // The original QR string (for /qr endpoint)
+let lastError = null;         // { message, stack, ts } — captured for /debug
+let qrCount = 0;              // How many times we've shown a QR (high count = repeated re-pair = volume issue)
+let lastQRTime = null;
 const messageLog = [];
 const conversations = loadConversations();
 let stats = { received: 0, sent: 0 };
@@ -1016,6 +1020,9 @@ client.on('qr', async (qr) => {
   qrcodeTerminal.generate(qr, { small: true });
   console.log('\n📱 סרוק QR בוואטסאפ, או פתח http://localhost:3000\n');
   currentQR = await qrcode.toDataURL(qr);
+  currentQRRaw = qr;
+  qrCount += 1;
+  lastQRTime = new Date().toISOString();
   botStatus = 'qr';
   io.emit('status', 'qr');
   io.emit('qr', currentQR);
@@ -1266,6 +1273,7 @@ async function attemptReconnect(reason) {
 client.on('disconnected', async (reason) => {
   console.log('❌ נותק:', reason);
   botStatus = 'disconnected';
+  lastError = { message: `disconnected: ${reason}`, ts: new Date().toISOString() };
   io.emit('status', 'disconnected');
   // Fire-and-forget — don't block the disconnect handler
   notifyOwnerBotDown('disconnected', reason).catch(()=>{});
@@ -1275,6 +1283,7 @@ client.on('disconnected', async (reason) => {
 client.on('auth_failure', async (msg) => {
   logger.error(`🔴 auth_failure: ${msg}`);
   botStatus = 'disconnected';
+  lastError = { message: `auth_failure: ${msg}`, ts: new Date().toISOString() };
   io.emit('status', 'disconnected');
   notifyOwnerBotDown('auth_failure', msg).catch(()=>{});
   // auth_failure usually means session invalid — need QR; process-level restart helps
@@ -3062,6 +3071,111 @@ server.listen(PORT, () => {
 // ─── Health endpoint (for hosting keep-alive) ──────────────────
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', bot: botStatus, uptime: Math.round(process.uptime()), mem: Math.round(process.memoryUsage.rss?.() / 1048576 || process.memoryUsage().rss / 1048576) + 'MB' });
+});
+
+// ─── Debug endpoint — single-shot diagnostic for Railway/cloud deploys ──
+// Visit this URL after deploy to see EVERYTHING needed to diagnose issues.
+// Returns: bot state, env vars (presence only — values masked), volume mount
+// status, Chromium binary check, recent QR count, last error, memory stats.
+app.get('/debug', async (_req, res) => {
+  const fs = require('fs');
+  const checks = {};
+
+  // 1) Bot state
+  checks.bot = {
+    status: botStatus,
+    name: botName || null,
+    phone: botPhone || null,
+    uptime_sec: Math.round(process.uptime()),
+    mem_mb: Math.round(process.memoryUsage().rss / 1048576),
+    last_error: lastError,
+  };
+
+  // 2) QR state (critical: high qrCount with mounted volume = pairing keeps failing)
+  checks.qr = {
+    available_now: !!currentQR,
+    raw_present: !!currentQRRaw,
+    qr_events_total: qrCount,
+    last_qr_time: lastQRTime,
+    note: qrCount === 0 && botStatus === 'qr'
+      ? 'Status is QR but no QR ever emitted — check Chromium init'
+      : qrCount > 5
+      ? 'QR shown >5 times — volume probably NOT persisting session'
+      : null,
+  };
+
+  // 3) Env var presence (masked)
+  const required = ['ANTHROPIC_API_KEY', 'GOOGLE_TOKEN', 'GOOGLE_CREDENTIALS', 'PORT', 'CHROMIUM_PATH'];
+  checks.env = {};
+  for (const k of required) {
+    const v = process.env[k];
+    checks.env[k] = v ? `present (${v.length} chars)` : 'MISSING';
+  }
+  checks.env.NODE_ENV = process.env.NODE_ENV || 'undefined';
+  checks.env.RAILWAY_ENVIRONMENT = process.env.RAILWAY_ENVIRONMENT || 'not on Railway';
+  checks.env.RAILWAY_PUBLIC_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN || null;
+
+  // 4) Volume / persistence check
+  const wwebDir = path.join(__dirname, '.wwebjs_auth');
+  const dataDir = path.join(__dirname, 'data');
+  try {
+    const wwebExists = fs.existsSync(wwebDir);
+    const wwebSession = fs.existsSync(path.join(wwebDir, 'session-ai-personal-bot'));
+    let wwebSize = null;
+    if (wwebExists) {
+      try {
+        // Quick recursive size — bounded so we don't hang
+        let total = 0; let count = 0;
+        const walk = (d, depth = 0) => {
+          if (depth > 4 || count > 5000) return;
+          const items = fs.readdirSync(d, { withFileTypes: true });
+          for (const it of items) {
+            count += 1;
+            const p = path.join(d, it.name);
+            if (it.isDirectory()) walk(p, depth + 1);
+            else { try { total += fs.statSync(p).size; } catch {} }
+          }
+        };
+        walk(wwebDir);
+        wwebSize = `${(total / 1048576).toFixed(1)} MB (${count} items scanned)`;
+      } catch (e) { wwebSize = `error: ${e.message}`; }
+    }
+    checks.volume = {
+      wwebjs_auth_dir_exists: wwebExists,
+      wwebjs_session_dir_exists: wwebSession,
+      wwebjs_size: wwebSize,
+      data_dir_exists: fs.existsSync(dataDir),
+      data_files: fs.existsSync(dataDir) ? fs.readdirSync(dataDir).slice(0, 20) : [],
+      note: !wwebExists
+        ? '❌ .wwebjs_auth/ MISSING — volume not mounted!'
+        : !wwebSession
+        ? '⚠️ Volume mounted but no session yet — first run, or just-cleared session'
+        : '✅ Session directory present',
+    };
+  } catch (e) {
+    checks.volume = { error: e.message };
+  }
+
+  // 5) Chromium binary check
+  try {
+    const chromiumPath = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
+    checks.chromium = {
+      configured_path: chromiumPath,
+      path_exists: fs.existsSync(chromiumPath),
+      note: !fs.existsSync(chromiumPath)
+        ? '❌ Chromium binary NOT FOUND at configured path — Puppeteer will fail'
+        : '✅ Chromium binary present',
+    };
+  } catch (e) {
+    checks.chromium = { error: e.message };
+  }
+
+  // 6) Recent activity (last 10 messages from in-memory log)
+  checks.recent_messages = (messageLog || []).slice(0, 10).map(m => ({
+    ts: m.ts || m.time, dir: m.dir, from: m.from, snippet: (m.text || m.body || '').substring(0, 80),
+  }));
+
+  res.json(checks);
 });
 
 // ─── Test-send endpoint (diagnostic) ───────────────────────────
