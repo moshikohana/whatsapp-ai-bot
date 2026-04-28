@@ -448,6 +448,105 @@
     .reveal-delay-5{transition-delay:.4s}
 
     @keyframes fadeUp{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:translateY(0)}}
+
+    /* ── QUICK ACTIONS ─────────────────────────── */
+    .quick-actions{
+      display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));
+      gap:10px;margin-top:14px;
+    }
+    .qa-btn{
+      background:rgba(255,133,57,.06);
+      border:1px solid var(--border);
+      color:var(--text);
+      padding:11px 8px;border-radius:var(--radius-sm);
+      font-family:inherit;font-size:.74rem;font-weight:700;
+      display:flex;flex-direction:column;align-items:center;gap:5px;
+      cursor:pointer;transition:all .25s;
+      text-decoration:none;
+    }
+    .qa-btn:hover{background:rgba(255,133,57,.12);border-color:var(--border-h);transform:translateY(-2px)}
+    .qa-btn .qa-emoji{font-size:1.3rem;line-height:1}
+    .qa-btn .qa-label{color:var(--text2);letter-spacing:.2px}
+    .qa-btn.danger{background:rgba(224,82,82,.06);border-color:rgba(224,82,82,.18)}
+    .qa-btn.danger:hover{background:rgba(224,82,82,.14)}
+    .qa-btn.danger .qa-emoji{filter:hue-rotate(0deg)}
+    .qa-toast{
+      position:fixed;bottom:24px;right:24px;z-index:200;
+      background:var(--card-h);
+      backdrop-filter:blur(20px);
+      border:1px solid var(--border-h);
+      border-radius:var(--radius-sm);
+      padding:14px 20px;
+      font-size:.82rem;font-weight:600;
+      color:var(--text);
+      box-shadow:0 12px 40px rgba(0,0,0,.4);
+      max-width:380px;
+      transform:translateY(120%);opacity:0;
+      transition:transform .35s cubic-bezier(.34,1.56,.64,1),opacity .35s;
+    }
+    .qa-toast.show{transform:translateY(0);opacity:1}
+    .qa-toast.success{border-color:rgba(76,195,138,.4);color:var(--green)}
+    .qa-toast.error{border-color:rgba(224,82,82,.4);color:var(--red)}
+
+    /* ── HEALTH PANEL ──────────────────────────── */
+    .health-grid{
+      display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+      gap:12px;margin-top:8px;
+    }
+    .health-tile{
+      background:rgba(255,255,255,.02);
+      border:1px solid var(--border);
+      border-radius:var(--radius-sm);
+      padding:12px 14px;
+    }
+    .health-tile .ht-label{
+      font-size:.62rem;color:var(--muted);font-weight:700;
+      text-transform:uppercase;letter-spacing:.7px;margin-bottom:5px;
+    }
+    .health-tile .ht-value{
+      font-size:.88rem;font-weight:600;color:var(--text);
+      word-break:break-word;
+    }
+    .health-tile.ok{border-color:rgba(76,195,138,.25);background:rgba(76,195,138,.04)}
+    .health-tile.ok .ht-value{color:var(--green)}
+    .health-tile.warn{border-color:rgba(255,179,71,.25);background:rgba(255,179,71,.04)}
+    .health-tile.warn .ht-value{color:var(--amber)}
+    .health-tile.bad{border-color:rgba(224,82,82,.25);background:rgba(224,82,82,.04)}
+    .health-tile.bad .ht-value{color:var(--red)}
+    .refresh-line{display:flex;align-items:center;gap:8px;font-size:.7rem;color:var(--muted);margin-top:10px}
+    .refresh-line::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+
+    /* ── DISCONNECTED HELP ─────────────────────── */
+    .disconnect-help{
+      background:rgba(224,82,82,.04);
+      border:1px solid rgba(224,82,82,.18);
+      border-radius:var(--radius-sm);
+      padding:14px 16px;margin-top:12px;
+      font-size:.78rem;line-height:1.55;color:var(--text2);
+    }
+    .disconnect-help h5{color:var(--red);font-size:.78rem;margin-bottom:8px;font-weight:800;letter-spacing:.3px}
+    .disconnect-help ol{padding-right:18px;margin-top:4px}
+    .disconnect-help li{margin:5px 0}
+    .disconnect-help code{background:rgba(255,255,255,.05);padding:2px 7px;border-radius:5px;font-size:.74rem;color:var(--orange)}
+
+    /* ── MOBILE RESPONSIVE ─────────────────────── */
+    @media (max-width:760px){
+      nav{padding:11px 16px;gap:10px}
+      .nav-text h1{font-size:.85rem}
+      .nav-text span{font-size:.62rem}
+      .main{padding:30px 14px 60px}
+      .top-grid{grid-template-columns:1fr;gap:14px}
+      .hero{padding:90px 18px 50px;min-height:auto}
+      .hero-pills{gap:6px}
+      .hero-pills .pill{font-size:.66rem;padding:5px 10px}
+      .hero-stats{gap:14px;flex-wrap:wrap;justify-content:center}
+      .hero-stat .big{font-size:1.6rem}
+      div[style*="grid-template-columns:1fr 300px"]{grid-template-columns:1fr !important}
+      .features-mega{grid-template-columns:1fr}
+      .health-grid{grid-template-columns:repeat(2,1fr)}
+      .qa-toast{right:14px;left:14px;bottom:14px;max-width:none}
+      .quick-actions{grid-template-columns:repeat(2,1fr)}
+    }
   </style>
 </head>
 <body>
@@ -535,6 +634,33 @@
           <div class="stat"><div class="val blue" id="s-api-avg">-</div><div class="lbl">API ms</div></div>
           <div class="stat"><div class="val green" id="s-cache">-</div><div class="lbl">Cache</div></div>
         </div>
+
+        <!-- Quick Actions -->
+        <div class="quick-actions">
+          <button class="qa-btn" onclick="qaTestSend()" title="שלח הודעת בדיקה לעצמך">
+            <span class="qa-emoji">🧪</span><span class="qa-label">בדיקת שליחה</span>
+          </button>
+          <button class="qa-btn" onclick="qaShowDebug()" title="פתח חלון אבחון מפורט">
+            <span class="qa-emoji">🔍</span><span class="qa-label">אבחון</span>
+          </button>
+          <button class="qa-btn" onclick="qaCopyLogs()" title="העתק לוג ל-clipboard">
+            <span class="qa-emoji">📋</span><span class="qa-label">העתק לוג</span>
+          </button>
+          <button class="qa-btn danger" onclick="qaRestartWA()" title="אתחל חיבור לוואטסאפ">
+            <span class="qa-emoji">🔄</span><span class="qa-label">אתחל WA</span>
+          </button>
+        </div>
+
+        <!-- Disconnected help (only visible when status !== 'connected') -->
+        <div class="disconnect-help" id="disconnect-help" style="display:none">
+          <h5>⚠️ הבוט לא מחובר — מה לבדוק:</h5>
+          <ol>
+            <li>פתח <strong>WhatsApp בטלפון → הגדרות → מכשירים מקושרים</strong></li>
+            <li>תזרוק את כל המכשירים הישנים ברשימה</li>
+            <li>סרוק את ה-QR למעלה (אם מופיע) — זה ידרוש סריקה אחת בלבד</li>
+            <li>אם לא עוזר — לחץ <code>אתחל WA</code> למעלה</li>
+          </ol>
+        </div>
       </div>
       <div class="uptime-bar" id="uptime-bar">זמן פעולה: <span id="uptime-val">00:00:00</span></div>
     </div>
@@ -579,8 +705,33 @@
 
   </div>
 
+  <!-- HEALTH PANEL — auto-refreshes from /debug -->
+  <div class="card reveal" style="margin-top:20px">
+    <div class="card-head">
+      <div class="icon" style="background:rgba(126,184,212,.1)">🩺</div>
+      בריאות מערכת
+      <div class="head-right" style="font-size:.7rem;color:var(--muted)">מתעדכן כל 30 שניות</div>
+    </div>
+    <div class="card-body">
+      <div class="health-grid" id="health-grid">
+        <div class="health-tile"><div class="ht-label">סטטוס</div><div class="ht-value" id="ht-status">טוען...</div></div>
+        <div class="health-tile"><div class="ht-label">זמן פעילות</div><div class="ht-value" id="ht-uptime">-</div></div>
+        <div class="health-tile"><div class="ht-label">זיכרון</div><div class="ht-value" id="ht-mem">-</div></div>
+        <div class="health-tile"><div class="ht-label">סשן (Volume)</div><div class="ht-value" id="ht-volume">-</div></div>
+        <div class="health-tile"><div class="ht-label">Chromium</div><div class="ht-value" id="ht-chromium">-</div></div>
+        <div class="health-tile"><div class="ht-label">סביבה</div><div class="ht-value" id="ht-env">-</div></div>
+        <div class="health-tile"><div class="ht-label">QR (פעמים)</div><div class="ht-value" id="ht-qrcount">-</div></div>
+        <div class="health-tile"><div class="ht-label">שגיאה אחרונה</div><div class="ht-value" id="ht-error">-</div></div>
+      </div>
+      <div class="refresh-line"><span id="ht-refreshed">עדיין לא נטען</span></div>
+    </div>
+  </div>
+
+  <!-- Toast for action feedback -->
+  <div class="qa-toast" id="qa-toast"></div>
+
   <!-- GROUPS + TASKS -->
-  <div style="display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start" class="reveal">
+  <div style="display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start;margin-top:20px" class="reveal">
     <div class="card">
       <div class="card-head"><div class="icon" style="background:rgba(255,179,71,.08)">📍</div>קבוצות — פעילות לפי התראות</div>
       <div class="card-body">
@@ -807,6 +958,114 @@ function animateValue(el,start,end,dur){
   })(performance.now());
 }
 
+// ══ TOAST ═════════════════════════════════════════════════════════
+function showToast(msg, kind = 'info', dur = 3500) {
+  const t = document.getElementById('qa-toast');
+  t.textContent = msg;
+  t.className = 'qa-toast show ' + (kind || 'info');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.className = 'qa-toast'; }, dur);
+}
+
+// ══ QUICK ACTIONS ═════════════════════════════════════════════════
+async function qaTestSend() {
+  showToast('שולח הודעת בדיקה...', 'info');
+  try {
+    const r = await fetch('/test-send');
+    const j = await r.json();
+    if (j.ok) showToast('✅ נשלח! בדוק את הצ\'אט-עצמי שלך', 'success');
+    else showToast('❌ ' + (j.error || 'שגיאה'), 'error');
+  } catch (e) { showToast('❌ ' + e.message, 'error'); }
+}
+function qaShowDebug() { window.open('/debug', '_blank'); }
+async function qaCopyLogs() {
+  try {
+    const r = await fetch('/debug');
+    const j = await r.json();
+    await navigator.clipboard.writeText(JSON.stringify(j, null, 2));
+    showToast('✅ הלוג הועתק — תוכל להדביק לי כאן', 'success');
+  } catch (e) { showToast('❌ ' + e.message, 'error'); }
+}
+async function qaRestartWA() {
+  if (!confirm('זה יתנתק מ-WhatsApp ויטען מחדש (~30 שניות).\nאתה בטוח?')) return;
+  showToast('מאתחל חיבור WhatsApp...', 'info', 8000);
+  try {
+    const r = await fetch('/restart-wa');
+    const j = await r.json();
+    showToast(j.msg || '🔄 מאתחל...', 'info', 10000);
+  } catch (e) { showToast('❌ ' + e.message, 'error'); }
+}
+
+// ══ HEALTH PANEL ══════════════════════════════════════════════════
+function fmtUptime(sec) {
+  if (!sec) return '-';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return h > 0 ? `${h}ש ${m}ד` : m > 0 ? `${m}ד ${s}ש` : `${s} שניות`;
+}
+function setTile(id, value, status) {
+  const tile = document.getElementById(id)?.parentElement;
+  if (!tile) return;
+  document.getElementById(id).textContent = value;
+  tile.classList.remove('ok', 'warn', 'bad');
+  if (status) tile.classList.add(status);
+}
+async function refreshHealth() {
+  try {
+    const r = await fetch('/debug', { cache: 'no-cache' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+
+    const status = j.bot?.status || 'unknown';
+    setTile('ht-status', status === 'connected' ? '✅ מחובר' : status === 'qr' ? '📱 ממתין QR' : '❌ ' + status,
+            status === 'connected' ? 'ok' : status === 'qr' ? 'warn' : 'bad');
+    setTile('ht-uptime', fmtUptime(j.bot?.uptime_sec));
+    setTile('ht-mem', (j.bot?.mem_mb || 0) + ' MB',
+            j.bot?.mem_mb > 800 ? 'warn' : j.bot?.mem_mb > 1500 ? 'bad' : null);
+
+    const vol = j.volume || {};
+    setTile('ht-volume', vol.wwebjs_size || (vol.wwebjs_session_dir_exists ? '✅ קיים' : '❌ חסר'),
+            vol.wwebjs_session_dir_exists ? 'ok' : 'bad');
+    // On non-Railway (local Windows/Mac), Puppeteer uses bundled Chromium even
+    // if CHROMIUM_PATH isn't set — connection itself proves it's working.
+    const onRailway = (j.env?.RAILWAY_ENVIRONMENT || '').includes('production');
+    const chromOk = j.chromium?.path_exists !== false || (!onRailway && status === 'connected');
+    setTile('ht-chromium', chromOk ? (onRailway ? '✅ זמין' : '✅ מובנה') : '❌ חסר',
+            chromOk ? 'ok' : 'bad');
+
+    const env = j.env || {};
+    // CHROMIUM_PATH is required only on Railway/Render. Skip locally.
+    const required = onRailway
+      ? ['ANTHROPIC_API_KEY', 'GOOGLE_TOKEN', 'GOOGLE_CREDENTIALS', 'CHROMIUM_PATH']
+      : ['ANTHROPIC_API_KEY', 'GOOGLE_TOKEN', 'GOOGLE_CREDENTIALS'];
+    const missing = required.filter(k => !env[k] || env[k] === 'MISSING').length;
+    setTile('ht-env', missing === 0 ? '✅ הכל מוגדר' : `❌ ${missing} חסרים`,
+            missing === 0 ? 'ok' : 'bad');
+    // Also show whether running locally or on Railway
+    document.getElementById('ht-env').textContent += onRailway ? ' (Railway)' : ' (מקומי)';
+
+    const qrCount = j.qr?.qr_events_total || 0;
+    setTile('ht-qrcount', qrCount, qrCount > 5 ? 'warn' : null);
+
+    const err = j.bot?.last_error;
+    if (err && err.message) {
+      setTile('ht-error', err.message.substring(0, 50) + '...', 'bad');
+    } else {
+      setTile('ht-error', 'אין', 'ok');
+    }
+
+    document.getElementById('ht-refreshed').textContent =
+      'עודכן: ' + new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch (e) {
+    setTile('ht-status', 'שגיאת רשת', 'bad');
+    document.getElementById('ht-refreshed').textContent = 'שגיאה: ' + e.message;
+  }
+}
+// Initial fetch + every 30 seconds
+refreshHealth();
+setInterval(refreshHealth, 30000);
+
 socket.on('status',(st)=>{
   const pill=document.getElementById('status-pill');
   const text=document.getElementById('status-text');
@@ -820,9 +1079,14 @@ socket.on('status',(st)=>{
   document.getElementById('qr-img').style.display='none';
   document.getElementById('scan-guide').style.display='none';
   document.getElementById('hero').style.display='none';
+  // Disconnect-help only when truly disconnected (not during QR/authenticating)
+  const dh=document.getElementById('disconnect-help');
+  if(dh) dh.style.display=(st==='disconnected')?'block':'none';
   if(st==='connected') document.getElementById('hero').style.display='flex';
   else if(st==='qr') document.getElementById('scan-guide').style.display='block';
   else document.getElementById('loader').style.display='flex';
+  // Trigger health refresh when status changes
+  if(typeof refreshHealth==='function') refreshHealth();
 });
 
 socket.on('qr',(data)=>{

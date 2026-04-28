@@ -37,7 +37,7 @@ const {
   initFaceAPI, addReference, findMatches, blurNonMatchingFaces, highlightMatchingFaces,
   isBlurEnabled, setBlurEnabled, getHighlightMode, setHighlightMode,
   getMonitoredGroups, addMonitoredGroup, removeMonitoredGroup,
-  addOwnerGroup, removeOwnerGroup,
+  addOwnerGroup, removeOwnerGroup, applyGroupWhitelist,
   getReferenceCount, clearReferences, setThreshold, setEnabled, getStatus: getFaceStatus,
   loadConfig: loadFaceConfig,
 } = require('./src/face-recognition');
@@ -961,6 +961,26 @@ const lastForwardedPhoto = new Map(); // chatId → photoData (for text-only fee
 const MAX_FEEDBACK_STORE = 50;       // don't grow unbounded
 
 const OWNER_ID = '972524243250@c.us';
+
+// ─── Owner's self-LID (for new "Message Yourself" format) ──────────
+// WhatsApp's new format uses @lid identifiers. The user's own LID is
+// captured from the first lid→lid (same) self-DM, then persisted to
+// data/owner-lid.json so it survives restarts. Used to STRICTLY identify
+// self-chat without false-positives on other @lid contacts.
+const OWNER_LID_PATH = path.join(__dirname, 'data', 'owner-lid.json');
+let ownerSelfLid = null;
+try {
+  if (fs.existsSync(OWNER_LID_PATH)) {
+    ownerSelfLid = JSON.parse(fs.readFileSync(OWNER_LID_PATH, 'utf8')).lid || null;
+    if (ownerSelfLid) console.log(`📌 Loaded owner self-LID: ${ownerSelfLid}`);
+  }
+} catch (_) { ownerSelfLid = null; }
+function saveOwnerLid(lid) {
+  if (!lid || ownerSelfLid === lid) return;
+  ownerSelfLid = lid;
+  try { fs.writeFileSync(OWNER_LID_PATH, JSON.stringify({ lid, capturedAt: new Date().toISOString() }, null, 2)); } catch (_) {}
+  console.log(`📌 Captured owner self-LID: ${lid}`);
+}
 const BOT_MARKER = '\u200B\u200C\u200B';
 const BOT_SIG = '\n\n— *🤖 בוטי*';
 let lastVideoPath = null;
@@ -1372,7 +1392,9 @@ async function botSend(chat, text) {
   // Send chunks with part numbers
   for (let i = 0; i < chunks.length; i++) {
     const isLast = i === chunks.length - 1;
-    const suffix = isLast ? BOT_SIG + BOT_MARKER : `\n\n_📄 חלק ${i + 1}/${chunks.length}_` + BOT_MARKER;
+    // Every chunk must include BOT_SIG — WhatsApp may strip BOT_MARKER, which would
+    // re-trigger the self-chat handler for intermediate parts only.
+    const suffix = isLast ? BOT_SIG + BOT_MARKER : `\n\n_📄 חלק ${i + 1}/${chunks.length}_` + BOT_SIG + BOT_MARKER;
     await chat.sendMessage(chunks[i] + suffix);
   }
 }
@@ -1502,13 +1524,43 @@ client.on('message_create', async (msg) => {
     const chatId = msg.from;
     const toId = msg.to;
 
-    // ONLY self-chat (both from AND to must be owner)
+    // ── Self-LID auto-capture ─────────────────────────────────────
+    // WhatsApp "Message Yourself" feature: when we see a fromMe message
+    // where from === to and both are @lid, that's the user's own self-LID.
+    // Save it once, then use it for strict filtering (avoid responding in
+    // other contacts' chats that happen to use @lid identifiers).
+    if (msg.fromMe === true &&
+        typeof chatId === 'string' && typeof toId === 'string' &&
+        chatId.endsWith('@lid') && toId.endsWith('@lid') &&
+        chatId === toId) {
+      saveOwnerLid(chatId);
+    }
+
+    // ONLY self-chat — covers 3 strict formats:
+    //   1. Legacy:    from=OWNER@c.us, to=OWNER@c.us
+    //   2. Hybrid:    from=OWNER@c.us, to=ownerSelfLid (fromMe=true)
+    //   3. Pure LID:  from=ownerSelfLid, to=ownerSelfLid (fromMe=true)
     if (!chatId || !toId) return;
-    if (!chatId.endsWith('@c.us') || !toId.endsWith('@c.us')) return;
-    if (chatId !== OWNER_ID || toId !== OWNER_ID) return;
+    const isLegacySelf = chatId === OWNER_ID && toId === OWNER_ID;
+    const isHybridSelf = ownerSelfLid && chatId === OWNER_ID && msg.fromMe === true && toId === ownerSelfLid;
+    const isLidSelf    = ownerSelfLid && msg.fromMe === true && chatId === ownerSelfLid && toId === ownerSelfLid;
+    if (!isLegacySelf && !isHybridSelf && !isLidSelf) return;
 
     let rawBody = msg.body || '';
     if (rawBody.includes(BOT_MARKER)) return;
+    // WhatsApp often strips zero-width BOT_MARKER when syncing; botSend() always
+    // appends a visible signature — use it to ignore our own self-chat replies.
+    if (rawBody.includes('— *🤖 בוטי*')) return;
+    // Interim lines sent with sendMessage (no BOT_SIG) — must not re-enter the AI
+    const _trimSelf = rawBody.trim();
+    if (_trimSelf.startsWith('📸 _שומר תמונת ייחס') || _trimSelf.startsWith('🔍 _בודק פנים') || _trimSelf.startsWith('⏳ שנייה, עובד')) {
+      return;
+    }
+    if (_trimSelf.startsWith('🎬 הנה הסרטון!') || _trimSelf.includes('🧪 *בדיקת חיבור מ-Railway')) return;
+    // Image captions from face test / feedback (only BOT_MARKER — may be stripped on echo)
+    if (/^🟢 \d+ מסומן|^🔴 אף אחד לא זוהה|^🔒 \d+ פנים טושטשו|^🟢 \*תיקון:\*|^📸 תמונה מקורית ללא עיבוד/.test(_trimSelf)) {
+      return;
+    }
 
     // ── Bot sleep/wake toggle ─────────────────────────────────────
     if (rawBody.trim() === 'היי בוטי') {
@@ -2459,7 +2511,17 @@ client.on('message', async (msg) => {
     if (!media || !media.data) return;
 
     const imageBuffer = Buffer.from(media.data, 'base64');
-    const matches = await findMatches(imageBuffer);
+    const allMatches = await findMatches(imageBuffer);
+
+    // Apply per-group whitelist — e.g. "גן פיסטוק-תשפו💚" allows only "שי",
+    // "מעון צעדים החדשה- תינוקות" allows only "מיה". Groups without an entry
+    // in groupWhitelist accept all configured references (e.g. "קניות" test).
+    const matches = applyGroupWhitelist(allMatches, groupName, status.groupWhitelist);
+
+    if (allMatches.length > 0 && matches.length === 0) {
+      const skipped = allMatches.map(m => m.name).join(', ');
+      console.log(`🚫 "${groupName}": detected [${skipped}] but not in whitelist for this group — skipping alert`);
+    }
 
     if (matches.length > 0) {
       const match = matches[0];

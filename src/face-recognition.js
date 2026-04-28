@@ -455,11 +455,32 @@ function getStatus() {
     threshold: config.threshold,
     monitoredGroups: config.monitoredGroups,
     ownerGroups: config.ownerGroups || [],
+    groupWhitelist: config.groupWhitelist || {},
     references: names.map(n => ({ name: n, count: config.referenceDescriptors[n].length })),
     totalReferences: getReferenceCount(),
     initialized,
     initError,
   };
+}
+
+/**
+ * Filter face matches by per-group whitelist.
+ * @param {Array} matches - results from findMatches()
+ * @param {string} groupName - the actual chat name
+ * @param {object} groupWhitelist - { groupName: [allowedNames] }
+ * @returns {Array} matches limited to whitelisted names (or all if no whitelist)
+ */
+function applyGroupWhitelist(matches, groupName, groupWhitelist) {
+  if (!groupWhitelist || !groupName || !matches?.length) return matches || [];
+  // Find the whitelist entry whose key best matches the group name (partial-match,
+  // same approach as monitoredGroups detection)
+  const entry = Object.entries(groupWhitelist).find(([g]) =>
+    groupName.includes(g) || g.includes(groupName)
+  );
+  if (!entry) return matches; // no whitelist for this group → allow all
+  const [, allowedNames] = entry;
+  if (!Array.isArray(allowedNames) || !allowedNames.length) return matches;
+  return matches.filter(m => allowedNames.includes(m.name));
 }
 
 function setPersonThreshold(name, value) {
@@ -492,5 +513,6 @@ module.exports = {
   setPersonThreshold,
   setEnabled,
   getStatus,
+  applyGroupWhitelist,
   loadConfig,
 };

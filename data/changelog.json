@@ -1,5 +1,52 @@
 [
   {
+    "version": "1.12.0",
+    "date": "2026-04-28",
+    "time": "יציבות, אבחון ומיקוד — מוכן לפריסה",
+    "features": [
+      {
+        "emoji": "🎯",
+        "title": "Whitelist לזיהוי פנים — אדם ספציפי לכל קבוצה",
+        "description": "כל קבוצה מנוטרת יכולה להגדיר 'מי מותר לזהות'. לדוגמה: בקבוצה 'גן פיסטוק💚' מתקבלת התראה רק על שי. במעון 'צעדים תינוקות' רק על מיה. אם זוהו אנשים אחרים — מסונן בשקט (רואים בלוג 🚫). קבוצת 'קניות' (בדיקה) ללא whitelist."
+      },
+      {
+        "emoji": "🔒",
+        "title": "Self-chat filter קשיח — תמיכה ב-WhatsApp 'Message Yourself' חדש",
+        "description": "WhatsApp עברה לפורמט @lid עבור 'הודעה לעצמך'. הסינון תוקן ומקבל 3 פורמטים מדויקים: legacy (@c.us→@c.us), hybrid (@c.us→@lid), pure-LID (@lid→@lid). ה-LID של הבעלים נשמר ב-data/owner-lid.json. מונע מענה בטעות בצ'אטים אחרים שמשתמשים ב-@lid."
+      },
+      {
+        "emoji": "🩺",
+        "title": "/debug — אבחון מקיף בקריאת URL אחת",
+        "description": "GET /debug מחזיר JSON עם כל מצב המערכת: status, env vars (חסרים?), volume mount, Chromium binary, QR count, last error, recent messages. מבטל את הצורך בדיבוג הלוך-וחזור — מקבלים את כל התמונה במבט אחד."
+      },
+      {
+        "emoji": "💎",
+        "title": "Quick Actions ב-Dashboard",
+        "description": "4 כפתורים בכרטיס החיבור: 🧪 בדיקת שליחה, 🔍 אבחון, 📋 העתק לוג (clipboard), 🔄 אתחל WA (אישור). אין צורך לזכור URLs."
+      },
+      {
+        "emoji": "📊",
+        "title": "Health Panel חי — מתעדכן כל 30 שניות",
+        "description": "כרטיס 'בריאות מערכת' חדש מציג: סטטוס, uptime, זיכרון, גודל סשן, Chromium, ENV, מספר QR, שגיאה אחרונה. ירוק/צהוב/אדום לפי מצב. מתאים לעיניים בלי לקרוא JSON."
+      },
+      {
+        "emoji": "📱",
+        "title": "Mobile Responsive — דשבורד עובד גם בטלפון",
+        "description": "כל הכרטיסים מסתדרים בעמודה אחת בטלפון, ה-Hero מתכווץ, ה-toast מותאם לרוחב המסך. בטלפון אפשר לעקוב אחר הבוט אפילו תוך כדי תנועה."
+      },
+      {
+        "emoji": "⚡",
+        "title": "Puppeteer protocolTimeout מוגדל ל-5 דקות + auto-restart",
+        "description": "Railway/ענן בסינגפור היה מתקרס תוך 2 דקות עם 'Runtime.callFunctionOn timed out'. תוקן: timeout 300s + uncaughtException handler שמזהה Protocol error ויוצא נקי כדי ש-Railway יקפיץ מחדש (במקום להישאר תקוע במצב 'מחובר אבל לא עובד')."
+      },
+      {
+        "emoji": "⏱️",
+        "title": "סיכום קבוצה לפי טווח זמן",
+        "description": "הוסף sinceMinutes ל-summarize. אומר 'סכם את עיתונאים מצייצים מהבוקר' — הבוט מחשב 06:00→עכשיו, מסנן רק את ההודעות בטווח, מציג בכותרת את הטווח האמיתי שנסרק. מונע סיכום הודעות מאתמול בטעות."
+      }
+    ]
+  },
+  {
     "version": "1.11.0",
     "date": "2026-04-26",
     "time": "Collective Memory — חיפוש מאוחד בכל מה שעבר דרך הבוט",
