@@ -3340,6 +3340,124 @@ app.get('/test-send', async (_req, res) => {
   }
 });
 
+// ─── Manual trigger endpoints — for testing the daily crons NOW ──────
+// Same logic as the cron callbacks, just runs immediately. Result is
+// sent to your WhatsApp DM (same as the cron would). Returns immediate
+// ack so the browser doesn't hang while Claude searches.
+app.get('/run-media-briefing', async (_req, res) => {
+  res.json({ ok: true, msg: 'מעקב מדיה רץ ברקע — התוצאה תגיע ל-WhatsApp שלך תוך 30-90 שניות' });
+  // Run async so we don't block the HTTP response
+  (async () => {
+    try {
+      const { smartChat: _sc } = require('./src/claude');
+      const oc = await client.getChatById(OWNER_ID);
+      const now = new Date();
+      const today = now.toLocaleDateString('he-IL');
+      const todayISO = now.toISOString().slice(0, 10);
+      const yesterdayISO = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+      const twoDaysAgoISO = new Date(now.getTime() - 2 * 86400000).toISOString().slice(0, 10);
+      const todayHe = now.toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
+      const yesterdayHe = new Date(now.getTime() - 86400000).toLocaleDateString('he-IL', { day: 'numeric', month: 'long' });
+
+      await botSend(oc, `🧪 *בדיקה ידנית — מעקב מדיה*\n_מריץ עכשיו, יחזור עם תוצאה תוך כדקה..._`);
+
+      const twitterPrompt = `חפש אזכורים *טריים בלבד* של ח"כ אריאל קלנר מ-${twoDaysAgoISO} (לפני יומיים) עד ${todayISO} (היום).
+
+⏰ *חוקי תאריכים — קריטי!*
+- היום: ${todayHe} (${todayISO})
+- אתמול: ${yesterdayHe} (${yesterdayISO})
+- לפני יומיים: ${twoDaysAgoISO}
+- **אסור** לכלול ציוץ/כתבה לפני ${twoDaysAgoISO}.
+- אסור fallback לתוצאות ישנות. אם אין — אמור זאת.
+
+🔍 *חיפושים (web_search):*
+1. \`"אריאל קלנר" after:${twoDaysAgoISO}\`
+2. \`"ArielKallner" OR "קלנר" site:x.com after:${twoDaysAgoISO}\`
+3. \`"אריאל קלנר" (site:ynet.co.il OR site:maariv.co.il OR site:walla.co.il) after:${twoDaysAgoISO}\`
+
+📋 *פורמט:*
+🐦 *אזכורי X (${twoDaysAgoISO} — ${todayISO}):*
+[שם · תאריך · 1-2 שורות · קישור] — או "אין"
+📰 *חדשות (${twoDaysAgoISO} — ${todayISO}):*
+[כותרת · מקור · תאריך · קישור] — או "אין"
+⚡ *פעולה מוצעת:*
+[רק אם יש משהו טרי דחוף — אחרת "לא נדרשת"]`;
+
+      const result = await _sc(twitterPrompt, [], { webSearchMaxUses: 5, timeoutMs: 180000 });
+      await botSend(oc, `🔍 *מעקב מדיה (בדיקה ידנית) — ${today}*\n📅 _טווח: ${twoDaysAgoISO} → ${todayISO}_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
+    } catch (e) {
+      logger.error(`/run-media-briefing failed: ${e.message?.substring(0, 100)}`);
+      try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, `❌ בדיקה ידנית של מעקב מדיה נכשלה: ${e.message?.substring(0, 80)}`); } catch (_) {}
+    }
+  })().catch(() => {});
+});
+
+app.get('/run-group-scan', async (_req, res) => {
+  // Find the first daily task with action=group_summary
+  const task = [...dailyTasks.values()].find(t => t.action === 'group_summary');
+  if (!task) {
+    return res.status(404).json({ ok: false, error: 'אין משימת group_summary פעילה. צור אחת קודם דרך schedule.daily.' });
+  }
+  res.json({ ok: true, msg: `סקירת קבוצות רצה ברקע — תוצאה תגיע ל-WhatsApp תוך כדקה. ${(task.params.groups||[]).length} קבוצות.` });
+
+  (async () => {
+    try {
+      const { smartChat: _sc } = require('./src/claude');
+      const oc = await client.getChatById(OWNER_ID);
+      const groupStats = [];
+      const allMessages = [];
+      const _scanDay = Date.now() / 1000 - 86400;
+      const _cs = await client.getChats();
+
+      await botSend(oc, `🧪 *בדיקה ידנית — סקירת קבוצות*\n_סורק ${(task.params.groups || []).length} קבוצות..._`);
+
+      for (const gn of (task.params.groups || [])) {
+        try {
+          const ch = findChatByName(_cs, gn);
+          if (!ch) { groupStats.push({ name: gn, count: 0 }); continue; }
+          const msgs = await safeFetchMessages(ch, 150);
+          const rec = msgs.filter(m => m.body && m.timestamp > _scanDay);
+          groupStats.push({ name: ch.name, count: rec.length });
+          for (const m of rec.filter(m => m.body.trim().length > 25)) {
+            const _d = new Date(m.timestamp * 1000);
+            allMessages.push({
+              group: ch.name,
+              time: `${String(_d.getDate()).padStart(2, '0')}/${String(_d.getMonth() + 1).padStart(2, '0')} ${String(_d.getHours()).padStart(2, '0')}:${String(_d.getMinutes()).padStart(2, '0')}`,
+              sender: (m._data?.notifyName || 'משתתף').substring(0, 15),
+              body: m.body.substring(0, 180),
+              ts: m.timestamp,
+            });
+          }
+        } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0, 60)}`); groupStats.push({ name: gn, count: 0 }); }
+      }
+      // Cap newest 120 then re-sort chronologically
+      allMessages.sort((a, b) => b.ts - a.ts);
+      if (allMessages.length > 120) allMessages.length = 120;
+      allMessages.sort((a, b) => a.ts - b.ts);
+
+      const totalM = groupStats.reduce((a, g) => a + g.count, 0);
+      const activeGrps = groupStats.filter(g => g.count > 0);
+      const hotG = [...groupStats].sort((a, b) => b.count - a.count)[0];
+      const lvl = totalM > 300 ? '🔴🔴🔴🔴🔴 סוער' : totalM > 150 ? '🔴🔴🔴🟡 פעיל מאוד' : totalM > 50 ? '🟡🟡🟡 בינוני' : '🟢🟢 שקט';
+      const header = `📋 *סקירה ידנית — ${new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}*\n━━━━━━━━━━━━━━━━━━━━\n🌡️ ${lvl}  |  🏆 ${hotG?.name || '—'}  |  📊 ${totalM} הודעות מ-${activeGrps.length} קבוצות${allMessages.length < totalM ? ` (מנותח: ${allMessages.length})` : ''}\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+      if (!allMessages.length) {
+        await botSend(oc, header + '_אין הודעות חדשות ב-24 השעות האחרונות_');
+        return;
+      }
+      const pool = allMessages.map(m => `⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
+      const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט: ⏰DD/MM HH:MM [קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט]\"\n\nכללי: 3-7 נושאים מחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ אם רלוונטי במיוחד לקלנר. עברית בלבד.\n\nאחרי הנושאים:\n━━━━━━━━━━━━━━━━━━━━\n💡 *זווית קלנר:* [נושא מדויק לתגובה]\n📲 *פעולה מוצעת:* [הצהרה / פוסט / יוזמה]`;
+
+      const scanResult = await _sc(scanPrompt, [], { timeoutMs: 150000 });
+      const _legend = `\n━━━━━━━━━━━━━━━━━━━━\n🔑 *מפתח:* ⚡ = 2+ קבוצות | 🔥 = קבוצה אחת | ⭐ = רלוונטי לקלנר`;
+      await botSend(oc, header + scanResult + _legend);
+    } catch (e) {
+      logger.error(`/run-group-scan failed: ${e.message?.substring(0, 100)}`);
+      try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, `❌ בדיקה ידנית של סקירת קבוצות נכשלה: ${e.message?.substring(0, 80)}`); } catch (_) {}
+    }
+  })().catch(() => {});
+});
+
 // ─── Restart-WA endpoint ────────────────────────────────────────
 // If the WhatsApp connection is alive but not delivering events (broken session),
 // hit /restart-wa from the browser → bot logs out, deletes session, exits cleanly.
