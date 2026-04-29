@@ -616,9 +616,16 @@ registerToolHandlers({
                   const msgs = await safeFetchMessages(ch, 150);
                   const rec = msgs.filter(m => m.body && m.timestamp > _scanDay);
                   groupStats.push({name:ch.name, count:rec.length, status:'ok'});
-                  for (const m of rec.filter(m => m.body.trim().length > 15))
-                    allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,250), ts:m.timestamp});
+                  // Tighter filter + shorter body — prevents API-400 on large scans
+                  for (const m of rec.filter(m => m.body.trim().length > 25))
+                    allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,180), ts:m.timestamp});
                 } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0,60)}`); groupStats.push({name:gn,count:0,status:'error',error:ge.message?.substring(0,60)}); }
+              }
+              // Cap at 120 newest messages, then re-sort chronologically
+              allMessages.sort((a,b)=>b.ts-a.ts);
+              if (allMessages.length > 120) {
+                logger.info(`📋 Daily scan: capping ${allMessages.length} → 120`);
+                allMessages.length = 120;
               }
               allMessages.sort((a,b)=>a.ts-b.ts);
               const totalM = groupStats.reduce((a,g)=>a+g.count,0);
@@ -1184,10 +1191,20 @@ client.on('ready', () => {
               const msgs = await safeFetchMessages(ch, 150);
               const rec = msgs.filter(m => m.body && m.timestamp > _scanDay);
               groupStats.push({name:ch.name, count:rec.length});
-              for (const m of rec.filter(m => m.body.trim().length > 15))
-                allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,250), ts:m.timestamp});
+              // Tighter filter (>25 chars skip noise) + shorter body (180) — avoids
+              // the API-400 "prompt too long" failures we saw with 200+ messages.
+              for (const m of rec.filter(m => m.body.trim().length > 25))
+                allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,180), ts:m.timestamp});
             } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0,60)}`); groupStats.push({name:gn,count:0}); }
           }
+          // Sort newest-first then cap at 120 — keeps prompt under safe size for Claude
+          allMessages.sort((a,b)=>b.ts-a.ts);
+          const _capped = allMessages.length > 120;
+          if (_capped) {
+            logger.info(`📋 Daily scan: capping ${allMessages.length} → 120 messages (newest)`);
+            allMessages.length = 120;
+          }
+          // After cap, sort back chronologically for the prompt
           allMessages.sort((a,b)=>a.ts-b.ts);
           const totalM = groupStats.reduce((a,g)=>a+g.count,0);
           const activeGrps = groupStats.filter(g=>g.count>0);
