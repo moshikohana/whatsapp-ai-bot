@@ -1014,6 +1014,37 @@ const nodeCron = require('node-cron');
 const dailyTasks = new Map(); // id → { cronJob, time, action, params, label }
 let dailyIdCounter = 1;
 
+// ─── Stale Chromium-lock cleanup ──────────────────────────────────
+// If the bot crashed ungracefully (watchdog kill, OS shutdown, OOM),
+// Chromium leaves behind SingletonLock/SingletonCookie/SingletonSocket
+// inside the userDataDir. The next launch sees them as "another browser
+// is using this" and refuses to start. Same logic that start.sh runs in
+// Docker — needed locally too. Safe: we only run one bot at a time.
+(function clearStaleLocks() {
+  try {
+    const authDir = path.join(__dirname, '.wwebjs_auth');
+    if (!fs.existsSync(authDir)) return;
+    const targets = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile'];
+    let cleared = 0;
+    const walk = (dir, depth = 0) => {
+      if (depth > 4) return;
+      try {
+        for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+          const p = path.join(dir, item.name);
+          if (item.isDirectory()) { walk(p, depth + 1); continue; }
+          if (targets.includes(item.name)) {
+            try { fs.unlinkSync(p); cleared += 1; } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    };
+    walk(authDir);
+    if (cleared > 0) console.log(`🔓 Cleared ${cleared} stale Chromium lock file(s)`);
+  } catch (e) {
+    console.warn('⚠️ Lock cleanup failed:', e.message?.substring(0, 60));
+  }
+})();
+
 // ─── WhatsApp Client ─────────────────────────────────────────────
 const client = new Client({
   authStrategy: new LocalAuth({ clientId: 'ai-personal-bot', dataPath: path.join(__dirname, '.wwebjs_auth') }),
