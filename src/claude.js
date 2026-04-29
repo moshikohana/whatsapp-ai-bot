@@ -687,9 +687,9 @@ async function callClaude(params, retries = 2) {
 }
 
 // ─── Smart Claude (with tools) ───────────────────────────────────
-async function smartChat(userMessage, history = []) {
+async function smartChat(userMessage, history = [], options = {}) {
   // Global timeout: 2 minutes max for the entire smartChat call
-  const GLOBAL_TIMEOUT = 120000;
+  const GLOBAL_TIMEOUT = options.timeoutMs || 120000;
   const startTime = Date.now();
 
   try {
@@ -702,11 +702,17 @@ async function smartChat(userMessage, history = []) {
   const trimmed = trimHistory(history);
   const messages = [...trimmed, { role: 'user', content: userMessage }];
 
+  // Allow caller to override web_search.max_uses for searches that need depth
+  // (e.g. daily media monitoring needs ~5 to cover multiple dated queries).
+  const tools = options.webSearchMaxUses
+    ? TOOLS.map(t => t.type === 'web_search_20250305' ? { ...t, max_uses: options.webSearchMaxUses } : t)
+    : TOOLS;
+
   let response = await callClaude({
     model: 'claude-sonnet-4-6',
     max_tokens: 4000,
     system: getSystemPromptArray(), // cached system prompt — 90% cheaper on repeated calls
-    tools: TOOLS,
+    tools,
     messages,
   });
 

@@ -650,20 +650,29 @@ registerToolHandlers({
                 } catch (draftsErr) { logger.warn('⚠️ drafts failed:', draftsErr.message); }
               }
             } else if (daily_action === 'media_briefing') {
-              // Morning media briefing
-              let briefing = `📡 *סקירת תקשורת בוקר — ${new Date().toLocaleDateString('he-IL')}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+              // Morning media briefing — strictly limited to last 48 hours
+              const _now = new Date();
+              const _todayISO = _now.toISOString().slice(0, 10);
+              const _2dAgoISO = new Date(_now.getTime() - 2 * 86400000).toISOString().slice(0, 10);
+              let briefing = `📡 *סקירת תקשורת בוקר — ${_now.toLocaleDateString('he-IL')}*\n📅 _טווח: ${_2dAgoISO} → ${_todayISO} (יומיים)_\n━━━━━━━━━━━━━━━━━━━━\n\n`;
               const queries = getBriefingSearchQueries(params.topics || []);
               const {smartChat:sc} = require('./src/claude');
 
-              // News search via Claude with web_search
-              const newsPrompt = `חפש ותסכם חדשות רלוונטיות לח"כ אריאל קלנר (ליכוד) והנושאים שלו: ${queries.slice(0,3).join(', ')}. סכם ב-5 נקודות קצרות. ציין מקורות.`;
-              const newsSummary = await sc(newsPrompt, []);
-              briefing += `📰 *חדשות רלוונטיות:*\n${newsSummary}\n\n`;
+              // News search via Claude with web_search — DATE-FILTERED
+              const newsPrompt = `חפש חדשות *מ-${_2dAgoISO} עד ${_todayISO} בלבד* (יומיים אחרונים) הרלוונטיות לח"כ אריאל קלנר (ליכוד) ולנושאים שלו: ${queries.slice(0,3).join(', ')}.
+השתמש ב-web_search עם הפילטר \`after:${_2dAgoISO}\` בכל חיפוש.
+**אסור** לכלול כתבה ישנה יותר מ-${_2dAgoISO}. אם אין חדשות בטווח — כתוב "אין חדשות חדשות בטווח".
+סכם ב-3-5 נקודות קצרות. לכל נקודה: כותרת · מקור · תאריך מדויק (DD/MM) · קישור.`;
+              const newsSummary = await sc(newsPrompt, [], { webSearchMaxUses: 4, timeoutMs: 150000 });
+              briefing += `📰 *חדשות (${_2dAgoISO} → ${_todayISO}):*\n${newsSummary}\n\n`;
 
-              // Social media search
-              const socialPrompt = `חפש אזכורים של "אריאל קלנר" ב-X (twitter) ובפייסבוק. סכם מה אומרים עליו. site:x.com אריאל קלנר, site:facebook.com אריאל קלנר`;
-              const socialSummary = await sc(socialPrompt, []);
-              briefing += `🐦 *רשתות חברתיות:*\n${socialSummary}\n\n`;
+              // Social media search — DATE-FILTERED
+              const socialPrompt = `חפש אזכורים של "אריאל קלנר" ב-X (twitter) ובפייסבוק *מ-${_2dAgoISO} ואילך בלבד*.
+השתמש ב-web_search עם פילטרים: \`"אריאל קלנר" after:${_2dAgoISO}\` , \`"ArielKallner" site:x.com after:${_2dAgoISO}\`.
+**אסור** לכלול ציוץ/פוסט ישן יותר מ-${_2dAgoISO}. אם אין — כתוב "אין אזכורים חדשים ברשתות".
+לכל אזכור: שם המצייץ · תאריך מדויק · 1 שורה.`;
+              const socialSummary = await sc(socialPrompt, [], { webSearchMaxUses: 4, timeoutMs: 150000 });
+              briefing += `🐦 *רשתות (${_2dAgoISO} → ${_todayISO}):*\n${socialSummary}\n\n`;
 
               // WhatsApp groups if specified
               if (params.groups?.length) {
@@ -3634,28 +3643,46 @@ nodeCron.schedule('0 8 * * *', async () => {
   try {
     const { smartChat: _sc } = require('./src/claude');
     const oc = await client.getChatById(OWNER_ID);
-    const today = new Date().toLocaleDateString('he-IL');
+    const now = new Date();
+    const today = now.toLocaleDateString('he-IL');
+    const todayISO = now.toISOString().slice(0, 10);                                    // 2026-04-29
+    const yesterdayISO = new Date(now.getTime() - 86400000).toISOString().slice(0, 10); // 2026-04-28
+    const twoDaysAgoISO = new Date(now.getTime() - 2 * 86400000).toISOString().slice(0, 10); // 2026-04-27
+    const todayHe = now.toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
+    const yesterdayHe = new Date(now.getTime() - 86400000).toLocaleDateString('he-IL', { day: 'numeric', month: 'long' });
 
-    const twitterPrompt = `חפש אזכורים חדשים של ח"כ אריאל קלנר ב-X (טוויטר) ובחדשות מה-24 שעות האחרונות.
-בצע את החיפושים הבאים:
-1. site:x.com "ArielKallner" OR "קלנר"
-2. "אריאל קלנר" חדשות site:ynet.co.il OR site:maariv.co.il OR site:walla.co.il OR site:nrg.co.il
-3. @ArielKallner twitter
+    const twitterPrompt = `חפש אזכורים *טריים בלבד* של ח"כ אריאל קלנר מ-${twoDaysAgoISO} (לפני יומיים) עד ${todayISO} (היום).
 
-פרמט התשובה:
-🐦 *אזכורי X/טוויטר:*
-[רשימת ציוצים/תגובות עם שם המצייץ, תוכן, קישור]
+⏰ *חוקי תאריכים — קריטי לעקוב אחריהם!*
+- היום: ${todayHe} (${todayISO})
+- אתמול: ${yesterdayHe} (${yesterdayISO})
+- לפני יומיים: ${twoDaysAgoISO}
+- **אסור** לכלול בתשובה ציוץ/כתבה שתאריך הפרסום שלה לפני ${twoDaysAgoISO}.
+- אם הבדיקה שלך מעלה משהו ישן (שבוע, חודש, שלושה חודשים) — **השמט אותו לחלוטין מהתשובה.**
+- אסור "ליפול חזרה" לתוצאות ישנות אם אין חדשות. במקרה כזה כתוב במפורש שאין.
 
-📰 *אזכורים בחדשות:*
-[כותרת, מקור, תאריך, קישור]
+🔍 *חיפושים שצריך לבצע (השתמש ב-web_search):*
+1. \`"אריאל קלנר" after:${twoDaysAgoISO}\`
+2. \`"ArielKallner" OR "קלנר" site:x.com after:${twoDaysAgoISO}\`
+3. \`"אריאל קלנר" (site:ynet.co.il OR site:maariv.co.il OR site:walla.co.il) after:${twoDaysAgoISO}\`
+
+📋 *פורמט התשובה הנדרש:*
+
+🐦 *אזכורי X/טוויטר (${twoDaysAgoISO} — ${todayISO}):*
+[לכל ציוץ: שם המצייץ · תאריך מדויק · 1-2 שורות תוכן · קישור]
+אם אין ציוצים בטווח — "אין אזכורים חדשים ב-X ביומיים האחרונים"
+
+📰 *אזכורים בחדשות (${twoDaysAgoISO} — ${todayISO}):*
+[לכל כתבה: כותרת · מקור · תאריך מדויק · קישור]
+אם אין כתבות בטווח — "אין אזכורים בחדשות ביומיים האחרונים"
 
 ⚡ *פעולה מוצעת:*
-[האם יש משהו שדורש תגובה מיידית? אם כן — מה?]
+[רק אם יש אזכור טרי שדורש תגובה — אחרת "לא נדרשת פעולה דחופה"]
 
-אם לא נמצא כלום — כתוב רק "אין אזכורים חדשים ל-${today}"`;
+⚠️ *תזכורת אחרונה:* אם אין אזכורים מ-${twoDaysAgoISO} ואילך — אמור זאת **בכנות**. אל תכלול אזכורים ישנים יותר אפילו אם נמצאו בחיפוש.`;
 
-    const result = await _sc(twitterPrompt, []);
-    await botSend(oc, `🔍 *מעקב מדיה יומי — ${today}*\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
+    const result = await _sc(twitterPrompt, [], { webSearchMaxUses: 5, timeoutMs: 180000 });
+    await botSend(oc, `🔍 *מעקב מדיה יומי — ${today}*\n📅 _טווח: ${twoDaysAgoISO} → ${todayISO} (יומיים אחרונים)_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
   } catch (e) {
     console.error('Twitter monitor cron error:', e.message?.substring(0, 80));
   }
