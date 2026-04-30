@@ -129,16 +129,74 @@ function ignoreMediaAlert(contactId) {
 }
 
 // ─── Capability #1.2: Interview brief 30 min before ───────────────────
+//
+// Detection rules:
+//  1) NEGATIVE override — if event contains any "school/medical/sports"
+//     word as a stand-alone token, it is NEVER an interview (catches
+//     "שיעור אנגלית" / "אימון כושר" / "פגישה רופא").
+//  2) MULTI-WORD phrases (e.g. "קול ברמה") — match as substring of
+//     normalized text. Robust to punctuation between words.
+//  3) SINGLE-WORD keywords — match only as a *complete* token to avoid
+//     "גלי" matching "אנ**גלי**ת". Hebrew word-boundaries are spaces
+//     or punctuation chars.
+//
+// The keyword list itself was tightened to remove very generic terms
+// like 'תוכנית', 'בוקר', 'רשת', 'כאן' that triggered false positives.
 const INTERVIEW_KEYWORDS = [
-  'ראיון', 'סינק', 'תוכנית', 'תכנית', 'ערוץ', 'גלי', 'קול ברמה',
-  'ynet', 'כאן', 'רדיו', 'i24', 'גלגצ', 'גלצ', 'רשת', 'הסטודיו',
-  'בוקר', 'מהדורה', 'פאנל', 'שידור', 'אולפן', 'פודקאסט',
+  // Multi-word channel/show names (matched as phrase substring)
+  'גלי צהל', 'גלי צה״ל', 'גלי צה"ל', 'קול ברמה', 'קול חי',
+  'כאן 11', 'כאן ב', 'כאן רשת ב', 'כאן רשת',
+  'ערוץ 12', 'ערוץ 13', 'ערוץ 14', 'ערוץ ספורט', 'ערוץ הכנסת',
+  'רשת 13', 'רשת ב', 'גל"צ', 'גלגלצ',
+  'תוכנית בוקר', 'תוכנית ערב', 'תוכנית צהריים', 'תוכנית הבוקר',
+  'תכנית בוקר', 'תכנית ערב',
+  // Single-word keywords (matched as complete tokens — see word-boundary check)
+  'ראיון', 'ראיונות', 'סינק', 'אולפן', 'מהדורה', 'פודקאסט',
+  'שידור', 'הסטודיו', 'גלצ', 'גלגצ', 'i24', 'ynet',
   'interview', 'podcast', 'broadcast', 'studio',
 ];
 
+// Words that DISQUALIFY an event from being treated as an interview
+// (must appear as a complete token to trigger).
+const NON_INTERVIEW_KEYWORDS = [
+  'שיעור', 'שעור', 'אימון', 'אימונים', 'יוגה', 'פילאטיס', 'כושר',
+  'רופא', 'רופאה', 'תור', 'דוקטור', 'מרפאה', 'בדיקה', 'חיסון',
+  'מורה', 'גננת', 'לימוד', 'לימודים', 'מבחן', 'בחינה',
+  'אוניברסיטה', 'מכללה', 'בית ספר', 'בית-ספר',
+  'גן ילדים', 'מעון', 'יום הולדת',
+  'ארוחה', 'קניות', 'מספרה', 'פיזיו', 'פיזיותרפיה',
+  'lesson', 'class', 'workout', 'gym', 'doctor', 'dentist',
+];
+
+// Build a regex that matches `keyword` only when surrounded by spaces,
+// punctuation, line ends, or hebrew-quote chars. Used for single-word matching.
+function _wordBoundaryRegex(kw) {
+  const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[\\s,.\\-:;!?'"׳״()\\[\\]{}/])${escaped}([\\s,.\\-:;!?'"׳״()\\[\\]{}/]|$)`, 'i');
+}
+
+function _matchesKeywordList(text, list) {
+  for (const k of list) {
+    const kLower = k.toLowerCase();
+    if (kLower.includes(' ')) {
+      // Multi-word phrase — substring match is OK (the phrase itself
+      // already contains its boundaries).
+      if (text.includes(kLower)) return true;
+    } else {
+      // Single-word — require complete-token match.
+      if (_wordBoundaryRegex(kLower).test(text)) return true;
+    }
+  }
+  return false;
+}
+
 function isInterviewEvent(event) {
-  const fields = [event.summary, event.description, event.location].filter(Boolean).join(' ').toLowerCase();
-  return INTERVIEW_KEYWORDS.some(k => fields.includes(k.toLowerCase()));
+  const text = [event.summary, event.description, event.location]
+    .filter(Boolean).join(' ').toLowerCase();
+  // Negative override — school/medical/sports terms cancel detection.
+  if (_matchesKeywordList(text, NON_INTERVIEW_KEYWORDS)) return false;
+  // Positive — must match a real interview-related keyword.
+  return _matchesKeywordList(text, INTERVIEW_KEYWORDS);
 }
 
 /**
