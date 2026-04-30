@@ -271,6 +271,30 @@ function stripUrls(text) {
     .trim();
 }
 
+// ─── Safe truncate that respects UTF-16 surrogate pairs ──────────
+// Naive substring(0, N) can cut emojis in half (e.g. 🔴 = 2 UTF-16 units).
+// The result is invalid JSON ("no low surrogate") and Anthropic API
+// returns 400 on the request body. This helper backs off the cut by 1
+// character if the boundary lands inside a surrogate pair.
+// Also strips orphan surrogates that may already be in the input
+// (rare, but safer to clean both ends).
+function safeTruncate(s, maxLen) {
+  if (typeof s !== 'string' || s.length <= maxLen) return s || '';
+  let end = maxLen;
+  const code = s.charCodeAt(end - 1);
+  // High surrogate at the cut point — back off so we don't split the pair
+  if (code >= 0xD800 && code <= 0xDBFF) end -= 1;
+  return s.substring(0, end);
+}
+
+// Strip orphan/lone surrogates from a string (defensive — incoming data
+// from WhatsApp Web is *usually* well-formed but can include garbage).
+function stripOrphanSurrogates(s) {
+  if (typeof s !== 'string' || !s) return s;
+  // Replace any high surrogate not followed by low, or low not preceded by high
+  return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+}
+
 // ─── Smart chat finder: exact > prefix > shortest-include ────────
 // Prevents "קניות" from matching "קניות חכמות ברשת" when an exact match exists.
 function findChatByName(chats, query) {
@@ -618,7 +642,7 @@ registerToolHandlers({
                   groupStats.push({name:ch.name, count:rec.length, status:'ok'});
                   // Tighter filter + shorter body — prevents API-400 on large scans
                   for (const m of rec.filter(m => m.body.trim().length > 25))
-                    allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,180), ts:m.timestamp});
+                    allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:safeTruncate(stripOrphanSurrogates(m._data?.notifyName||'משתתף'),15), body:safeTruncate(stripOrphanSurrogates(m.body),180), ts:m.timestamp});
                 } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0,60)}`); groupStats.push({name:gn,count:0,status:'error',error:ge.message?.substring(0,60)}); }
               }
               // Cap at 120 newest messages, then re-sort chronologically
@@ -1194,7 +1218,7 @@ client.on('ready', () => {
               // Tighter filter (>25 chars skip noise) + shorter body (180) — avoids
               // the API-400 "prompt too long" failures we saw with 200+ messages.
               for (const m of rec.filter(m => m.body.trim().length > 25))
-                allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,180), ts:m.timestamp});
+                allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:safeTruncate(stripOrphanSurrogates(m._data?.notifyName||'משתתף'),15), body:safeTruncate(stripOrphanSurrogates(m.body),180), ts:m.timestamp});
             } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0,60)}`); groupStats.push({name:gn,count:0}); }
           }
           // Sort newest-first then cap at 120 — keeps prompt under safe size for Claude
@@ -1982,7 +2006,7 @@ client.on('message_create', async (msg) => {
               const rec = msgs.filter(m => m.body && m.timestamp > day);
               groupStats.push({name:ch.name, count:rec.length, status:'ok'});
               for (const m of rec.filter(m => m.body.trim().length > 15))
-                allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:(m._data?.notifyName||'משתתף').substring(0,15), body:m.body.substring(0,250), ts:m.timestamp});
+                allMessages.push({group:ch.name, time:(()=>{const _d=new Date(m.timestamp*1000);return`${String(_d.getDate()).padStart(2,'0')}/${String(_d.getMonth()+1).padStart(2,'0')} ${String(_d.getHours()).padStart(2,'0')}:${String(_d.getMinutes()).padStart(2,'0')}`;})(), sender:safeTruncate(stripOrphanSurrogates(m._data?.notifyName||'משתתף'),15), body:safeTruncate(stripOrphanSurrogates(m.body),250), ts:m.timestamp});
               _doneG++;
             } catch (ge) { logger.warn(`scan skip "${gn}": ${ge.message?.substring(0,60)}`); groupStats.push({name:gn,count:0,status:'error',error:ge.message?.substring(0,60)}); _doneG++; }
             // Progress indicator — emit at halfway through a long scan
@@ -3423,8 +3447,8 @@ app.get('/run-group-scan', async (_req, res) => {
             allMessages.push({
               group: ch.name,
               time: `${String(_d.getDate()).padStart(2, '0')}/${String(_d.getMonth() + 1).padStart(2, '0')} ${String(_d.getHours()).padStart(2, '0')}:${String(_d.getMinutes()).padStart(2, '0')}`,
-              sender: (m._data?.notifyName || 'משתתף').substring(0, 15),
-              body: m.body.substring(0, 180),
+              sender: safeTruncate(stripOrphanSurrogates(m._data?.notifyName || 'משתתף'), 15),
+              body: safeTruncate(stripOrphanSurrogates(m.body), 180),
               ts: m.timestamp,
             });
           }
