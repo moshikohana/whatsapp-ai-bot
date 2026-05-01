@@ -2576,11 +2576,39 @@ client.on('message', async (msg) => {
     const chat = await msg.getChat();
     const groupName = chat.name || '';
 
-    // Check if this group is in the monitored list (partial match)
-    const isMonitored = status.monitoredGroups.some(g =>
-      groupName.includes(g) || g.includes(groupName),
-    );
-    if (!isMonitored) return;
+    // Helper: normalize Hebrew strings — strip niqqud + zero-width chars
+    // + bidi marks + ALL whitespace. Both the chat name and the configured
+    // monitor name may contain different representations of the same visible
+    // string (e.g. ״ vs " vs ׳, NFC vs NFD, RLM/LRM marks, optional space
+    // before emoji). Removing whitespace entirely makes the comparison
+    // tolerant to display formatting differences.
+    const _normHe = s => (s || '')
+      .normalize('NFC')
+      .replace(/[֑-ׇ]/g, '')          // niqqud
+      .replace(/[​-‏‪-‮⁦-⁩﻿]/g, '')  // zero-width / bidi
+      .replace(/[״"]/g, '')                      // hebrew + ASCII double quote
+      .replace(/[׳']/g, '')                      // hebrew + ASCII single quote
+      .replace(/\s+/g, '').toLowerCase();        // strip ALL whitespace
+
+    const _gNorm = _normHe(groupName);
+
+    // Check if this group is in the monitored list — try (a) exact JID
+    // match (status.monitoredGroupJids), (b) name partial-match on
+    // normalized strings.
+    const isMonitoredByJid = (status.monitoredGroupJids || []).includes(_fromJid);
+    const isMonitoredByName = status.monitoredGroups.some(g => {
+      const gn = _normHe(g);
+      return _gNorm.includes(gn) || gn.includes(_gNorm);
+    });
+    const isMonitored = isMonitoredByJid || isMonitoredByName;
+    if (!isMonitored) {
+      // Diagnostic: log mismatches so we can debug naming issues.
+      // Only log group images with non-empty names to avoid spam.
+      if (groupName) {
+        console.log(`⏩ Skip face-check (not monitored): "${groupName}" [${_fromJid}] · normalized="${_gNorm}" · monitoredList=${JSON.stringify(status.monitoredGroups.map(_normHe))}`);
+      }
+      return;
+    }
 
     // Owner's photos are handled exclusively by message_create (ownerGroups block).
     // Never process them here to avoid double-processing and infinite loops.
