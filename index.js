@@ -1290,17 +1290,37 @@ client.on('ready', () => {
     logger.info(`♻️ שוחזרו: ${restoredScheduled} תזמונים, ${restoredDaily} משימות יומיות`);
   }
 
-  // ── Warm-up scan groups into WhatsApp Store ───────────────────
+  // ── Warm-up scan groups + extra chats into WhatsApp Store ─────
   // After restart, Chromium cache is empty → groups return 0-1 msgs.
   // Two-pass warm-up: first at 15s, retry sparse groups at 60s.
+  // The list combines:
+  //   1. The daily group_summary scan-task groups (from daily.json)
+  //   2. Extra chats from data/extra-warmup.json (user-editable list,
+  //      e.g. lobby chats that aren't part of the daily political scan
+  //      but should still be summarizable on demand).
+  const _loadExtraWarmupChats = () => {
+    try {
+      const p = path.join(__dirname, 'data', 'extra-warmup.json');
+      if (!fs.existsSync(p)) return [];
+      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      return Array.isArray(data?.chats) ? data.chats.filter(Boolean) : [];
+    } catch (e) {
+      logger.warn(`⚠️ Could not load extra-warmup.json: ${e.message?.substring(0, 60)}`);
+      return [];
+    }
+  };
   const _doWarmup = async (passLabel) => {
     try {
       const scanTask = [...dailyTasks.values()].find(d => d.action === 'group_summary');
-      if (!scanTask?.params?.groups?.length) return [];
+      const scanGroups = scanTask?.params?.groups || [];
+      const extraGroups = _loadExtraWarmupChats();
+      // Merge + dedupe (some chats may appear in both lists)
+      const allTargets = [...new Set([...scanGroups, ...extraGroups])];
+      if (!allTargets.length) return [];
       const allChats = await client.getChats();
       const sparseGroups = [];
-      logger.info(`🔥 Warming up ${scanTask.params.groups.length} scan groups (${passLabel})...`);
-      for (const gn of scanTask.params.groups) {
+      logger.info(`🔥 Warming up ${allTargets.length} chats (${scanGroups.length} scan + ${extraGroups.length} extra) (${passLabel})...`);
+      for (const gn of allTargets) {
         try {
           const ch = findChatByName(allChats, gn);
           if (!ch) { logger.warn(`⚠️ Warm-up: group not found: "${gn}"`); continue; }

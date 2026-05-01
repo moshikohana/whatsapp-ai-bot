@@ -1,0 +1,6 @@
+{
+  "comment": "Additional chats to warm-up at bot startup (force WhatsApp Web to load their history into memory). These are loaded in addition to the daily-scan groups. Add chats here when you want their history to be reliably summarizable. Names are fuzzy-matched (Hebrew gershaim ״ vs ASCII \" both work).",
+  "chats": [
+    "ארועים ולו״ז לשכת קלנר"
+  ]
+}
