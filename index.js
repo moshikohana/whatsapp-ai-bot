@@ -295,19 +295,50 @@ function stripOrphanSurrogates(s) {
   return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
 }
 
+// ─── Hebrew-aware string normalization ───────────────────────────
+// Used everywhere we need to compare two Hebrew strings that *should*
+// be the same but might differ due to:
+//   - hebrew gershaim (״, ׳) vs ASCII quotes (", ')
+//   - niqqud / cantillation marks
+//   - bidi marks (RLM/LRM/PDF, U+200E..U+202E, U+2066..U+2069)
+//   - zero-width chars (ZWJ/ZWNJ/BOM)
+//   - NFC vs NFD
+//   - whitespace placement (esp. before emoji)
+// We strip all of those and compare lowercase-no-whitespace.
+function normalizeHe(s) {
+  return (s || '')
+    .normalize('NFC')
+    .replace(/[֑-ׇ]/g, '')                           // niqqud
+    .replace(/[​-‏‪-‮⁦-⁩﻿]/g, '')   // zero-width / bidi
+    .replace(/[״"]/g, '')                                       // " and ״
+    .replace(/[׳']/g, '')                                       // ' and ׳
+    .replace(/\s+/g, '')                                        // strip ALL whitespace
+    .toLowerCase();
+}
+
 // ─── Smart chat finder: exact > prefix > shortest-include ────────
 // Prevents "קניות" from matching "קניות חכמות ברשת" when an exact match exists.
+// Both sides are normalized via normalizeHe() so Hebrew-quote variants
+// (״ vs ") and whitespace differences don't break matching.
 function findChatByName(chats, query) {
-  const q = query.trim().toLowerCase();
-  // 1. Exact match
-  const exact = chats.find(c => (c.name || c.pushname || '').toLowerCase() === q);
-  if (exact) return exact;
+  const q = normalizeHe(query);
+  if (!q) return undefined;
+  // Pre-normalize names once (avoid recomputing in each filter)
+  const indexed = chats.map(c => ({
+    chat: c,
+    name: c.name || c.pushname || '',
+    norm: normalizeHe(c.name || c.pushname || ''),
+  })).filter(x => x.norm);
+
+  // 1. Exact match (normalized)
+  const exact = indexed.find(x => x.norm === q);
+  if (exact) return exact.chat;
   // 2. Starts-with match (shortest name wins)
-  const prefixes = chats.filter(c => (c.name || c.pushname || '').toLowerCase().startsWith(q));
-  if (prefixes.length) return prefixes.sort((a, b) => (a.name||'').length - (b.name||'').length)[0];
+  const prefixes = indexed.filter(x => x.norm.startsWith(q));
+  if (prefixes.length) return prefixes.sort((a, b) => a.name.length - b.name.length)[0].chat;
   // 3. Includes match — prefer shortest name (closest to query)
-  const includes = chats.filter(c => (c.name || c.pushname || '').toLowerCase().includes(q));
-  if (includes.length) return includes.sort((a, b) => (a.name||'').length - (b.name||'').length)[0];
+  const includes = indexed.filter(x => x.norm.includes(q));
+  if (includes.length) return includes.sort((a, b) => a.name.length - b.name.length)[0].chat;
   return undefined;
 }
 
