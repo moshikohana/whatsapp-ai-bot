@@ -861,10 +861,31 @@ async function smartChat(userMessage, history = [], options = {}) {
       if (content.length > 8000) {
         content = safeTruncate(content, 8000) + '\n...(תוצאה קוצרה)';
       }
+      // ── Anti-hallucination signal for failed tool calls ──
+      // If the tool returned a string starting with ❌ (error/not-found),
+      // wrap it with an explicit instruction so Claude doesn't invent an
+      // alternative or fall back to conversation history. This complements
+      // the <anti_hallucination> rule in the system prompt with a
+      // per-call reinforcement at the moment Claude reads the result.
+      const trimmedContent = (content || '').trim();
+      const isFailure = trimmedContent.startsWith('❌');
+      if (isFailure) {
+        content = [
+          '<tool_result_failed>',
+          'הכלי החזיר כשלון. **חובה:** העבר את הודעת השגיאה למשתמש כמות שהיא,',
+          'בלי להמציא חלופה ובלי להשלים מהיסטוריית השיחה.',
+          'הודעת השגיאה המקורית:',
+          '---',
+          content,
+          '---',
+          '</tool_result_failed>',
+        ].join('\n');
+      }
       toolResults.push({
         type: 'tool_result',
         tool_use_id: tool.id,
         content,
+        ...(isFailure ? { is_error: true } : {}),
       });
     }
 
