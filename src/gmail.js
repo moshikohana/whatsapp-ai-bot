@@ -65,6 +65,87 @@ async function fetchMessages(gmail, ids) {
 }
 
 // ─── Get Unread Emails ───────────────────────────────────────────
+// ─── Spam filter for morning briefing ────────────────────────────
+// Sender domains that are pure noise for a politician/spokesperson:
+// streaming notifications, shopping promos, gamified outreach.
+// Subject patterns identify "X is live", click-bait challenges, etc.
+const SPAM_DOMAINS = [
+  'twitch.tv', 'aliexpress.com', 'aliexpress.us',
+  'temu.com', 'shein.com',
+];
+// LinkedIn is partially spammy — challenges/games yes, real messages no.
+// We match LinkedIn ONLY when the subject screams game/challenge.
+const SPAM_SUBJECT_PATTERNS = [
+  /\bis live\b/i,                                // "monimu is live: ..."
+  /\blive:\s/i,                                  // "Alfie is live: ..."
+  /click.{0,20}claim/i,                          // "Click here to claim!"
+  /think you can solve/i,                        // LinkedIn challenges
+  /can you crack/i,                              // LinkedIn challenges
+  /your daily.{0,20}(challenge|puzzle|streak)/i,
+  /just went live on/i,
+  /\bgifted you\b.*\b(free|rng|reward)\b/i,
+];
+
+function isSpamEmail(from, subject) {
+  const fromLower = (from || '').toLowerCase();
+  if (SPAM_DOMAINS.some(d => fromLower.includes(d))) return true;
+  return SPAM_SUBJECT_PATTERNS.some(re => re.test(subject || ''));
+}
+
+// ─── Get unread emails — meaningful only (used by morning briefing) ──
+// Same as getUnreadEmails but skips streaming/shopping/gamified spam.
+// If nothing meaningful remains, returns a short "no meaningful" line
+// rather than an empty list.
+async function getMeaningfulUnreadEmails(maxResults = 8) {
+  const gmail = getGmail();
+  // Pull more than needed because some will be filtered out
+  const list = await gmail.users.messages.list({
+    userId: 'me', q: 'is:unread in:inbox', maxResults: Math.max(maxResults * 3, 15),
+  });
+
+  if (!list.data.messages?.length) {
+    return '📭 אין מיילים שלא נקראו — הכל נקי! 🎉';
+  }
+
+  const msgs = await fetchMessages(gmail, list.data.messages.map(m => m.id));
+
+  const allEmails = msgs.map((r, i) => ({
+    id: r.data.id,
+    threadId: r.data.threadId,
+    index: i + 1,
+    subject: headerVal(r.data.payload.headers, 'Subject') || '(ללא נושא)',
+    from: headerVal(r.data.payload.headers, 'From'),
+    fromName: parseFrom(headerVal(r.data.payload.headers, 'From')),
+    to: headerVal(r.data.payload.headers, 'To'),
+    date: formatDate(r.data.internalDate),
+    labels: r.data.labelIds || [],
+    snippet: r.data.snippet,
+  }));
+
+  const totalUnread = allEmails.length;
+  const meaningful = allEmails.filter(m => !isSpamEmail(m.from, m.subject)).slice(0, maxResults);
+  const filteredOut = totalUnread - meaningful.length;
+
+  if (!meaningful.length) {
+    return `📭 *${totalUnread} מיילים שלא נקראו — אין מיילים מהותיים*\n_(${filteredOut} זבל מסונן: Twitch / AliExpress / LinkedIn challenges)_`;
+  }
+
+  // Keep lastEmails populated with meaningful only (so /קרא [#] indices match what user sees)
+  lastEmails = meaningful.map((m, i) => ({ ...m, index: i + 1 }));
+
+  let text = `📧 *תיבת דואר — ${meaningful.length} מהותיים`;
+  if (filteredOut > 0) text += ` (מתוך ${totalUnread}, ${filteredOut} זבל מסונן)`;
+  text += `*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  lastEmails.forEach(m => {
+    const star = m.labels.includes('STARRED') ? ' ⭐' : '';
+    text += `*${m.index}.* *${m.subject}*${star}\n`;
+    text += `    👤 ${m.fromName}  ·  🕐 ${m.date}\n\n`;
+  });
+
+  return text.trim();
+}
+
 async function getUnreadEmails(maxResults = 8) {
   const gmail = getGmail();
   const list = await gmail.users.messages.list({
@@ -329,6 +410,7 @@ async function getGmailStats() {
 
 module.exports = {
   getUnreadEmails,
+  getMeaningfulUnreadEmails,
   searchEmails,
   readEmail,
   sendEmail,

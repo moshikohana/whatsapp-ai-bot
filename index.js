@@ -4011,11 +4011,12 @@ nodeCron.schedule('0 7 * * *', async () => {
       }
     }
 
-    // Emails
+    // Emails — meaningful only (filters Twitch/AliExpress/LinkedIn-games spam)
     let emailSection = '\n\n📧 *מיילים חדשים:*\n';
     try {
-      const emails = await getUnreadEmails();
-      emailSection += emails ? emails.substring(0, 400) : '_אין מיילים_';
+      const { getMeaningfulUnreadEmails } = require('./src/gmail');
+      const emails = await getMeaningfulUnreadEmails(5);
+      emailSection += emails ? emails.substring(0, 500) : '_אין מיילים_';
     } catch (e) {
       const msg = e.message || '';
       if (msg.includes('invalid_grant') || msg.includes('Token has been expired') || msg.includes('Token has been revoked')) {
