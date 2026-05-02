@@ -809,7 +809,31 @@ registerToolHandlers({
         if (matched.roles.length) {
           text += '👔 *תפקידים:*\n' + matched.roles.join('\n') + '\n\n';
         }
-        text += '_נסח תגובה בסגנון: "ח"כ אריאל קלנר (ליכוד): [ציטוט]"_';
+        // CoT scratchpad MANDATE — before drafting any quote, Claude must
+        // explicitly reason about which Kellner-position to lean on,
+        // which legislative achievement to cite, and which tone to use.
+        // The user only sees <final_response>, scratchpad is internal.
+        text += [
+          '─────────────────────────────',
+          '📐 *הוראות ניסוח (חובה):*',
+          '',
+          'לפני הציטוט, חשוב פנימית ב-<scratchpad>:',
+          '  1. *עמדה*: ביטחונית / חוקתית / לאומית / חברתית?',
+          '  2. *הישג ספציפי של קלנר להזכיר*: איזה חוק / יוזמה?',
+          '     (אם אין הישג רלוונטי בעמדות למעלה — אסור להמציא; הסתפק בעמדה כללית)',
+          '  3. *טון*: חד+לאומי / חד+מאוזן / קליל-פוליטי?',
+          '  4. *ציטוט בסגנון קלנר*: ישיר, חד, 2-3 משפטים מקסימום.',
+          '',
+          'הפלט הסופי בפורמט הזה בלבד (אין הקדמה):',
+          '<scratchpad>',
+          '[החשיבה שלך — לא מוצגת למשתמש בסוף]',
+          '</scratchpad>',
+          '<final_response>',
+          'ח"כ אריאל קלנר (ליכוד): "[הציטוט]"',
+          '</final_response>',
+          '',
+          '_מושיקו רואה רק את ה-final_response. הצג למושיקו לאישור._',
+        ].join('\n');
         return text;
       }
       case 'pitch': {
