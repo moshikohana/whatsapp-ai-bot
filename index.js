@@ -1528,6 +1528,89 @@ client.on('auth_failure', async (msg) => {
 // Reset reconnect counter once we're fully ready again
 client.on('ready', () => { _reconnectAttempts = 0; });
 
+// ─── Crisis War-Room — auto-triggered when 3+ critical alerts fire in 30 min ─────
+// Replaces the noise of 4 separate alerts with one consolidated brief:
+// aggregated group activity, web context, and a draft response. The user
+// gets the FULL situational picture in one place + ready-to-send draft.
+async function triggerWarRoom(trigger) {
+  const { startCrisis } = require('./src/crisis-mode');
+  startCrisis(trigger);   // mark active so subsequent alerts are suppressed
+  try {
+    const oc = await client.getChatById(OWNER_ID);
+    const { smartChat: _sc } = require('./src/claude');
+
+    // Build the alert summary table for the war-room header
+    const alertSummary = trigger.alerts.map(a => {
+      const t = new Date(a.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+      return `🕐 ${t} · "${a.keyword}" · 📍 ${a.group}`;
+    }).join('\n');
+
+    // Send opening message immediately so user knows war-room is starting
+    const opener = [
+      '🚨🚨🚨 *מצב חירום — מצב חירום זוהה אוטומטית*',
+      `📊 ${trigger.count} התראות קריטיות תוך ${trigger.spanMinutes} דקות:`,
+      '━━━━━━━━━━━━━━━━━━━━',
+      alertSummary,
+      '━━━━━━━━━━━━━━━━━━━━',
+      '_מכין סקירה מצרפית + טיוטת תגובה... (15-30 שניות)_',
+    ].join('\n');
+    await botSend(oc, opener);
+
+    // Aggregate analysis prompt — let Claude do web_search + spokesperson
+    const dominantKeywords = trigger.keywords.join(', ');
+    const dominantGroups = trigger.groups.join(', ');
+    const previews = trigger.alerts.slice(0, 5).map((a, i) =>
+      `${i + 1}. [${a.group}] "${a.preview.substring(0, 200)}"`).join('\n');
+
+    const warRoomPrompt = `<crisis_brief>
+זוהה מצב חירום: ${trigger.count} התראות קריטיות מ-${trigger.groups.length} קבוצות תוך ${trigger.spanMinutes} דק'.
+מילות מפתח: ${dominantKeywords}
+קבוצות פעילות: ${dominantGroups}
+
+<recent_messages_from_groups>
+${previews}
+</recent_messages_from_groups>
+</crisis_brief>
+
+<task>
+1. הפעל web_search לזיהוי הסיפור המרכזי (1-2 חיפושים, השתמש בכותרות מההודעות).
+2. הפעל spokesperson(action=response, topic=הנושא המרכזי) כדי לקבל הקשר עמדות+הישגים.
+3. נסח טיוטת תגובת דוברות בסגנון קלנר (חד, ישיר, לאומי).
+</task>
+
+<rules>
+- אם החיפוש לא העלה תוכן רלוונטי — השתמש רק בקטעי ההודעות מהקבוצות.
+- אסור להמציא עובדות.
+- הציטוט: 2-3 משפטים בלבד.
+</rules>
+
+<output_format>
+🌐 *הסיפור המרכזי (web search):*
+[2-3 משפטים מסכמים, עם מקור]
+
+📊 *מצב הקבוצות:*
+[רשימת קבוצות פעילות + ספירה]
+
+📝 *טיוטת תגובה:*
+ח"כ אריאל קלנר (ליכוד): "[ציטוט]"
+
+⚡ *פעולות מהירות:*
+1️⃣ שלח לכל הכתבים (media_tracker)
+2️⃣ פרסם כציוץ (טיוטת X — קצרה יותר)
+3️⃣ סיים מצב חירום
+</output_format>`;
+
+    const result = await _sc(warRoomPrompt, [], { webSearchMaxUses: 2, timeoutMs: 120000 });
+    await botSend(oc, `📋 *מצב חירום — סקירה מצרפית*\n${'━'.repeat(20)}\n\n${result}`);
+  } catch (e) {
+    logger.error('triggerWarRoom error:', e.message?.substring(0, 100));
+    try {
+      const oc = await client.getChatById(OWNER_ID);
+      await botSend(oc, `⚠️ ניסיתי להפעיל מצב חירום אבל הסקירה המצרפית נכשלה: ${e.message?.substring(0, 80)}\n\nההתראות עדיין נרשמו ב-data/crisis-recent-alerts.json. תגיד "סיים חירום" כדי לחזור למצב רגיל.`);
+    } catch (_) {}
+  }
+}
+
 // ─── Send helper (auto-split long messages) ────────────────────
 const MAX_MSG_LEN = 3000;
 
@@ -1759,6 +1842,26 @@ client.on('message_create', async (msg) => {
       try { await msg.react('💤'); } catch (_) {}
       const _sleepChat = await client.getChatById(OWNER_ID);
       await botSend(_sleepChat, 'בוטי הולך לישון... 💤 שלח "היי בוטי" כדי להעיר אותי.');
+      return;
+    }
+    // ── Crisis mode commands ─────────────────────────────────────
+    const _trim = rawBody.trim();
+    if (_trim === 'סיים חירום' || _trim === 'סיום חירום' || _trim === 'בטל חירום') {
+      const { isCrisisActive: _isAct, endCrisis: _endC } = require('./src/crisis-mode');
+      const wasActive = _isAct();
+      _endC();
+      try { await msg.react('✅'); } catch (_) {}
+      const _ec = await client.getChatById(OWNER_ID);
+      await botSend(_ec, wasActive ? '✅ מצב חירום הסתיים. חוזרים להתראות רגילות.' : 'ℹ️ לא היה מצב חירום פעיל.');
+      return;
+    }
+    if (_trim === 'סטטוס חירום' || _trim === 'מצב חירום') {
+      const { getActiveCrisis: _getC } = require('./src/crisis-mode');
+      const c = _getC();
+      const _sc = await client.getChatById(OWNER_ID);
+      if (!c) { await botSend(_sc, '🟢 אין מצב חירום פעיל כרגע.'); return; }
+      const ageMin = Math.round((Date.now() - c.startedAt) / 60000);
+      await botSend(_sc, `🚨 *מצב חירום פעיל*\nהחל: לפני ${ageMin} דק'\nסיבה: ${c.triggerCount} התראות (${c.triggerKeywords.join(', ')}) ב-${c.spanMinutes} דק'\nקבוצות: ${c.triggerGroups.join(', ')}\n\nאמור "סיים חירום" כדי לכבות.`);
       return;
     }
     if (botSleeping) return;
@@ -2647,12 +2750,22 @@ client.on('message', async (msg) => {
           const _sender = msg._data?.notifyName || 'מישהו';
           const _preview = stripUrls(msg.body.substring(0, 150));
           const _ownerC = await client.getChatById(OWNER_ID);
-          await botSend(_ownerC,
-            `🚨 *התראה — מילת מפתח: "${_matchedKw}"*\n` +
-            `📍 *${_groupNameForAlert}*\n` +
-            `👤 ${_sender}\n` +
-            `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
-          );
+          // Crisis mode check — if this critical alert pushes us over the
+          // war-room threshold, suppress this individual alert and trigger
+          // the consolidated war-room flow instead.
+          const { recordAlert: _recordCrisisAlert, isCrisisActive: _crisisActive } = require('./src/crisis-mode');
+          const _crisisTrigger = _recordCrisisAlert({ keyword: _matchedKw, group: _groupNameForAlert, sender: _sender, preview: _preview });
+          if (_crisisTrigger) {
+            triggerWarRoom(_crisisTrigger).catch(e => logger.error('warRoom failed:', e.message));
+          } else if (!_crisisActive()) {
+            await botSend(_ownerC,
+              `🚨 *התראה — מילת מפתח: "${_matchedKw}"*\n` +
+              `📍 *${_groupNameForAlert}*\n` +
+              `👤 ${_sender}\n` +
+              `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
+            );
+          }
+          // Always log to keyword-alerts journal (whether war-room or solo alert)
           require('./src/keyword-alerts').logAlert(_matchedKw, _groupNameForAlert, _sender, _preview);
         } catch (_alertErr) { /* silent */ }
       }
