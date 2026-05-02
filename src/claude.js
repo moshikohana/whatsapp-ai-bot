@@ -795,6 +795,15 @@ async function smartChat(userMessage, history = [], options = {}) {
   const trimmed = trimHistory(history);
   const messages = [...trimmed, { role: 'user', content: userMessage }];
 
+  // Prefill: prepends the assistant turn so Claude continues from a fixed
+  // prefix (per Anthropic prompt-engineering guide). Used by the daily
+  // crons to force consistent headers like "📋 *סקירה יומית — " or
+  // "🔍 *מעקב מדיה יומי — ". Removes optional preambles ("הנה הסקירה...")
+  // and locks the output format. The prefix is prepended to the final
+  // reply so the user sees the full text including the prefix.
+  const prefill = (typeof options.prefill === 'string' && options.prefill.length > 0) ? options.prefill : null;
+  if (prefill) messages.push({ role: 'assistant', content: prefill });
+
   // Allow caller to override web_search.max_uses for searches that need depth
   // (e.g. daily media monitoring needs ~5 to cover multiple dated queries).
   const tools = options.webSearchMaxUses
@@ -908,6 +917,13 @@ async function smartChat(userMessage, history = [], options = {}) {
       console.warn(`⚠️ Reply missing URL ${lastOutput.url.substring(0, 60)}... — using verbatim tool output`);
       reply = lastOutput.text;
     }
+  }
+
+  // ── Prepend prefill so the user sees the full text ──
+  // When prefill was used, Claude only generated the continuation. Prepend
+  // the prefix back so the final output includes the full formatted header.
+  if (prefill && !reply.startsWith(prefill)) {
+    reply = prefill + reply;
   }
 
   console.log(`💬 Reply (${reply.length} chars): ${reply.substring(0, 150)}`);

@@ -702,7 +702,7 @@ registerToolHandlers({
               } else {
                 const pool = allMessages.map(m=>`⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
                 const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט נתונים: ⏰DD/MM HH:MM [שם-קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\n\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו על הנושא, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט ישיר]\"\n\n⚠️ שורה 2 חייבת תמיד:\n- כל שמות הקבוצות שהזכירו נושא זה (מתוך [שם-קבוצה] בנתונים — כולם, לא רק אחת)\n- שעת הפרסום הראשונה (מתוך ⏰ בנתונים)\n- ציטוט ישיר\nאסור להמציא.\n\nדוגמה — נושא שדווח ב-3 קבוצות:\n⚡ *ביטול היטל העברת כספים*\n📍 ממשלה בעבודה, זירה פוליטית, הימנים בליכוד | 🕐 09:15 — \"מדובר בביטול שיהיה מחר בבוקר\"\n\nדוגמה — נושא שדווח בקבוצה אחת:\n🔥 *גיוס חרדים נדחה בכנסת*\n📍 הודעות דוברות לתקשורת | 🕐 11:30 — \"הצבעה על חוק הגיוס נדחתה\"\n\nאחרי כל הנושאים:\n━━━━━━━━━━━━━━━━━━━━\n💡 *זווית קלנר:* [נושא מדויק לתגובה]\n📲 *פעולה מוצעת:* [הצהרה / פוסט / יוזמה — ספציפי]\n\nכללי: 3-7 נושאים מהחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ לפני הסמל אם רלוונטי במיוחד לקלנר. עברית בלבד. אין כותרות, הקדמות, הסברים.`;
-                const scanResult = await sc(scanPrompt, []);
+                const scanResult = await sc(scanPrompt, [], { prefill: '📋 *' });
                 await botSend(oc, header + scanResult);
                 try { saveScanHistory({ kind: 'daily', windowLabel: '24 שעות אחרונות', totalMessages: totalM, activeGroups: activeGrps.length, groupStats, hotGroup: hotG?.name || null, scanOutput: scanResult }); } catch (e) { logger.warn('scan-history save failed:', e.message?.substring(0,80)); }
                 try {
@@ -725,7 +725,7 @@ registerToolHandlers({
 השתמש ב-web_search עם הפילטר \`after:${_2dAgoISO}\` בכל חיפוש.
 **אסור** לכלול כתבה ישנה יותר מ-${_2dAgoISO}. אם אין חדשות בטווח — כתוב "אין חדשות חדשות בטווח".
 סכם ב-3-5 נקודות קצרות. לכל נקודה: כותרת · מקור · תאריך מדויק (DD/MM) · קישור.`;
-              const newsSummary = await sc(newsPrompt, [], { webSearchMaxUses: 4, timeoutMs: 150000 });
+              const newsSummary = await sc(newsPrompt, [], { webSearchMaxUses: 4, timeoutMs: 150000, prefill: '📰 *' });
               briefing += `📰 *חדשות (${_2dAgoISO} → ${_todayISO}):*\n${newsSummary}\n\n`;
 
               // Social media search — DATE-FILTERED
@@ -1295,7 +1295,7 @@ client.on('ready', () => {
           } else {
             const pool = allMessages.map(m=>`⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
             const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט נתונים: ⏰DD/MM HH:MM [שם-קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\n\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו על הנושא, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט ישיר]\"\n\n⚠️ שורה 2 חייבת תמיד:\n- כל שמות הקבוצות שהזכירו נושא זה (מתוך [שם-קבוצה] בנתונים — כולם, לא רק אחת)\n- שעת הפרסום הראשונה (מתוך ⏰ בנתונים)\n- ציטוט ישיר\nאסור להמציא.\n\nדוגמה — נושא שדווח ב-3 קבוצות:\n⚡ *ביטול היטל העברת כספים*\n📍 ממשלה בעבודה, זירה פוליטית, הימנים בליכוד | 🕐 09:15 — \"מדובר בביטול שיהיה מחר בבוקר\"\n\nדוגמה — נושא שדווח בקבוצה אחת:\n🔥 *גיוס חרדים נדחה בכנסת*\n📍 הודעות דוברות לתקשורת | 🕐 11:30 — \"הצבעה על חוק הגיוס נדחתה\"\n\nאחרי כל הנושאים:\n━━━━━━━━━━━━━━━━━━━━\n💡 *זווית קלנר:* [נושא מדויק לתגובה]\n📲 *פעולה מוצעת:* [הצהרה / פוסט / יוזמה — ספציפי]\n\nכללי: 3-7 נושאים מהחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ לפני הסמל אם רלוונטי במיוחד לקלנר. עברית בלבד. אין כותרות, הקדמות, הסברים.`;
-            const scanResult = await sc(scanPrompt, []);
+            const scanResult = await sc(scanPrompt, [], { prefill: '📋 *' });
             const _legend = `\n━━━━━━━━━━━━━━━━━━━━\n🔑 *מפתח:* ⚡ = נושא ב-2+ קבוצות | 🔥 = קבוצה אחת | ⭐ = רלוונטי במיוחד לקלנר`;
             await botSend(oc, header + scanResult + _legend);
           }
@@ -2138,7 +2138,7 @@ client.on('message_create', async (msg) => {
           } else {
             const pool = allMessages.map(m=>`⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
             const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט נתונים: ⏰DD/MM HH:MM [שם-קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\n\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו על הנושא, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט ישיר]\"\n\n⚠️ שורה 2 חייבת תמיד:\n- כל שמות הקבוצות שהזכירו נושא זה (מתוך [שם-קבוצה] בנתונים — כולם, לא רק אחת)\n- שעת הפרסום הראשונה (מתוך ⏰ בנתונים)\n- ציטוט ישיר\nאסור להמציא.\n\nדוגמה — נושא שדווח ב-3 קבוצות:\n⚡ *ביטול היטל העברת כספים*\n📍 ממשלה בעבודה, זירה פוליטית, הימנים בליכוד | 🕐 09:15 — \"מדובר בביטול שיהיה מחר בבוקר\"\n\nדוגמה — נושא שדווח בקבוצה אחת:\n🔥 *גיוס חרדים נדחה בכנסת*\n📍 הודעות דוברות לתקשורת | 🕐 11:30 — \"הצבעה על חוק הגיוס נדחתה\"\n\nאחרי כל הנושאים:\n━━━━━━━━━━━━━━━━━━━━\n💡 *זווית קלנר:* [נושא מדויק לתגובה]\n📲 *פעולה מוצעת:* [הצהרה / פוסט / יוזמה — ספציפי]\n\nכללי: 3-7 נושאים מהחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ לפני הסמל אם רלוונטי במיוחד לקלנר. עברית בלבד. אין כותרות, הקדמות, הסברים.`;
-            const scanResult = await sc(scanPrompt, []);
+            const scanResult = await sc(scanPrompt, [], { prefill: '📋 *' });
             const _legend = `\n━━━━━━━━━━━━━━━━━━━━\n🔑 *מפתח:* ⚡ = נושא ב-2+ קבוצות | 🔥 = קבוצה אחת | ⭐ = רלוונטי במיוחד לקלנר`;
             await botSend(oc, header + scanResult + _legend);
             try { saveScanHistory({ kind: 'manual', windowLabel: _windowLabel, totalMessages: totalM, activeGroups: activeGrps.length, groupStats, skippedGroups: skippedGrps, hotGroup: hotG?.name || null, scanOutput: scanResult }); } catch (e) { logger.warn('scan-history save failed:', e.message?.substring(0,80)); }
@@ -3538,7 +3538,7 @@ app.get('/run-media-briefing', async (_req, res) => {
 ⚡ *פעולה מוצעת:*
 [רק אם יש משהו טרי דחוף — אחרת "לא נדרשת"]`;
 
-      const result = await _sc(twitterPrompt, [], { webSearchMaxUses: 5, timeoutMs: 180000 });
+      const result = await _sc(twitterPrompt, [], { webSearchMaxUses: 5, timeoutMs: 180000, prefill: '🔍 *' });
       await botSend(oc, `🔍 *מעקב מדיה (בדיקה ידנית) — ${today}*\n📅 _טווח: ${twoDaysAgoISO} → ${todayISO}_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
     } catch (e) {
       logger.error(`/run-media-briefing failed: ${e.message?.substring(0, 100)}`);
@@ -3971,7 +3971,7 @@ nodeCron.schedule('0 8 * * *', async () => {
 
 ⚠️ *תזכורת אחרונה:* אם אין אזכורים מ-${twoDaysAgoISO} ואילך — אמור זאת **בכנות**. אל תכלול אזכורים ישנים יותר אפילו אם נמצאו בחיפוש.`;
 
-    const result = await _sc(twitterPrompt, [], { webSearchMaxUses: 5, timeoutMs: 180000 });
+    const result = await _sc(twitterPrompt, [], { webSearchMaxUses: 5, timeoutMs: 180000, prefill: '🔍 *' });
     await botSend(oc, `🔍 *מעקב מדיה יומי — ${today}*\n📅 _טווח: ${twoDaysAgoISO} → ${todayISO} (יומיים אחרונים)_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
   } catch (e) {
     console.error('Twitter monitor cron error:', e.message?.substring(0, 80));
