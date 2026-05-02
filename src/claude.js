@@ -129,15 +129,31 @@ const BASE_SYSTEM_PROMPT = `<role>
 
 <workflow name="תגובה_דוברות">
 טריגרים: "תגובה על X", "תנסח תגובה", "הודעה לעיתונאים"
-1. spokesperson(response, topic=X) — עמדות רלוונטיות
-2. web_search רקע אם צריך
-3. **לפני ניסוח, חשוב ב-<scratchpad>:**
+1. **archive(similar, topic=X)** — בדוק אם כבר ניסחנו משהו דומה ב-90 יום אחרונים. אם כן — הראה למושיקו את הישנים והצע: לעדכן? להוסיף זווית? להמשיך מאפס?
+2. spokesperson(response, topic=X) — עמדות רלוונטיות
+3. web_search רקע אם צריך
+4. **לפני ניסוח, חשוב ב-<scratchpad>:**
    - באיזו עמדה אני נשען? (ביטחונית/חוקתית/לאומית/חברתית)
    - איזה הישג של קלנר ניתן להזכיר? (חוק ספציפי / יוזמה)
    - הטון: חד+לאומי או חד+מאוזן?
-4. נסח: ישיר, חד, לאומי, מבוסס על הישגים אמיתיים
-5. פורמט קבוע: 'ח"כ אריאל קלנר (ליכוד): "[ציטוט]"'
-6. הצג למושיקו לאישור
+5. נסח: ישיר, חד, לאומי, מבוסס על הישגים אמיתיים
+6. פורמט קבוע: 'ח"כ אריאל קלנר (ליכוד): "[ציטוט]"'
+7. הצג למושיקו לאישור
+8. **אחרי שמושיקו אישר** ("✅"/"שלח"/"כן") → archive(save) עם topic/type/channel/text/tags
+</workflow>
+
+<workflow name="פנייה_לתקשורת_עם_ארכיון">
+לפני ניסוח פנייה לכתב מסוים → archive(search, channel="...", sinceDays=90).
+זה מציג מה כבר אמרנו לכתב הזה לאחרונה — מונע פניות גנריות וכפילויות.
+אחרי שהמשתמש אישר את הפנייה → archive(save, type="פנייה לתקשורת", channel="שם הכתב").
+</workflow>
+
+<workflow name="ארכיון_חיפוש">
+טריגרים: "מה אמרנו על X?", "מה ניסחנו לדניאל בשך?", "תראה ציטוטים על בג"ץ"
+- archive(search, topic="X") — חיפוש לפי נושא
+- archive(search, channel="ערוץ 14") — חיפוש לפי ערוץ/כתב
+- archive(search, query="...") — חיפוש חופשי בטקסט
+- archive(stats) — סטטיסטיקה כוללת
 </workflow>
 
 <workflow name="זיהוי_פנים">
@@ -445,6 +461,27 @@ ACTIONS:
         action: { type: 'string', enum: ['context', 'response', 'pitch'] },
         topic: { type: 'string', description: 'נושא (response/pitch)' },
         target_outlet: { type: 'string', description: 'שם ערוץ/תוכנית (pitch)' },
+      },
+      required: ['action'],
+    },
+  },
+  // ─── Quote Archive — היסטוריה של תגובות+פניות ─────────────
+  {
+    name: 'archive',
+    description: 'ארכיון ציטוטים ותגובות דוברות. פעולות: save (שמור ציטוט שאושר), search (חפש לפי ערוץ/נושא/טווח), similar (חפש דומים מ-90 יום), stats (סטטיסטיקות), result (עדכן תוצאה לציטוט קיים).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['save', 'search', 'similar', 'stats', 'result'] },
+        text: { type: 'string', description: 'טקסט הציטוט (save)' },
+        topic: { type: 'string', description: 'נושא (save/search/similar)' },
+        type: { type: 'string', description: 'סוג: תגובה דוברות / פנייה לתקשורת / ציוץ X / טיוטה (save)' },
+        channel: { type: 'string', description: 'ערוץ/כתב יעד (save/search)' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'תגיות (save)' },
+        sinceDays: { type: 'number', description: 'ימים אחורה (search/similar). ברירת מחדל search=180, similar=90' },
+        query: { type: 'string', description: 'חיפוש חופשי (search)' },
+        id: { type: 'string', description: 'מזהה ציטוט (result, e.g. Q-2026-05-02-001)' },
+        result: { type: 'string', description: 'תוצאה: "פורסם 30/4", "לא ענה", "ענה ב-X", וכו׳ (result)' },
       },
       required: ['action'],
     },

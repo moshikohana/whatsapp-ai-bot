@@ -856,6 +856,61 @@ registerToolHandlers({
     }
   },
 
+  // ─── Quote Archive ───────────────────────────────────────────
+  archive: async ({ action, text, topic, type, channel, tags, sinceDays, query, id, result }) => {
+    const arch = require('./src/quote-archive');
+    switch (action) {
+      case 'save': {
+        if (!text || !topic) return '❌ נדרש text + topic. דוגמה: archive save text="..." topic="בג"ץ" type="תגובה דוברות" channel="ערוץ 14"';
+        try {
+          const saved = arch.addQuote({ text, topic, type, channel, tags });
+          return `✅ נשמר בארכיון: *${saved.id}*\n📂 ${saved.topic}${saved.channel ? ` · ${saved.channel}` : ''}\n📝 ${saved.text.substring(0, 80)}${saved.text.length > 80 ? '...' : ''}`;
+        } catch (e) { return `❌ שמירה נכשלה: ${e.message}`; }
+      }
+      case 'search': {
+        const items = arch.searchQuotes({ topic, channel, type, query, sinceDays: sinceDays || 180 });
+        if (!items.length) return `🗄️ לא נמצאו ציטוטים בארכיון לפי הקריטריונים${topic ? ` (נושא: ${topic})` : ''}${channel ? ` (ערוץ: ${channel})` : ''}.`;
+        return arch.formatQuotesList(items, { limit: 8 });
+      }
+      case 'similar': {
+        if (!topic) return '❌ נדרש topic. דוגמה: archive similar topic="בג"ץ"';
+        const items = arch.findSimilar(topic, sinceDays || 90);
+        if (!items.length) return `🗄️ לא נמצאו ציטוטים דומים על "${topic}" ב-${sinceDays || 90} ימים האחרונים. כנראה זה נושא חדש — אפשר לנסח בלי דאגה לכפילות.`;
+        return `⚠️ *${items.length} ציטוטים דומים על "${topic}":*\n\n` + arch.formatQuotesList(items, { limit: 5 });
+      }
+      case 'stats': {
+        const s = arch.getStats();
+        if (!s.total) return '🗄️ הארכיון ריק עדיין. כל ציטוט שתאשר יישמר אוטומטית.';
+        let txt = `🗄️ *ארכיון ציטוטים:* ${s.total} סה"כ\n`;
+        if (s.oldest && s.newest) {
+          const oldD = new Date(s.oldest).toLocaleDateString('he-IL');
+          const newD = new Date(s.newest).toLocaleDateString('he-IL');
+          txt += `📅 ${oldD} → ${newD}\n\n`;
+        }
+        if (Object.keys(s.byType).length) {
+          txt += '*לפי סוג:*\n';
+          for (const [k, v] of Object.entries(s.byType).sort((a, b) => b[1] - a[1])) {
+            txt += `  • ${k}: ${v}\n`;
+          }
+        }
+        if (Object.keys(s.byChannel).length) {
+          txt += '\n*לפי ערוץ (top 5):*\n';
+          for (const [k, v] of Object.entries(s.byChannel).sort((a, b) => b[1] - a[1]).slice(0, 5)) {
+            txt += `  • ${k}: ${v}\n`;
+          }
+        }
+        return txt.trim();
+      }
+      case 'result': {
+        if (!id || !result) return '❌ נדרש id + result. דוגמה: archive result id="Q-2026-05-02-001" result="פורסם בכותרת ynet"';
+        const updated = arch.updateQuoteResult(id, result);
+        if (!updated) return `❌ לא נמצא ציטוט עם id ${id}`;
+        return `✅ עודכן: *${updated.id}*\n📂 ${updated.topic}\n✅ תוצאה: ${updated.result}`;
+      }
+      default: return `פעולה לא מוכרת: ${action}`;
+    }
+  },
+
   // ─── Photo Filter / Face Recognition ──────────────────────────
   photo_filter: async ({ action, group_name, threshold, name, enabled }) => {
     switch (action) {
