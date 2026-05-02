@@ -1443,6 +1443,34 @@ async function attemptReconnect(reason) {
   const delayS = Math.min(60, 5 * _reconnectAttempts); // 5s, 10s, 15s, 20s, 25s
   logger.warn(`🔄 Reconnect attempt ${_reconnectAttempts}/5 in ${delayS}s — reason: ${reason}`);
   setTimeout(async () => {
+    // ── Cleanup before reconnect ──
+    // Watchdog kills can leave: (a) the puppeteer Chromium still
+    // running and holding the userDataDir lock, (b) stale Singleton*
+    // files in .wwebjs_auth/. If we don't clean both, initialize()
+    // will fail with "browser is already running for ...". We do that
+    // BEFORE every retry — safe because we only run one bot/dataDir.
+    try {
+      // Try graceful destroy of the old client (closes its puppeteer)
+      try { await client.destroy(); } catch (_) {}
+    } catch (_) {}
+    try {
+      const authDir = path.join(__dirname, '.wwebjs_auth');
+      const lockNames = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile'];
+      let cleared = 0;
+      const walk = (dir, depth = 0) => {
+        if (depth > 4) return;
+        try {
+          for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+            const p = path.join(dir, item.name);
+            if (item.isDirectory()) { walk(p, depth + 1); continue; }
+            if (lockNames.includes(item.name)) { try { fs.unlinkSync(p); cleared += 1; } catch (_) {} }
+          }
+        } catch (_) {}
+      };
+      if (fs.existsSync(authDir)) walk(authDir);
+      if (cleared > 0) logger.info(`🔓 Pre-reconnect: cleared ${cleared} stale lock file(s)`);
+    } catch (_) {}
+
     try {
       await client.initialize();
       logger.info(`✅ Reconnect attempt ${_reconnectAttempts} — initialize() resolved`);
