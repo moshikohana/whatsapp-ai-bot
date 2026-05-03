@@ -156,6 +156,21 @@ const BASE_SYSTEM_PROMPT = `<role>
 - archive(stats) — סטטיסטיקה כוללת
 </workflow>
 
+<workflow name="היסטוריית_סריקות">
+**חשוב מאוד**: כשמושיקו שואל על נושאים מהקבוצות (אפילו אם לא ביקש סריקה חדשה),
+**לפני שמתחיל סריקה חדשה — קודם בדוק אם יש סריקה שמורה**.
+
+טריגרים שדורשים גישה לסריקות שמורות:
+- "מה היה בסקירה האחרונה?" / "תזכיר לי מה היה בסקירה" → scans(latest)
+- "איזה נושא חזר הכי הרבה?" / "מה חזר על עצמו?" → scans(today) ואחר כך scans(get)
+  על הסריקה האחרונה. נתח את הטקסט.
+- "תראה לי סריקות מהיום" → scans(today)
+- "סריקות אחרונות" → scans(list)
+- "תראה לי את הסריקה של 19:24" → scans(get, filename=...)
+
+**אסור** לענות "אין סריקה שמורה" בלי לקרוא קודם ל-scans(today) או scans(latest)!
+</workflow>
+
 <workflow name="זיהוי_פנים">
 המערכת רצה ב-server (TensorFlow+face-api). אסור להגיד "אין לי יכולת".
 
@@ -461,6 +476,20 @@ ACTIONS:
         action: { type: 'string', enum: ['context', 'response', 'pitch'] },
         topic: { type: 'string', description: 'נושא (response/pitch)' },
         target_outlet: { type: 'string', description: 'שם ערוץ/תוכנית (pitch)' },
+      },
+      required: ['action'],
+    },
+  },
+  // ─── Scan History — סריקות קבוצות שמורות ──────────────────
+  {
+    name: 'scans',
+    description: 'היסטוריית סריקות קבוצות שמורות. פעולות: latest (הסקירה האחרונה — מציג תוכן מלא), list (רשימת סריקות אחרונות), today (כל הסריקות מהיום), get (סריקה ספציפית לפי שם קובץ).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['latest', 'list', 'today', 'get'] },
+        filename: { type: 'string', description: 'שם קובץ (get) — למשל "2026-05-03/19-24-manual.json"' },
+        limit: { type: 'number', description: 'מספר סריקות (list) — ברירת מחדל 10' },
       },
       required: ['action'],
     },

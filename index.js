@@ -856,6 +856,65 @@ registerToolHandlers({
     }
   },
 
+  // ─── Scan History ────────────────────────────────────────────
+  scans: async ({ action, filename, limit }) => {
+    const sh = require('./src/scan-history');
+    switch (action) {
+      case 'latest': {
+        const scan = sh.getLatestScan();
+        if (!scan) return '📭 אין סריקות שמורות עדיין. אמור "סרוק עכשיו" כדי לבצע סריקה.';
+        const d = scan.timestamp ? new Date(scan.timestamp).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' }) : `${scan.date} ${scan.time}`;
+        let out = `📋 *הסקירה האחרונה (${d}):*\n`;
+        out += `🌡️ ${scan.totalMessages || 0} הודעות מ-${scan.activeGroups || 0} קבוצות\n`;
+        if (scan.hotGroup) out += `🏆 קבוצה חמה: ${scan.hotGroup}\n`;
+        if (scan.windowLabel) out += `⏱ טווח: ${scan.windowLabel}\n`;
+        out += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+        out += scan.scanOutput || '_(סריקה ריקה)_';
+        return out;
+      }
+      case 'list': {
+        const scans = sh.listScans({ limit: limit || 10 });
+        if (!scans.length) return '📭 אין סריקות שמורות עדיין.';
+        let out = `🗂️ *${scans.length} סריקות אחרונות:*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        for (const s of scans) {
+          const kind = s.kind === 'daily' ? '🔄 יומית' : '⚡ ידנית';
+          out += `${kind} · ${s.date} ${s.time}\n`;
+          out += `   📊 ${s.totalMessages || 0} הודעות מ-${s.activeGroups || 0} קבוצות`;
+          if (s.hotGroup) out += ` · 🏆 ${s.hotGroup}`;
+          out += `\n   📁 ${s.filename}\n\n`;
+        }
+        return out.trim();
+      }
+      case 'today': {
+        const todayDate = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+        const all = sh.listScans({ limit: 30 });
+        const today = all.filter(s => s.date === todayDate);
+        if (!today.length) return `📭 אין סריקות מהיום (${todayDate}). אמור "סרוק עכשיו" כדי לבצע.`;
+        let out = `🗓️ *${today.length} סריקות מהיום (${todayDate}):*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        for (const s of today) {
+          const kind = s.kind === 'daily' ? '🔄 יומית' : '⚡ ידנית';
+          out += `${kind} · ${s.time} · ${s.totalMessages || 0} הודעות מ-${s.activeGroups || 0} קבוצות\n`;
+          out += `   📁 ${s.filename}\n\n`;
+        }
+        out += '_להציג סריקה ספציפית: scans get filename="..."_';
+        return out.trim();
+      }
+      case 'get': {
+        if (!filename) return '❌ נדרש filename. דוגמה: scans get filename="2026-05-03/19-24-manual.json"';
+        const scan = sh.loadScan(filename);
+        if (!scan) return `❌ לא נמצאה סריקה: ${filename}`;
+        let out = `📋 *סריקה: ${filename}*\n`;
+        if (scan.windowLabel) out += `⏱ טווח: ${scan.windowLabel}\n`;
+        out += `🌡️ ${scan.totalMessages || 0} הודעות מ-${scan.activeGroups || 0} קבוצות\n`;
+        if (scan.hotGroup) out += `🏆 ${scan.hotGroup}\n`;
+        out += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+        out += scan.scanOutput || '_(ריק)_';
+        return out;
+      }
+      default: return `פעולה לא מוכרת: ${action}`;
+    }
+  },
+
   // ─── Quote Archive ───────────────────────────────────────────
   archive: async ({ action, text, topic, type, channel, tags, sinceDays, query, id, result }) => {
     const arch = require('./src/quote-archive');
