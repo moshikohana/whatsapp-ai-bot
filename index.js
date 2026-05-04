@@ -1737,6 +1737,9 @@ async function advanceCalendarFlow(flow) {
   const stepName = ifl.getStepName(flow);
   const prompt = ifl.getStepPrompt(flow);
 
+  // ALL flow messages must include BOT_MARKER so they don't bounce back
+  // through the self-DM message_create handler and re-trigger Claude.
+
   // Title step — plain text prompt (no poll)
   if (stepName === 'title') {
     await oc.sendMessage(prompt + BOT_MARKER);
@@ -1745,7 +1748,7 @@ async function advanceCalendarFlow(flow) {
 
   // Confirm step — poll, but result handler must commit/cancel
   if (stepName === 'confirm') {
-    await oc.sendMessage(prompt);
+    await oc.sendMessage(prompt + BOT_MARKER);
     const opts = ifl.getOptionsForStep(flow);
     const poll = new Poll('בחר פעולה:', opts.map(o => o.label), { allowMultipleAnswers: false });
     const sentMsg = await oc.sendMessage(poll);
@@ -1762,13 +1765,13 @@ async function advanceCalendarFlow(flow) {
   // Regular poll-based step (date / time / duration / location)
   const opts = ifl.getOptionsForStep(flow);
   if (!opts.length) {
-    await oc.sendMessage(`⚠️ שלב לא ידוע: ${stepName}`);
+    await oc.sendMessage(`⚠️ שלב לא ידוע: ${stepName}` + BOT_MARKER);
     ifl.endFlow(flow.chatId);
     return;
   }
 
-  // Send the prompt + poll. WhatsApp poll questions max ~255 chars.
-  await oc.sendMessage(prompt);
+  // Send the prompt (with marker) + poll
+  await oc.sendMessage(prompt + BOT_MARKER);
   const pollName = `בחר אופציה (שלב ${flow.step + 1}/${ifl.CALENDAR_STEPS.length})`;
   const poll = new Poll(pollName, opts.map(o => o.label), { allowMultipleAnswers: false });
   const sentMsg = await oc.sendMessage(poll);
@@ -1781,21 +1784,31 @@ async function commitCalendarFlow(flow) {
   const d = flow.data;
 
   try {
-    const { addCalendarEvent } = require('./src/calendar');
-    // Build start/end datetimes in Asia/Jerusalem
-    const [hh, mm] = (d.time || '09:00').split(':').map(n => parseInt(n, 10));
-    const startISO = `${d.dateISO}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`;
-    const endDate = new Date(`${startISO}+03:00`);
-    endDate.setMinutes(endDate.getMinutes() + (d.durationMinutes || 60));
-    const endISO = endDate.toISOString().replace(/\.\d+Z$/, '+03:00');
+    // Bypass the natural-language parser in addCalendarEvent — call the
+    // Google Calendar API directly with our structured data.
+    const calendarLib = require('./src/calendar');
+    const { google } = require('googleapis');
+    const auth = await calendarLib.getAuthClient();
+    const cal = google.calendar({ version: 'v3', auth });
 
-    const event = await addCalendarEvent({
+    const [hh, mm] = (d.time || '09:00').split(':').map(n => parseInt(n, 10));
+    // Build local "wall-time" ISO string + send timeZone=Asia/Jerusalem
+    // so Google interprets the times in the right zone.
+    const startLocal = `${d.dateISO}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`;
+    const startDate = new Date(`${startLocal}+03:00`);
+    const endDate = new Date(startDate.getTime() + (d.durationMinutes || 60) * 60000);
+
+    const event = {
       summary: d.title,
-      start: startISO + '+03:00',
-      end: endISO,
-      location: d.location || undefined,
-      timezone: 'Asia/Jerusalem',
-    });
+      start: { dateTime: startLocal, timeZone: 'Asia/Jerusalem' },
+      end: {
+        dateTime: endDate.toISOString().replace(/\.\d+Z$/, ''),
+        timeZone: 'Asia/Jerusalem',
+      },
+    };
+    if (d.location) event.location = d.location;
+
+    const res = await cal.events.insert({ calendarId: 'primary', resource: event });
 
     await botSend(oc,
       `✅ *הפגישה נוספה ליומן!*\n\n` +
@@ -1803,71 +1816,86 @@ async function commitCalendarFlow(flow) {
       `📅 ${d.dateLabel}\n` +
       `🕐 ${d.time} (${d.duration})\n` +
       (d.location ? `📍 ${d.location}\n` : '') +
-      (event?.htmlLink ? `\n🔗 ${event.htmlLink}` : '')
+      (res?.data?.htmlLink ? `\n🔗 ${res.data.htmlLink}` : '')
     );
   } catch (e) {
-    logger.error('commitCalendarFlow failed:', e.message?.substring(0, 100));
-    await botSend(oc, `❌ הוספה ליומן נכשלה: ${e.message?.substring(0, 100)}\n\n_הפרטים שאספתי:_\n📌 ${d.title}\n📅 ${d.dateLabel} ${d.time}\n${d.location ? '📍 ' + d.location : ''}\n\nתוכל להוסיף ידנית או לנסות שוב.`);
+    logger.error('commitCalendarFlow failed:', e.message?.substring(0, 200));
+    await botSend(oc, `❌ הוספה ליומן נכשלה: ${e.message?.substring(0, 100)}\n\n_הפרטים שאספתי:_\n📌 ${d.title}\n📅 ${d.dateLabel} ${d.time}\n${d.location ? '📍 ' + d.location : ''}\n\nתוכל להוסיף ידנית או לנסות שוב ("פגישה חדשה").`);
   } finally {
     ifl.endFlow(flow.chatId);
   }
 }
 
-// ─── Poll vote handler — drives interactive flows ─────────────
+// ─── Onboarding flow — show menu / category content ─────────────
+async function advanceOnboardingFlow(flow) {
+  const onb = require('./src/onboarding-flow');
+  const { Poll } = require('whatsapp-web.js');
+
+  const oc = await client.getChatById(OWNER_ID);
+  const prompt = onb.getCurrentMenuPrompt(flow);
+  const opts = onb.getCurrentMenuOptions(flow);
+
+  // BOT_MARKER on all outgoing so they don't bounce back as input
+  await oc.sendMessage(prompt + BOT_MARKER);
+  if (!opts.length) return;
+
+  const pollName = flow.state === 'top_menu' ? 'בחר נושא:' : 'מה הלאה?';
+  const poll = new Poll(pollName, opts.map(o => o.label), { allowMultipleAnswers: false });
+  const sentMsg = await oc.sendMessage(poll);
+  onb.updateFlow(flow.chatId, { activePollId: sentMsg?.id?._serialized || null });
+}
+
+// ─── Poll vote handler — drives all interactive flows ─────────
 client.on('vote_update', async (vote) => {
   try {
     const ifl = require('./src/interactive-flow');
-    // The poll's parent message id (for matching to active flow)
+    const onb = require('./src/onboarding-flow');
     const parentId = vote.parentMessage?.id?._serialized;
     if (!parentId) return;
-
-    // Find the flow whose activePollId matches this poll
-    let matchingFlow = null;
-    for (const f of ifl.flows.values()) {
-      if (f.activePollId === parentId) { matchingFlow = f; break; }
-    }
-    if (!matchingFlow) return;
-
-    // Selected option label (first chosen — single-answer polls)
-    const selected = vote.selectedOptions?.[0]?.name || vote.selectedOptions?.[0]?.localId;
-    if (!selected) return;
 
     // Don't react to votes from anyone but the owner
     if (vote.voter && vote.voter !== OWNER_ID && !vote.voter.includes('48129453875330')) {
       return;
     }
 
-    const result = ifl.applyVote(matchingFlow, selected);
+    const selected = vote.selectedOptions?.[0]?.name || vote.selectedOptions?.[0]?.localId;
+    if (!selected) return;
+
     const oc = await client.getChatById(OWNER_ID);
 
-    if (result.error) {
-      await botSend(oc, `⚠️ ${result.error}`);
-      return;
+    // Try matching the calendar-event flow first
+    for (const f of ifl.flows.values()) {
+      if (f.activePollId === parentId) {
+        const result = ifl.applyVote(f, selected);
+        if (result.error) { await botSend(oc, `⚠️ ${result.error}`); return; }
+        if (result.cancel) { ifl.endFlow(f.chatId); await botSend(oc, '❌ הפגישה בוטלה.'); return; }
+        if (result.restart) {
+          ifl.endFlow(f.chatId);
+          ifl.startFlow(f.chatId, 'calendar_event');
+          await botSend(oc, '🔄 מתחילים מחדש...');
+          await advanceCalendarFlow(ifl.getFlow(f.chatId));
+          return;
+        }
+        if (result.commit) { await commitCalendarFlow(f); return; }
+        if (result.needsText) { await botSend(oc, `✏️ ${result.needsText}`); return; }
+        if (result.ok) { await advanceCalendarFlow(f); }
+        return;
+      }
     }
-    if (result.cancel) {
-      ifl.endFlow(matchingFlow.chatId);
-      await botSend(oc, '❌ הפגישה בוטלה.');
-      return;
-    }
-    if (result.restart) {
-      ifl.endFlow(matchingFlow.chatId);
-      ifl.startFlow(matchingFlow.chatId, 'calendar_event');
-      await botSend(oc, '🔄 מתחילים מחדש...');
-      const newFlow = ifl.getFlow(matchingFlow.chatId);
-      await advanceCalendarFlow(newFlow);
-      return;
-    }
-    if (result.commit) {
-      await commitCalendarFlow(matchingFlow);
-      return;
-    }
-    if (result.needsText) {
-      await botSend(oc, `✏️ ${result.needsText}`);
-      // Keep flow on same step, just waiting for text instead of vote
-      return;
-    }
-    if (result.ok) {
-      await advanceCalendarFlow(matchingFlow);
+
+    // Try matching the onboarding flow
+    for (const f of onb.flows.values()) {
+      if (f.activePollId === parentId) {
+        const result = onb.applyVote(f, selected);
+        if (result.error) { await botSend(oc, `⚠️ ${result.error}`); return; }
+        if (result.exit) {
+          onb.endFlow(f.chatId);
+          await botSend(oc, '✅ נסגר. תמיד אפשר לחזור עם "תפריט". יום מוצלח! 🚀');
+          return;
+        }
+        if (result.ok) { await advanceOnboardingFlow(f); }
+        return;
+      }
     }
   } catch (e) {
     logger.error('vote_update handler failed:', e.message?.substring(0, 100));
@@ -2166,6 +2194,32 @@ client.on('message_create', async (msg) => {
       const flow = ifl.getFlow(msg.from);
       await advanceCalendarFlow(flow);
       return;
+    }
+
+    // ── Onboarding/Help menu trigger ─────────────────────────────
+    if (/^(תפריט|עזרה|מה אתה יכול\??|ברוכים הבאים|ברוך הבא|\/help|\/start|הסבר|help|menu)$/i.test(rawBody.trim())) {
+      const onb = require('./src/onboarding-flow');
+      onb.startFlow(msg.from);
+      const flow = onb.getFlow(msg.from);
+      await advanceOnboardingFlow(flow);
+      return;
+    }
+
+    // ── Onboarding active — text input ignored (user must vote) ──
+    {
+      const onb = require('./src/onboarding-flow');
+      const onbFlow = onb.getFlow(msg.from);
+      if (onbFlow) {
+        // User typed during onboarding — abort flow only if "בטל"/"exit"
+        if (/^(בטל|ביטול|exit|stop|סגור|עצור)$/i.test(rawBody.trim())) {
+          onb.endFlow(msg.from);
+          const _c = await client.getChatById(OWNER_ID);
+          await botSend(_c, '✅ תפריט נסגר. תמיד אפשר לחזור עם "תפריט".');
+          return;
+        }
+        // Otherwise let normal Claude handler run (user might have a real question)
+        // but DON'T return — fall through.
+      }
     }
 
     // ── Reply-based feedback on forwarded photos / quoted context ────

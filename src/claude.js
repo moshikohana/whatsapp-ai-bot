@@ -861,14 +861,12 @@ async function smartChat(userMessage, history = [], options = {}) {
   const trimmed = trimHistory(history);
   const messages = [...trimmed, { role: 'user', content: userMessage }];
 
-  // Prefill: prepends the assistant turn so Claude continues from a fixed
-  // prefix (per Anthropic prompt-engineering guide). Used by the daily
-  // crons to force consistent headers like "📋 *סקירה יומית — " or
-  // "🔍 *מעקב מדיה יומי — ". Removes optional preambles ("הנה הסקירה...")
-  // and locks the output format. The prefix is prepended to the final
-  // reply so the user sees the full text including the prefix.
-  const prefill = (typeof options.prefill === 'string' && options.prefill.length > 0) ? options.prefill : null;
-  if (prefill) messages.push({ role: 'assistant', content: prefill });
+  // Prefill: NOT supported by claude-sonnet-4-6 — the API rejects it
+  // with "This model does not support assistant message prefill. The
+  // conversation must end with a user message." So we silently ignore
+  // the option for now (callers won't break) and fall back to plain
+  // generation. Output format is enforced by prompt instructions instead.
+  const prefill = null;
 
   // Allow caller to override web_search.max_uses for searches that need depth
   // (e.g. daily media monitoring needs ~5 to cover multiple dated queries).
