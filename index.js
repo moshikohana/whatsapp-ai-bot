@@ -1725,6 +1725,155 @@ ${previews}
   }
 }
 
+// ─── Interactive calendar-event flow — multi-step poll-based UI ──
+// Drives the user through Date → Time → Duration → Location → Title →
+// Confirm using WhatsApp polls (tap-to-pick) instead of free typing.
+// Each step is one poll OR (in title's case) a free-text prompt.
+async function advanceCalendarFlow(flow) {
+  const ifl = require('./src/interactive-flow');
+  const { Poll } = require('whatsapp-web.js');
+
+  const oc = await client.getChatById(OWNER_ID);
+  const stepName = ifl.getStepName(flow);
+  const prompt = ifl.getStepPrompt(flow);
+
+  // Title step — plain text prompt (no poll)
+  if (stepName === 'title') {
+    await oc.sendMessage(prompt + BOT_MARKER);
+    return;
+  }
+
+  // Confirm step — poll, but result handler must commit/cancel
+  if (stepName === 'confirm') {
+    await oc.sendMessage(prompt);
+    const opts = ifl.getOptionsForStep(flow);
+    const poll = new Poll('בחר פעולה:', opts.map(o => o.label), { allowMultipleAnswers: false });
+    const sentMsg = await oc.sendMessage(poll);
+    ifl.updateFlow(flow.chatId, { activePollId: sentMsg?.id?._serialized || null });
+    return;
+  }
+
+  // Last step? — flow.step >= CALENDAR_STEPS.length means commit time
+  if (flow.step >= ifl.CALENDAR_STEPS.length) {
+    await commitCalendarFlow(flow);
+    return;
+  }
+
+  // Regular poll-based step (date / time / duration / location)
+  const opts = ifl.getOptionsForStep(flow);
+  if (!opts.length) {
+    await oc.sendMessage(`⚠️ שלב לא ידוע: ${stepName}`);
+    ifl.endFlow(flow.chatId);
+    return;
+  }
+
+  // Send the prompt + poll. WhatsApp poll questions max ~255 chars.
+  await oc.sendMessage(prompt);
+  const pollName = `בחר אופציה (שלב ${flow.step + 1}/${ifl.CALENDAR_STEPS.length})`;
+  const poll = new Poll(pollName, opts.map(o => o.label), { allowMultipleAnswers: false });
+  const sentMsg = await oc.sendMessage(poll);
+  ifl.updateFlow(flow.chatId, { activePollId: sentMsg?.id?._serialized || null });
+}
+
+async function commitCalendarFlow(flow) {
+  const ifl = require('./src/interactive-flow');
+  const oc = await client.getChatById(OWNER_ID);
+  const d = flow.data;
+
+  try {
+    const { addCalendarEvent } = require('./src/calendar');
+    // Build start/end datetimes in Asia/Jerusalem
+    const [hh, mm] = (d.time || '09:00').split(':').map(n => parseInt(n, 10));
+    const startISO = `${d.dateISO}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`;
+    const endDate = new Date(`${startISO}+03:00`);
+    endDate.setMinutes(endDate.getMinutes() + (d.durationMinutes || 60));
+    const endISO = endDate.toISOString().replace(/\.\d+Z$/, '+03:00');
+
+    const event = await addCalendarEvent({
+      summary: d.title,
+      start: startISO + '+03:00',
+      end: endISO,
+      location: d.location || undefined,
+      timezone: 'Asia/Jerusalem',
+    });
+
+    await botSend(oc,
+      `✅ *הפגישה נוספה ליומן!*\n\n` +
+      `📌 *${d.title}*\n` +
+      `📅 ${d.dateLabel}\n` +
+      `🕐 ${d.time} (${d.duration})\n` +
+      (d.location ? `📍 ${d.location}\n` : '') +
+      (event?.htmlLink ? `\n🔗 ${event.htmlLink}` : '')
+    );
+  } catch (e) {
+    logger.error('commitCalendarFlow failed:', e.message?.substring(0, 100));
+    await botSend(oc, `❌ הוספה ליומן נכשלה: ${e.message?.substring(0, 100)}\n\n_הפרטים שאספתי:_\n📌 ${d.title}\n📅 ${d.dateLabel} ${d.time}\n${d.location ? '📍 ' + d.location : ''}\n\nתוכל להוסיף ידנית או לנסות שוב.`);
+  } finally {
+    ifl.endFlow(flow.chatId);
+  }
+}
+
+// ─── Poll vote handler — drives interactive flows ─────────────
+client.on('vote_update', async (vote) => {
+  try {
+    const ifl = require('./src/interactive-flow');
+    // The poll's parent message id (for matching to active flow)
+    const parentId = vote.parentMessage?.id?._serialized;
+    if (!parentId) return;
+
+    // Find the flow whose activePollId matches this poll
+    let matchingFlow = null;
+    for (const f of ifl.flows.values()) {
+      if (f.activePollId === parentId) { matchingFlow = f; break; }
+    }
+    if (!matchingFlow) return;
+
+    // Selected option label (first chosen — single-answer polls)
+    const selected = vote.selectedOptions?.[0]?.name || vote.selectedOptions?.[0]?.localId;
+    if (!selected) return;
+
+    // Don't react to votes from anyone but the owner
+    if (vote.voter && vote.voter !== OWNER_ID && !vote.voter.includes('48129453875330')) {
+      return;
+    }
+
+    const result = ifl.applyVote(matchingFlow, selected);
+    const oc = await client.getChatById(OWNER_ID);
+
+    if (result.error) {
+      await botSend(oc, `⚠️ ${result.error}`);
+      return;
+    }
+    if (result.cancel) {
+      ifl.endFlow(matchingFlow.chatId);
+      await botSend(oc, '❌ הפגישה בוטלה.');
+      return;
+    }
+    if (result.restart) {
+      ifl.endFlow(matchingFlow.chatId);
+      ifl.startFlow(matchingFlow.chatId, 'calendar_event');
+      await botSend(oc, '🔄 מתחילים מחדש...');
+      const newFlow = ifl.getFlow(matchingFlow.chatId);
+      await advanceCalendarFlow(newFlow);
+      return;
+    }
+    if (result.commit) {
+      await commitCalendarFlow(matchingFlow);
+      return;
+    }
+    if (result.needsText) {
+      await botSend(oc, `✏️ ${result.needsText}`);
+      // Keep flow on same step, just waiting for text instead of vote
+      return;
+    }
+    if (result.ok) {
+      await advanceCalendarFlow(matchingFlow);
+    }
+  } catch (e) {
+    logger.error('vote_update handler failed:', e.message?.substring(0, 100));
+  }
+});
+
 // ─── Send helper (auto-split long messages) ────────────────────
 const MAX_MSG_LEN = 3000;
 
@@ -1979,6 +2128,45 @@ client.on('message_create', async (msg) => {
       return;
     }
     if (botSleeping) return;
+
+    // ── Interactive flow — text input for active flow ────────────
+    // Polls let the user tap an option (handled by vote_update). When
+    // a step requires free text (e.g. event title) OR the user typed
+    // an "OTHER" custom value, the flow waits for incoming text here.
+    {
+      const ifl = require('./src/interactive-flow');
+      const flowChatId = msg.from;
+      const activeFlow = ifl.getFlow(flowChatId);
+      if (activeFlow && rawBody && rawBody.trim().length > 0) {
+        // Cancel keywords abort the flow at any step
+        if (/^(בטל|ביטול|cancel|stop|עצור)$/i.test(rawBody.trim())) {
+          ifl.endFlow(flowChatId);
+          const _c = await client.getChatById(OWNER_ID);
+          await botSend(_c, '❌ הפגישה בוטלה. אם תרצה לנסות שוב — אמור "פגישה חדשה".');
+          return;
+        }
+        const result = ifl.applyText(activeFlow, rawBody);
+        if (result.error) {
+          const _c = await client.getChatById(OWNER_ID);
+          await botSend(_c, `⚠️ ${result.error}\n\n_שלח שוב או "בטל"_`);
+          return;
+        }
+        if (result.ok) {
+          await advanceCalendarFlow(activeFlow);
+          return;
+        }
+      }
+    }
+
+    // ── Calendar event flow trigger ──────────────────────────────
+    if (/^(פגישה חדשה|תכניס פגישה|תוסיף לי פגישה|תוסיף פגישה|פגישה חדשה ביומן|אירוע חדש)$/i.test(rawBody.trim())) {
+      const ifl = require('./src/interactive-flow');
+      const _c = await client.getChatById(OWNER_ID);
+      ifl.startFlow(msg.from, 'calendar_event');
+      const flow = ifl.getFlow(msg.from);
+      await advanceCalendarFlow(flow);
+      return;
+    }
 
     // ── Reply-based feedback on forwarded photos / quoted context ────
     // Any reply to a bot photo message → smart feedback handler
@@ -2354,9 +2542,11 @@ client.on('message_create', async (msg) => {
             try { saveScanHistory({ kind: 'manual', windowLabel: _windowLabel, totalMessages: 0, activeGroups: 0, groupStats, skippedGroups: skippedGrps, hotGroup: null, scanOutput: '' }); } catch {}
           } else {
             const pool = allMessages.map(m=>`⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
-            // Manual scan — no "זווית קלנר" / "פעולה מוצעת" footer.
-            // User explicitly asks for them separately when needed (e.g. "תגיד לי מה הזווית של קלנר").
-            const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט נתונים: ⏰DD/MM HH:MM [שם-קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\n\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו על הנושא, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט ישיר]\"\n\n⚠️ שורה 2 חייבת תמיד:\n- כל שמות הקבוצות שהזכירו נושא זה (מתוך [שם-קבוצה] בנתונים — כולם, לא רק אחת)\n- שעת הפרסום הראשונה (מתוך ⏰ בנתונים)\n- ציטוט ישיר\nאסור להמציא.\n\nדוגמה — נושא שדווח ב-3 קבוצות:\n⚡ *ביטול היטל העברת כספים*\n📍 ממשלה בעבודה, זירה פוליטית, הימנים בליכוד | 🕐 09:15 — \"מדובר בביטול שיהיה מחר בבוקר\"\n\nדוגמה — נושא שדווח בקבוצה אחת:\n🔥 *גיוס חרדים נדחה בכנסת*\n📍 הודעות דוברות לתקשורת | 🕐 11:30 — \"הצבעה על חוק הגיוס נדחתה\"\n\nכללי: 3-7 נושאים מהחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ לפני הסמל אם רלוונטי במיוחד לקלנר. עברית בלבד. אין כותרות, הקדמות, הסברים.\n\n**אסור להוסיף "💡 זווית קלנר", "📲 פעולה מוצעת" או כל המלצה — רק רשימת הנושאים. אם מושיקו ירצה זווית או פעולה הוא יבקש בנפרד.**`;
+            // Manual scan — pure topic listing only. No analysis, no recommendations.
+            // The previous version had a "אסור להוסיף..." rule but mentioning the
+            // forbidden phrases sometimes still primed Claude to include them.
+            // Cleanest fix: don't mention them at all + explicit "STOP after topics".
+            const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט נתונים: ⏰DD/MM HH:MM [שם-קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\n\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו על הנושא, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט ישיר]\"\n\n⚠️ שורה 2 חייבת תמיד:\n- כל שמות הקבוצות שהזכירו נושא זה (מתוך [שם-קבוצה] בנתונים — כולם, לא רק אחת)\n- שעת הפרסום הראשונה (מתוך ⏰ בנתונים)\n- ציטוט ישיר\nאסור להמציא.\n\nדוגמה — נושא שדווח ב-3 קבוצות:\n⚡ *ביטול היטל העברת כספים*\n📍 ממשלה בעבודה, זירה פוליטית, הימנים בליכוד | 🕐 09:15 — \"מדובר בביטול שיהיה מחר בבוקר\"\n\nדוגמה — נושא שדווח בקבוצה אחת:\n🔥 *גיוס חרדים נדחה בכנסת*\n📍 הודעות דוברות לתקשורת | 🕐 11:30 — \"הצבעה על חוק הגיוס נדחתה\"\n\nכללי: 3-7 נושאים מהחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ לפני הסמל אם רלוונטי במיוחד לקלנר. עברית בלבד. אין כותרות, הקדמות, הסברים.\n\n**עצור מיד אחרי הנושא האחרון. אל תוסיף שום סעיף סיכום, ניתוח, המלצה, פעולה, או הערה.**`;
             const scanResult = await sc(scanPrompt, [], { prefill: '📋 *' });
             const _legend = `\n━━━━━━━━━━━━━━━━━━━━\n🔑 *מפתח:* ⚡ = נושא ב-2+ קבוצות | 🔥 = קבוצה אחת | ⭐ = רלוונטי במיוחד לקלנר`;
             await botSend(oc, header + scanResult + _legend);
@@ -3830,9 +4020,9 @@ app.get('/run-group-scan', async (_req, res) => {
         return;
       }
       const pool = allMessages.map(m => `⏰${m.time} [${m.group}] ${m.sender}: "${m.body}"`).join('\n');
-      // Manual scan via /run-group-scan endpoint — no analysis footer
-      // ("זווית קלנר" / "פעולה מוצעת"). User asks for them separately.
-      const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט: ⏰DD/MM HH:MM [קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט]\"\n\nכללי: 3-7 נושאים מחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ אם רלוונטי במיוחד לקלנר. עברית בלבד.\n\n**אסור להוסיף "💡 זווית קלנר", "📲 פעולה מוצעת" או כל המלצה — רק רשימת הנושאים.**`;
+      // Manual scan via /run-group-scan endpoint — pure topic listing.
+      // No analysis, no recommendations. User asks separately if needed.
+      const scanPrompt = `אתה מנתח מודיעין פוליטי לדובר ח"כ אריאל קלנר (ליכוד).\n\nנתונים: ${allMessages.length} הודעות מ-${activeGrps.length} קבוצות.\nפורמט: ⏰DD/MM HH:MM [קבוצה] שולח: "הודעה"\n\n${pool}\n\nכתוב סריקה לפי נושאים חמים. לכל נושא — בדיוק 2 שורות:\nשורה 1: [סמל] *[כותרת — עד 8 מילים]*\nשורה 2: 📍 [כל הקבוצות שדיווחו, מופרדות בפסיק] | 🕐 HH:MM — \"[ציטוט]\"\n\nכללי: 3-7 נושאים מחם לשקט. ⚡ ב-2+ קבוצות | 🔥 בקבוצה אחת | ⭐ אם רלוונטי במיוחד לקלנר. עברית בלבד.\n\n**עצור מיד אחרי הנושא האחרון. אל תוסיף שום סעיף סיכום, ניתוח, המלצה או פעולה.**`;
 
       const scanResult = await _sc(scanPrompt, [], { timeoutMs: 150000 });
       const _legend = `\n━━━━━━━━━━━━━━━━━━━━\n🔑 *מפתח:* ⚡ = 2+ קבוצות | 🔥 = קבוצה אחת | ⭐ = רלוונטי לקלנר`;
