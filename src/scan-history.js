@@ -153,14 +153,23 @@ function loadScan(filename) {
 
     if (!fs.existsSync(SCANS_ROOT)) return null;
 
-    // Search each day folder (newest first) for this filename
+    // Normalize: filename may be "08-18-manual.json" OR
+    // "2026-05-04/08-18-manual.json" (the format the listScans/today
+    // actions return). Try both: relative-from-SCANS_ROOT first, then
+    // search each day folder for the basename.
+    const direct = path.join(SCANS_ROOT, filename);
+    if (fs.existsSync(direct)) {
+      return JSON.parse(fs.readFileSync(direct, 'utf8'));
+    }
+
+    const basename = path.basename(filename);
     const days = fs.readdirSync(SCANS_ROOT)
       .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
       .sort()
       .reverse();
 
     for (const day of days) {
-      const candidate = path.join(SCANS_ROOT, day, filename);
+      const candidate = path.join(SCANS_ROOT, day, basename);
       if (fs.existsSync(candidate)) {
         return JSON.parse(fs.readFileSync(candidate, 'utf8'));
       }
