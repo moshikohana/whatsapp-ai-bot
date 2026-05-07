@@ -1729,26 +1729,102 @@ ${previews}
 // Drives the user through Date → Time → Duration → Location → Title →
 // Confirm using WhatsApp polls (tap-to-pick) instead of free typing.
 // Each step is one poll OR (in title's case) a free-text prompt.
+// Detect calendar conflicts overlapping with the proposed event window.
+// Returns array of {summary, timeStr} for events that overlap [start, end].
+async function detectCalendarConflicts(d) {
+  try {
+    const calendarLib = require('./src/calendar');
+    const { google } = require('googleapis');
+    const auth = await calendarLib.getAuthClient();
+    const cal = google.calendar({ version: 'v3', auth });
+
+    const [hh, mm] = (d.time || '09:00').split(':').map(n => parseInt(n, 10));
+    const startLocal = `${d.dateISO}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`;
+    const startDate = new Date(`${startLocal}+03:00`);
+    const endDate = new Date(startDate.getTime() + (d.durationMinutes || 60) * 60000);
+
+    // Window: 30 min before/after for nearby events too
+    const winStart = new Date(startDate.getTime() - 30 * 60000);
+    const winEnd = new Date(endDate.getTime() + 30 * 60000);
+
+    const calList = await cal.calendarList.list();
+    const calendars = (calList.data.items || []).filter(c => c.selected !== false);
+    const conflicts = [];
+
+    for (const c of calendars) {
+      try {
+        const res = await cal.events.list({
+          calendarId: c.id,
+          timeMin: winStart.toISOString(),
+          timeMax: winEnd.toISOString(),
+          singleEvents: true,
+          orderBy: 'startTime',
+          maxResults: 20,
+        });
+        for (const ev of (res.data.items || [])) {
+          const evStart = ev.start?.dateTime ? new Date(ev.start.dateTime) : null;
+          const evEnd = ev.end?.dateTime ? new Date(ev.end.dateTime) : null;
+          if (!evStart || !evEnd) continue;
+          // Overlap test
+          if (evStart < endDate && evEnd > startDate) {
+            const startStr = evStart.toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+            const endStr = evEnd.toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+            conflicts.push({ summary: ev.summary || '(ללא שם)', timeStr: `${startStr}–${endStr}` });
+          }
+        }
+      } catch (_) { /* skip this calendar */ }
+    }
+    return conflicts;
+  } catch (e) {
+    logger.warn('detectCalendarConflicts failed:', e.message?.substring(0, 80));
+    return [];
+  }
+}
+
 async function advanceCalendarFlow(flow) {
   const ifl = require('./src/interactive-flow');
   const { Poll } = require('whatsapp-web.js');
 
   const oc = await client.getChatById(OWNER_ID);
   const stepName = ifl.getStepName(flow);
-  const prompt = ifl.getStepPrompt(flow);
 
   // ALL flow messages must include BOT_MARKER so they don't bounce back
   // through the self-DM message_create handler and re-trigger Claude.
 
-  // Title step — plain text prompt (no poll)
-  if (stepName === 'title') {
+  // Conflict-check step — async lookup to Google Calendar. If no conflicts,
+  // skip directly to confirm (transparent to user). If conflicts exist,
+  // show them with options to ignore / change time / change date / cancel.
+  if (stepName === 'conflict_check') {
+    if (!flow.data.conflicts) {
+      await oc.sendMessage('🔍 _בודק התנגשויות ביומן..._' + BOT_MARKER);
+      const conflicts = await detectCalendarConflicts(flow.data);
+      flow.data.conflicts = conflicts;
+    }
+    if (!flow.data.conflicts.length) {
+      // No conflicts — skip to confirm
+      flow.step += 1;
+      await advanceCalendarFlow(flow);
+      return;
+    }
+    // Show conflict-check poll
+    const prompt = ifl.getStepPrompt(flow);
     await oc.sendMessage(prompt + BOT_MARKER);
+    const opts = ifl.getOptionsForStep(flow);
+    const poll = new Poll('איך להתקדם?', opts.map(o => o.label), { allowMultipleAnswers: false });
+    const sentMsg = await oc.sendMessage(poll);
+    ifl.updateFlow(flow.chatId, { activePollId: sentMsg?.id?._serialized || null });
     return;
   }
 
-  // Confirm step — poll, but result handler must commit/cancel
+  // Title step — plain text prompt (no poll)
+  if (stepName === 'title') {
+    await oc.sendMessage(ifl.getStepPrompt(flow) + BOT_MARKER);
+    return;
+  }
+
+  // Confirm step
   if (stepName === 'confirm') {
-    await oc.sendMessage(prompt + BOT_MARKER);
+    await oc.sendMessage(ifl.getStepPrompt(flow) + BOT_MARKER);
     const opts = ifl.getOptionsForStep(flow);
     const poll = new Poll('בחר פעולה:', opts.map(o => o.label), { allowMultipleAnswers: false });
     const sentMsg = await oc.sendMessage(poll);
@@ -1756,13 +1832,13 @@ async function advanceCalendarFlow(flow) {
     return;
   }
 
-  // Last step? — flow.step >= CALENDAR_STEPS.length means commit time
+  // Last step?
   if (flow.step >= ifl.CALENDAR_STEPS.length) {
     await commitCalendarFlow(flow);
     return;
   }
 
-  // Regular poll-based step (date / time / duration / location)
+  // Regular poll-based step
   const opts = ifl.getOptionsForStep(flow);
   if (!opts.length) {
     await oc.sendMessage(`⚠️ שלב לא ידוע: ${stepName}` + BOT_MARKER);
@@ -1770,9 +1846,8 @@ async function advanceCalendarFlow(flow) {
     return;
   }
 
-  // Send the prompt (with marker) + poll
-  await oc.sendMessage(prompt + BOT_MARKER);
-  const pollName = `בחר אופציה (שלב ${flow.step + 1}/${ifl.CALENDAR_STEPS.length})`;
+  await oc.sendMessage(ifl.getStepPrompt(flow) + BOT_MARKER);
+  const pollName = `בחר אופציה`;
   const poll = new Poll(pollName, opts.map(o => o.label), { allowMultipleAnswers: false });
   const sentMsg = await oc.sendMessage(poll);
   ifl.updateFlow(flow.chatId, { activePollId: sentMsg?.id?._serialized || null });
@@ -1808,14 +1883,36 @@ async function commitCalendarFlow(flow) {
     };
     if (d.location) event.location = d.location;
 
+    // Recurrence — RRULE per Google Calendar API
+    const recurrenceMap = {
+      'NONE':     null,
+      'DAILY':    'RRULE:FREQ=DAILY',
+      'WEEKDAYS': 'RRULE:FREQ=WEEKLY;BYDAY=SU,MO,TU,WE,TH',
+      'WEEKLY':   'RRULE:FREQ=WEEKLY',
+      'MONTHLY':  'RRULE:FREQ=MONTHLY',
+    };
+    const rrule = recurrenceMap[d.recurrence];
+    if (rrule) event.recurrence = [rrule];
+
+    // Reminder — override default reminders with the user-picked one
+    if (d.reminderMinutes && d.reminderMinutes !== 'NONE') {
+      event.reminders = {
+        useDefault: false,
+        overrides: [{ method: 'popup', minutes: parseInt(d.reminderMinutes, 10) }],
+      };
+    }
+
     const res = await cal.events.insert({ calendarId: 'primary', resource: event });
 
+    const recLine = (d.recurrence && d.recurrence !== 'NONE') ? `🔁 ${d.recurrenceLabel}\n` : '';
+    const remLine = (d.reminderMinutes && d.reminderMinutes !== 'NONE') ? `⏰ תזכורת: ${d.reminderLabel}\n` : '';
     await botSend(oc,
       `✅ *הפגישה נוספה ליומן!*\n\n` +
       `📌 *${d.title}*\n` +
       `📅 ${d.dateLabel}\n` +
       `🕐 ${d.time} (${d.duration})\n` +
       (d.location ? `📍 ${d.location}\n` : '') +
+      recLine + remLine +
       (res?.data?.htmlLink ? `\n🔗 ${res.data.htmlLink}` : '')
     );
   } catch (e) {
@@ -1878,7 +1975,19 @@ client.on('vote_update', async (vote) => {
         }
         if (result.commit) { await commitCalendarFlow(f); return; }
         if (result.needsText) { await botSend(oc, `✏️ ${result.needsText}`); return; }
-        if (result.ok) { await advanceCalendarFlow(f); }
+        if (result.ok) {
+          // editMode: user came from confirm to edit one field. After they
+          // pick a new value here, jump straight back to confirm (skip all
+          // intermediate steps). The jumpedTo flag from confirm step itself
+          // is when ENTERING edit, not finishing — different.
+          if (f.editMode && !result.jumpedTo) {
+            f.editMode = false;
+            // Jump back to conflict_check — it auto-skips to confirm if no
+            // conflicts, or shows them again if the new value still clashes.
+            f.step = ifl.CALENDAR_STEPS.indexOf('conflict_check');
+          }
+          await advanceCalendarFlow(f);
+        }
         return;
       }
     }
@@ -2180,6 +2289,12 @@ client.on('message_create', async (msg) => {
           return;
         }
         if (result.ok) {
+          // If we came here from "edit X" — jump back to conflict_check
+          // (it auto-skips to confirm if no conflict).
+          if (activeFlow.editMode) {
+            activeFlow.editMode = false;
+            activeFlow.step = ifl.CALENDAR_STEPS.indexOf('conflict_check');
+          }
           await advanceCalendarFlow(activeFlow);
           return;
         }
