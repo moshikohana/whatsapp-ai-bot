@@ -856,6 +856,25 @@ registerToolHandlers({
     }
   },
 
+  // ─── Article Reader — fetch URL, return clean text ─────────────
+  article: async ({ action, url }) => {
+    if (action !== 'read') return `פעולה לא מוכרת: ${action}`;
+    if (!url) return '❌ חסר URL';
+    try {
+      const { readArticle } = require('./src/article-reader');
+      const result = await readArticle(url);
+      if (!result.ok) return `❌ ${result.error}`;
+      let out = `📰 *${result.title || 'כתבה'}*\n`;
+      if (result.published) out += `🕐 ${result.published}\n`;
+      out += `🔗 ${result.url}\n`;
+      out += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+      out += result.text;
+      return out;
+    } catch (e) {
+      return `❌ שגיאה בקריאת המאמר: ${e.message?.substring(0, 100)}`;
+    }
+  },
+
   // ─── Scan History ────────────────────────────────────────────
   scans: async ({ action, filename, limit }) => {
     const sh = require('./src/scan-history');

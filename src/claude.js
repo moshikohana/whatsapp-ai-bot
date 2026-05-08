@@ -84,6 +84,16 @@ const BASE_SYSTEM_PROMPT = `<role>
 </capabilities>
 
 <tools_guide>
+<workflow name="קריאת_כתבה_מקישור">
+טריגרים: כשמושיקו שולח URL (לחדשות / מאמר / פוסט) ומבקש סיכום / קריאה / "מה כתוב שם".
+שלח את הקישור עם הכלי article(action=read, url=URL).
+- הכלי מחזיר טקסט/Markdown נקי של הכתבה (כולל כותרת ותאריך).
+- אחרי שמקבל — סכם בעברית ב-3-5 נקודות תמציתיות.
+- אם הכתבה ארוכה במיוחד — שאל אם רוצים סיכום קצר (פסקה) או מורחב (5-7 נקודות).
+- אם הכלי החזיר ❌ — העבר את ההודעה כמות שהיא.
+- אם רואה URL בלי הקשר ברור — תשאל "תרצה שאקרא ואסכם?" לפני שתפעיל את הכלי.
+</workflow>
+
 <workflow name="חיפוש_ברשתות">
 כשמחפשים ברשתות, בצע מספר חיפושים נפרדים:
 - "[נושא] site:x.com"
@@ -340,6 +350,19 @@ const TOOLS = [
   },
   // ─── Web search ───────────────────────────────────────────────
   { type: 'web_search_20250305', name: 'web_search', max_uses: 2 },
+  // ─── Article reader — fetch URL + clean text ─────────────────
+  {
+    name: 'article',
+    description: 'קריאת כתבה/מאמר מ-URL והחזרת טקסט נקי. השתמש כשמושיקו שולח קישור ומבקש סיכום/קריאה. מתמודד עם רוב אתרי החדשות הישראליים והעולמיים, כולל אתרים שדורשים JavaScript.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['read'], description: 'תמיד "read"' },
+        url: { type: 'string', description: 'ה-URL המלא של הכתבה. חייב להתחיל ב-http:// או https://' },
+      },
+      required: ['action', 'url'],
+    },
+  },
   // ─── Computer (unified) ───────────────────────────────────────
   {
     name: 'computer',
