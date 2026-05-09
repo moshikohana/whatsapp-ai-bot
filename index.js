@@ -2863,23 +2863,46 @@ async function handleVoice(msg, chatId) {
 
     updateContext(`[הודעה קולית]: ${transcript}`, reply);
 
-    // ── Auto-extract action items from voice note ──────────────────
+    // ── Auto-extract action items — PRESENTATION ONLY, no auto-actions ──
+    // User explicitly asked: do not auto-add to calendar / send messages
+    // based on voice content. Just SHOW what was extracted, let them decide.
     if (transcript.length > 50) {
       setImmediate(async () => {
         try {
           const { smartChat: _scv } = require('./src/claude');
-          const extractPrompt = `מהתמלול הבא, אם יש פריטים שדורשים פעולה — חלץ אותם בלבד. אם אין — השב "none".
-תמלול: "${transcript}"
-חלץ אם קיים:
-- 📅 אירועי יומן: [שם, תאריך/שעה] → השתמש ב-calendar add
-- ✅ משימות: [מה לעשות]
-- 📞 להתקשר ל: [שם]
-אם חלצת פריטים — הוסף לזיכרון עם save_memory ולוח שנה עם calendar.
-אם "none" — אל תשלח כלום.`;
+          const extractPrompt = `מהתמלול הבא חלץ פריטים פוטנציאליים לפעולה — אך **אסור לקרוא לאף כלי**. רק להציג למושיקו לסקירה.
+
+<transcript>
+${transcript}
+</transcript>
+
+<rules>
+- אסור להפעיל calendar / gmail / save_memory / whatsapp send.
+- אסור להוסיף שום אירוע ליומן.
+- רק חלץ ותציג. מושיקו יחליט לבד מה לעשות.
+- אם אין שום פריט פעולה משמעותי — השב בדיוק "none" (בלי הסבר).
+</rules>
+
+<output_format>
+**📅 אירועים פוטנציאליים** (לא נוספו ליומן):
+1. [שם] — [תאריך/שעה] (אם נזכר)
+   _להוסיף? אמור: "תוסיף את 1"_
+
+**✅ משימות** (פעולות שעלו בשיחה):
+- [משימה]
+
+**📞 שיחות לבצע:**
+- [שם / נושא]
+
+**💡 לזכור** (לא נשמר בזיכרון, פשוט מודגש):
+- [פרט חשוב]
+</output_format>
+
+חשוב: רק טקסט. אסור tool calls.`;
           const extracted = await _scv(extractPrompt, []);
           if (extracted && extracted.toLowerCase() !== 'none' && extracted.trim().length > 10) {
             const _oc = await client.getChatById(OWNER_ID);
-            await botSend(_oc, `📋 *חולץ מהודעה קולית:*\n${extracted}`);
+            await botSend(_oc, `📋 *חולץ מההקלטה (לא בוצעו פעולות):*\n\n${extracted}\n\n_💡 לאשר פעולה — אמור "תוסיף את 1" / "תשמור ב-memory" / "תזכיר לי..."_`);
           }
         } catch (_) { /* silent */ }
       });
