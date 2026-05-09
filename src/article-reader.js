@@ -183,6 +183,63 @@ function _parseJinaResponse(text) {
 }
 
 /**
+ * Extract OpenGraph + Twitter Card metadata from HTML.
+ * Used as last-resort fallback for video/social pages where the actual
+ * content is behind a login but the OG tags are public.
+ */
+function _extractOgMetadata(html) {
+  if (!html) return null;
+  const meta = {};
+  const patterns = {
+    title:       /<meta\s+(?:property|name)=["'](?:og:title|twitter:title)["']\s+content=["']([^"']+)["']/i,
+    description: /<meta\s+(?:property|name)=["'](?:og:description|twitter:description|description)["']\s+content=["']([^"']+)["']/i,
+    site:        /<meta\s+property=["']og:site_name["']\s+content=["']([^"']+)["']/i,
+    type:        /<meta\s+property=["']og:type["']\s+content=["']([^"']+)["']/i,
+    image:       /<meta\s+(?:property|name)=["'](?:og:image|twitter:image)["']\s+content=["']([^"']+)["']/i,
+    videoUrl:    /<meta\s+property=["']og:video(?::url|:secure_url)?["']\s+content=["']([^"']+)["']/i,
+    author:      /<meta\s+(?:property|name)=["'](?:author|article:author|og:author)["']\s+content=["']([^"']+)["']/i,
+    published:   /<meta\s+property=["']article:published_time["']\s+content=["']([^"']+)["']/i,
+  };
+  // Decode common HTML entities including numeric (e.g. &#x200f; → ‏)
+  const decodeEntities = (s) => (s || '')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+  for (const [k, re] of Object.entries(patterns)) {
+    const m = html.match(re);
+    if (m) meta[k] = decodeEntities(m[1]);
+  }
+  // Try <title> as fallback for missing og:title
+  if (!meta.title) {
+    const tm = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (tm) meta.title = decodeEntities(tm[1].trim());
+  }
+  if (!meta.title && !meta.description) return null;
+  return meta;
+}
+
+function _formatOgAsArticle(meta, url) {
+  const lines = [];
+  if (meta.type) {
+    const typeLabels = { 'video.movie': '🎬 סרטון', 'video.other': '🎬 סרטון', 'article': '📰 כתבה', 'profile': '👤 פרופיל' };
+    lines.push(typeLabels[meta.type] || `📄 ${meta.type}`);
+  }
+  if (meta.site) lines.push(`📍 ${meta.site}`);
+  if (meta.author) lines.push(`👤 ${meta.author}`);
+  if (meta.published) lines.push(`📅 ${meta.published}`);
+  lines.push('');
+  if (meta.description) lines.push(meta.description);
+  if (meta.videoUrl) lines.push(`\n🎬 קישור לוידאו: ${meta.videoUrl}`);
+  lines.push(`\n_⚠️ הצגה מלאה דורשת לוגין לאתר. אלה רק המטא-תגיות הציבוריות._`);
+  return lines.join('\n');
+}
+
+/**
  * Strip HTML tags from raw HTML — fallback when Jina fails.
  * Heuristic: find <article>, <main>, or fall back to <body>.
  */
@@ -310,6 +367,7 @@ async function readArticle(url) {
     // Fall through to Puppeteer if fxtwitter doesn't have it
   }
   if (social === 'facebook') {
+    // Try mbasic first (sometimes works for public posts)
     const mbasic = _facebookToMbasic(url);
     if (mbasic) {
       try {
@@ -323,7 +381,25 @@ async function readArticle(url) {
         }
       } catch (_) {}
     }
-    // Fall through
+    // For videos and login-walled posts: try OG metadata from any FB endpoint
+    try {
+      const r = await _fetchWithTimeout(url);
+      if (r.ok) {
+        const html = await r.text();
+        const og = _extractOgMetadata(html);
+        if (og && (og.title || og.description)) {
+          return {
+            ok: true,
+            source: 'fb-og',
+            url,
+            title: og.title || 'פוסט פייסבוק',
+            published: og.published || null,
+            text: _formatOgAsArticle(og, url),
+          };
+        }
+      }
+    } catch (_) {}
+    // Fall through to Puppeteer
   }
   if (social === 'instagram') {
     const embed = _instagramToEmbed(url);
