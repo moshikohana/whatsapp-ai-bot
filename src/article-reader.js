@@ -35,6 +35,94 @@ function _isAntibotChallenge(title, text) {
   return false;
 }
 
+// ─── Social media specialized handlers ───────────────────────────
+// These try cleaner alternative endpoints before falling through to
+// the generic cascade. All free, no API keys needed.
+
+/**
+ * X/Twitter — uses fxtwitter.com which proxies tweets to clean JSON.
+ * Stable, free, designed for embeds. Works for public tweets.
+ */
+async function _fetchTwitter(url) {
+  const m = url.match(/(?:twitter\.com|x\.com)\/([^/?#]+)\/status\/(\d+)/);
+  if (!m) return null;
+  const [, username, tweetId] = m;
+  try {
+    const apiUrl = `https://api.fxtwitter.com/${username}/status/${tweetId}`;
+    const r = await _fetchWithTimeout(apiUrl, 15000);
+    if (!r.ok) return null;
+    const json = await r.json();
+    const t = json?.tweet;
+    if (!t) return null;
+
+    const author = t.author?.name ? `${t.author.name} (@${t.author.screen_name})` : `@${username}`;
+    const date = t.created_timestamp
+      ? new Date(t.created_timestamp * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' })
+      : (t.created_at || null);
+
+    let body = `${author}\n${date ? `📅 ${date}\n` : ''}\n${t.text || '(טקסט ריק)'}`;
+
+    if (t.media?.photos?.length) body += `\n\n📷 ${t.media.photos.length} תמונה(ות) מצורפ(ות)`;
+    if (t.media?.videos?.length) body += `\n🎬 ${t.media.videos.length} סרטון(ים) מצורפ(ים)`;
+
+    if (t.replying_to_status) body += `\n\n↩️ תגובה לציוץ: https://x.com/${t.replying_to}/status/${t.replying_to_status}`;
+    if (t.quote) {
+      const q = t.quote;
+      body += `\n\n📎 *מצטט ציוץ של ${q.author?.name || q.author?.screen_name}:*\n${q.text || ''}`;
+    }
+
+    const stats = [];
+    if (t.likes != null) stats.push(`❤️ ${t.likes.toLocaleString()}`);
+    if (t.retweets != null) stats.push(`🔁 ${t.retweets.toLocaleString()}`);
+    if (t.replies != null) stats.push(`💬 ${t.replies.toLocaleString()}`);
+    if (t.views != null) stats.push(`👁️ ${t.views.toLocaleString()}`);
+    if (stats.length) body += `\n\n${stats.join(' · ')}`;
+
+    return {
+      ok: true,
+      source: 'fxtwitter',
+      url: t.url || url,
+      title: `🐦 ציוץ של ${author}`,
+      published: date,
+      text: body,
+    };
+  } catch (err) {
+    console.warn(`[article-reader] fxtwitter failed: ${err.message?.substring(0, 80)}`);
+    return null;
+  }
+}
+
+/**
+ * Facebook — try mbasic (basic mobile site, much simpler HTML).
+ * Won't work for posts in private groups/profiles.
+ */
+function _facebookToMbasic(url) {
+  if (!/(facebook\.com|fb\.com)\//.test(url)) return null;
+  if (url.includes('mbasic.')) return null;
+  return url.replace(/(?:www\.|m\.|web\.)?(facebook\.com|fb\.com)/, 'mbasic.facebook.com');
+}
+
+/**
+ * Instagram — embed view (lighter HTML, no login).
+ * Works for public posts/reels. Stories require login (no workaround).
+ */
+function _instagramToEmbed(url) {
+  const m = url.match(/instagram\.com\/(p|reel|tv)\/([^/?#]+)/);
+  if (!m) return null;
+  return `https://www.instagram.com/${m[1]}/${m[2]}/embed/`;
+}
+
+function _classifySocial(url) {
+  const u = url.toLowerCase();
+  if (/(?:twitter\.com|x\.com)\//.test(u)) return 'twitter';
+  if (/(?:facebook\.com|fb\.com)\//.test(u)) return 'facebook';
+  if (/instagram\.com\//.test(u)) return 'instagram';
+  if (/youtube\.com|youtu\.be/.test(u)) return 'youtube';
+  if (/tiktok\.com/.test(u)) return 'tiktok';
+  if (/linkedin\.com/.test(u)) return 'linkedin';
+  return null;
+}
+
 function _isLikelyUrl(s) {
   if (!s) return false;
   try {
@@ -212,6 +300,46 @@ async function readArticle(url) {
     const extracted = _extractFirstUrl(url);
     if (!extracted) return { ok: false, error: 'לא זוהה URL תקין. דוגמה: https://www.ynet.co.il/...' };
     url = extracted;
+  }
+
+  // ── Social media specialized fast-path ──
+  const social = _classifySocial(url);
+  if (social === 'twitter') {
+    const r = await _fetchTwitter(url);
+    if (r) return r;
+    // Fall through to Puppeteer if fxtwitter doesn't have it
+  }
+  if (social === 'facebook') {
+    const mbasic = _facebookToMbasic(url);
+    if (mbasic) {
+      try {
+        const r = await _fetchWithTimeout(mbasic);
+        if (r.ok) {
+          const html = await r.text();
+          const { title, body } = _stripHtml(html);
+          if (body && body.length > 200 && !_isAntibotChallenge(title, body)) {
+            return { ok: true, source: 'fb-mbasic', url, title, published: null, text: body };
+          }
+        }
+      } catch (_) {}
+    }
+    // Fall through
+  }
+  if (social === 'instagram') {
+    const embed = _instagramToEmbed(url);
+    if (embed) {
+      try {
+        const r = await _fetchWithTimeout(embed);
+        if (r.ok) {
+          const html = await r.text();
+          const { title, body } = _stripHtml(html);
+          if (body && body.length > 100 && !_isAntibotChallenge(title, body)) {
+            return { ok: true, source: 'ig-embed', url, title, published: null, text: body };
+          }
+        }
+      } catch (_) {}
+    }
+    // Fall through
   }
 
   // ── Try 1: Jina Reader (fast, free) ──
