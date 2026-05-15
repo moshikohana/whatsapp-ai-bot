@@ -156,6 +156,12 @@ async function addReference(name, imageBuffer) {
 }
 
 // ─── Find matching faces in an image ────────────────────────────
+// Minimum confidence to actually forward a match to the owner.
+// Without this floor, faces whose distance is JUST below threshold round to
+// 0-15% confidence — the user sees photos with score 0% and asks "why?".
+// 25% means: distance must be ≤ 75% of threshold (clearly inside, not borderline).
+const MIN_FORWARD_CONFIDENCE = 25;
+
 async function findMatches(imageBuffer) {
   const config = loadConfig();
   if (!config.enabled || Object.keys(config.referenceDescriptors).length === 0) return [];
@@ -180,10 +186,18 @@ async function findMatches(imageBuffer) {
 
       const effectiveThreshold = config.perPersonThresholds?.[name] ?? config.threshold;
       if (bestDistance < effectiveThreshold) {
+        const confidence = Math.round(Math.max(0, (1 - bestDistance / effectiveThreshold) * 100));
+        // Skip borderline matches that round to a low confidence — they were
+        // almost certainly false positives or low-quality face crops.
+        if (confidence < MIN_FORWARD_CONFIDENCE) {
+          // (kept for log visibility — debug aid)
+          // console.log(`🚫 Low-confidence match suppressed: ${name} (${confidence}%, dist=${bestDistance.toFixed(3)}/threshold=${effectiveThreshold})`);
+          continue;
+        }
         matches.push({
           name,
           distance: Math.round(bestDistance * 1000) / 1000,
-          confidence: Math.round(Math.max(0, (1 - bestDistance / effectiveThreshold) * 100)),
+          confidence,
           threshold: effectiveThreshold,
         });
       }

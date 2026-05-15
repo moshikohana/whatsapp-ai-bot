@@ -80,8 +80,10 @@ function eventLocalDate(start) {
   return null;
 }
 
-// ─── Fetch events from ALL calendars ─────────────────────────────
-async function fetchAllEvents(timeMin, timeMax, maxPerCal = 25) {
+// ─── Fetch events from ALL calendars (with pagination) ──────────
+// Uses nextPageToken to fetch ALL events in the range, not just the first page.
+// Safety cap: maxPagesPerCal prevents runaway loops on huge calendars.
+async function fetchAllEvents(timeMin, timeMax, maxPerCal = 250, maxPagesPerCal = 10) {
   const calendar = getCalendar();
 
   // Get all calendars the user has access to
@@ -90,23 +92,46 @@ async function fetchAllEvents(timeMin, timeMax, maxPerCal = 25) {
 
   console.log(`📅 Fetching from ${calendars.length} calendars: ${calendars.map(c => c.summary).join(', ')}`);
 
-  // Fetch events from each calendar in parallel
-  const results = await Promise.allSettled(
-    calendars.map(cal =>
-      calendar.events.list({
+  // Helper: fetch ALL pages for a single calendar
+  async function fetchAllPagesForCalendar(cal) {
+    const collected = [];
+    let pageToken = undefined;
+    let pages = 0;
+    while (pages < maxPagesPerCal) {
+      const res = await calendar.events.list({
         calendarId: cal.id,
         timeMin: timeMin.toISOString(),
         timeMax: timeMax.toISOString(),
         singleEvents: true,
         orderBy: 'startTime',
         maxResults: maxPerCal,
-      }).then(res => (res.data.items || []).map(event => ({
+        pageToken,
+      });
+      const items = (res.data.items || []).map(event => ({
         ...event,
         calendarName: cal.summary,
         calendarId: cal.id,
-      })))
-    )
-  );
+      }));
+      collected.push(...items);
+      pages++;
+      if (!res.data.nextPageToken) break;
+      pageToken = res.data.nextPageToken;
+    }
+    if (pages >= maxPagesPerCal) {
+      console.warn(`⚠️  Calendar "${cal.summary}" hit page cap (${maxPagesPerCal} × ${maxPerCal}) — some events may be missing`);
+    }
+    return collected;
+  }
+
+  // Fetch events from each calendar in parallel
+  const results = await Promise.allSettled(calendars.map(fetchAllPagesForCalendar));
+
+  // Log any per-calendar failures so silent fetch errors don't hide events
+  results.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      console.warn(`⚠️  Calendar "${calendars[i].summary}" fetch failed:`, r.reason?.message || r.reason);
+    }
+  });
 
   // Merge and sort by start time
   const allEvents = results
@@ -118,6 +143,7 @@ async function fetchAllEvents(timeMin, timeMax, maxPerCal = 25) {
       return aTime.localeCompare(bTime);
     });
 
+  console.log(`📅 Total events fetched: ${allEvents.length}`);
   return allEvents;
 }
 
@@ -173,7 +199,7 @@ async function getWeekSchedule() {
   const now = new Date(); now.setHours(0, 0, 0, 0);
   const weekEnd = new Date(now.getTime() + 7 * 86400000);
 
-  const events = await fetchAllEvents(now, weekEnd, 50);
+  const events = await fetchAllEvents(now, weekEnd);
   const dayNames = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
   const days = {};
 

@@ -18,6 +18,7 @@
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "googleapis": "^144.0.0",
+    "input": "^1.0.1",
     "mammoth": "^1.12.0",
     "node-cron": "^3.0.3",
     "pdf-parse": "^2.4.5",
@@ -28,6 +29,7 @@
     "remotion": "4.0.242",
     "sharp": "^0.34.5",
     "socket.io": "^4.8.0",
+    "telegram": "^2.26.22",
     "whatsapp-web.js": "^1.26.0"
   }
 }

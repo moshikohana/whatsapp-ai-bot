@@ -397,11 +397,11 @@ const TOOLS = [
   // ─── WhatsApp ─────────────────────────────────────────────────
   {
     name: 'whatsapp',
-    description: 'וואטסאפ. פעולות: send (שלח הודעה — אישור!), chats (רשימת שיחות), read (קרא שיחה), search (חפש הודעות), summarize (סכם קבוצה — תמיד העבר sinceMinutes כשהמשתמש מציין טווח זמן!), forward (העבר הודעה — אישור!).',
+    description: 'וואטסאפ. פעולות: send (שלח הודעה — אישור!), chats (רשימת שיחות וערוצים — 👥=קבוצה 📢=ערוץ), channels (רשימת ערוצי WhatsApp בלבד), read (קרא שיחה/ערוץ), search (חפש הודעות), summarize (סכם קבוצה/ערוץ — תמיד העבר sinceMinutes כשהמשתמש מציין טווח זמן!), forward (העבר הודעה — אישור!). ערוצים (Channels) נתמכים בכל הפעולות.',
     input_schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['send', 'chats', 'read', 'search', 'summarize', 'forward'] },
+        action: { type: 'string', enum: ['send', 'chats', 'channels', 'read', 'search', 'summarize', 'forward'] },
         phone: { type: 'string', description: 'מספר טלפון (send)' },
         message: { type: 'string', description: 'תוכן (send)' },
         chatName: { type: 'string', description: 'שם שיחה (read/search/summarize/forward)' },
@@ -410,6 +410,37 @@ const TOOLS = [
         toPhone: { type: 'string', description: 'יעד (forward)' },
         messageIndex: { type: 'number', description: 'מספר הודעה (forward, 1=אחרונה)' },
         sinceMinutes: { type: 'number', description: 'summarize בלבד: סנן הודעות מ-X דקות אחרונות. דוגמאות: "מהבוקר"=מהשעה 06:00 (חשב לפי השעה הנוכחית), "אתמול"=1440-2880, "השעה האחרונה"=60, "היום"=מאז חצות. תמיד חישוב יחסית לעכשיו.' },
+      },
+      required: ['action'],
+    },
+  },
+  // ─── Telegram (user-mode, MTProto) ────────────────────────────
+  {
+    name: 'telegram',
+    description: 'טלגרם — קריאה בלבד מהקבוצות/ערוצים/שיחות של המשתמש. פעולות: status (האם מחובר), dialogs (רשימת שיחות/קבוצות/ערוצים), read (קרא הודעות אחרונות מצ׳אט), search (חפש מילת מפתח). דרישה: הרצה חד-פעמית של setup-telegram.js. אם מצב=לא מוגדר — הסבר למשתמש לרוץ setup-telegram.js.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['status', 'dialogs', 'read', 'search'] },
+        chatName: { type: 'string', description: 'שם צ׳אט/קבוצה/ערוץ (read, search-with-filter)' },
+        query: { type: 'string', description: 'מילת חיפוש (search)' },
+        kind: { type: 'string', enum: ['channel', 'group', 'private'], description: 'סינון לפי סוג (dialogs בלבד)' },
+        limit: { type: 'number', description: 'כמה להציג (default 30, max 200 ב-read, 100 ב-dialogs)' },
+        sinceMinutes: { type: 'number', description: 'read בלבד: סנן הודעות מ-X דקות אחרונות' },
+      },
+      required: ['action'],
+    },
+  },
+  // ─── Scan presets (saved scan lists) ──────────────────────────
+  {
+    name: 'scan_presets',
+    description: 'פריסטים שמורים לסריקה — רשימות מקורות (קבוצות/ערוצים) ששמורות בשם. שימוש: list (רשימת פריסטים), get (פרטי פריסט מסוים), delete (מחק), rename (שנה שם). אם המשתמש מבקש *להפעיל* פריסט (לסרוק לפיו) — אל תעשה זאת כאן! ענה לו שיכתוב "סריקה" וכך יקבל תפריט שמכיל "📁 השתמש בפריסט שמור".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'get', 'delete', 'rename'] },
+        name: { type: 'string', description: 'שם פריסט (get/delete/rename)' },
+        new_name: { type: 'string', description: 'שם חדש (rename)' },
       },
       required: ['action'],
     },
@@ -922,7 +953,10 @@ async function smartChat(userMessage, history = [], options = {}) {
 
   // Tool use loop — Claude might call multiple tools
   const allMessages = [...messages];
-  let maxLoops = 8;
+  // Tool-call loop cap. Sized for multi-source summaries (e.g. 30+ Telegram
+  // channels). Hitting this cap is rare in practice; if you hit it, increase
+  // (and audit whether the request should be broken up).
+  let maxLoops = 30;
 
   // ── Verbatim outputs ──
   // Some tools (e.g. navigation/waze_link) return a fully-formatted, user-facing
@@ -1010,25 +1044,50 @@ async function smartChat(userMessage, history = [], options = {}) {
   let textBlocks = response.content.filter(b => b.type === 'text');
 
   // If no text (e.g. loop ended on tool_use or Claude returned only tool blocks),
-  // make one extra call with tool_choice:none to force a text summary
+  // make one extra call with tool_choice:none to force a text summary.
+  //
+  // CRITICAL: response.content may contain `tool_use` blocks (when the loop
+  // hit maxLoops mid-flight — Claude wanted more tools but we stopped).
+  // We MUST NOT include those un-resulted tool_use blocks in the next call
+  // — that triggers a 400 "tool_use ids without tool_result blocks".
+  // So we strip them before appending.
   if (textBlocks.length === 0 && allMessages.length > 1) {
     console.warn('⚠️ No text blocks — making final summary call');
+    const cleanContent = (response.content || []).filter(b => b.type !== 'tool_use');
+    const fallbackMessages = cleanContent.length > 0
+      ? [
+          ...allMessages,
+          { role: 'assistant', content: cleanContent },
+          { role: 'user', content: 'סכם בקצרה את מה שכבר אספת לפי תוצאות הכלים. אל תקרא לכלים נוספים — רק טקסט.' },
+        ]
+      : [
+          ...allMessages,
+          { role: 'user', content: 'הגענו לסף הכלים. סכם בקצרה את מה שכבר אספת עד עכשיו מתוצאות הכלים בלי לקרוא לעוד כלים. אם המידע חלקי — כתוב מה כן יש ומה היה צריך עוד.' },
+        ];
     try {
       const summaryResp = await callClaude({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
+        max_tokens: 2000,
         system: getSystemPrompt(),
         tool_choice: { type: 'none' },
-        messages: [...allMessages, { role: 'assistant', content: response.content },
-          { role: 'user', content: 'סכם בקצרה מה ביצעת עכשיו.' }],
+        messages: fallbackMessages,
       });
       textBlocks = summaryResp.content.filter(b => b.type === 'text');
-    } catch (_) { /* silent */ }
+    } catch (err) {
+      console.error(`⚠️ Final summary call failed (${err.status || '?'}): ${err.message?.substring(0, 120)}`);
+    }
   }
 
-  let reply = textBlocks.length > 0
-    ? textBlocks.map(b => b.text.trim()).filter(Boolean).join('\n\n')
-    : '✅ בוצע';
+  // If still no text — return an honest message instead of generic '✅ בוצע',
+  // which made the user think nothing happened. Always say what state we're in.
+  let reply;
+  if (textBlocks.length > 0) {
+    reply = textBlocks.map(b => b.text.trim()).filter(Boolean).join('\n\n');
+  } else if (maxLoops <= 0) {
+    reply = '⏳ הבקשה דרשה יותר כלים ממה שניתן לבצע בקריאה אחת. ניסיתי לסכם — אבל לא הצלחתי. אנא פצל את הבקשה (לדוגמה: "סכם 5 ערוצים בלבד") ונסה שוב.';
+  } else {
+    reply = '❌ משהו השתבש — לא הצלחתי לבנות תשובה. תנסה לנסח מחדש או לפצל את הבקשה.';
+  }
 
   // ── Safety net for verbatim tool outputs ──
   // If a navigation tool returned a Waze/Maps URL but Claude's reply doesn't

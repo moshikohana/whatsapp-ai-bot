@@ -74,9 +74,14 @@ const _jidNames = new Map();    // JID -> name cache (avoid repeat lookups)
 
 let _msgCacheDirty = false;
 function _cacheGroupMsg(msg) {
-  if (!msg?.from?.endsWith('@g.us')) return;
+  // Cache messages from BOTH groups (@g.us) AND WhatsApp channels (@newsletter).
+  // wwebjs Store.Chat.get(cid) returns undefined for newsletter cids, so
+  // fetchMessages() via the official API often fails on them — the disk cache
+  // (S4) is the ONLY reliable source for channel messages on demand.
+  const from = msg?.from || '';
+  if (!from.endsWith('@g.us') && !from.endsWith('@newsletter')) return;
   if (!msg.body || msg.body.length < 5) return;
-  const cid = msg.from;
+  const cid = from;
   if (_blockedJids.has(cid)) return; // known blocked group — skip
 
   // Lazy name resolution — first time we see a JID, check against blocklist
@@ -133,6 +138,34 @@ setInterval(() => {
 async function safeFetchMessages(chat, limit) {
   const chatId = chat.id._serialized || chat.id;
   const Message = require('whatsapp-web.js/src/structures/Message');
+
+  // ── Strategy 0: WhatsApp Channels (@newsletter) — disk cache fast path ──
+  // Strategies 1-3 below all use Store.Chat which doesn't know about channels
+  // → every one of them throws on @newsletter cids. Skip straight to the
+  // disk-cached messages (populated as channel messages arrive).
+  const isChannel = (chat.isChannel === true) || (typeof chatId === 'string' && chatId.endsWith('@newsletter'));
+  if (isChannel) {
+    const _dc = (_msgCache[chatId] || []);
+    if (_dc.length > 0) {
+      const _fromCache = _dc.slice(-limit).map(m => ({
+        body: m.body, timestamp: m.ts,
+        _data: { notifyName: m.sender }, id: { _serialized: m.id }, _fromCache: true,
+        fromMe: false,
+      }));
+      _fromCache._usedFallback = false;
+      logger.info(`📡 Channel "${chat.name}": ${_fromCache.length} msgs from disk cache`);
+      return _fromCache;
+    }
+    // Try the official API anyway — sometimes works for channels with active session
+    try {
+      const msgs = await chat.fetchMessages({ limit });
+      msgs._usedFallback = false;
+      return msgs;
+    } catch (e) {
+      logger.warn(`Channel "${chat.name}": fetchMessages failed and no disk cache yet`);
+      const _empty = []; _empty._usedFallback = true; return _empty;
+    }
+  }
 
   // ── Strategy 1: Official API ──────────────────────────────────
   try {
@@ -316,6 +349,51 @@ function normalizeHe(s) {
     .toLowerCase();
 }
 
+// ─── Safe channel list — works around wwebjs constructor bug ─────
+// whatsapp-web.js v1.34's Channel._patch does `data.channelMetadata.description`
+// without null-checking, so any channel without metadata crashes the whole
+// getChannels() call. We bypass the broken factory by going directly through
+// the puppeteer page and wrapping each Channel in a try/catch.
+async function safeGetChannels() {
+  const Channel = require('whatsapp-web.js/src/structures/Channel');
+  let rawChannels;
+  try {
+    rawChannels = await client.pupPage.evaluate(async () => {
+      try { return await window.WWebJS.getChannels(); } catch { return null; }
+    });
+  } catch (e) {
+    logger.warn(`safeGetChannels: pupPage.evaluate failed: ${e.message?.substring(0, 80)}`);
+    return [];
+  }
+  if (!rawChannels || !Array.isArray(rawChannels)) return [];
+
+  const out = [];
+  for (const raw of rawChannels) {
+    try {
+      // Guarantee channelMetadata exists so _patch() doesn't crash.
+      if (!raw.channelMetadata) raw.channelMetadata = {};
+      out.push(new Channel(client, raw));
+    } catch (e) {
+      logger.warn(`safeGetChannels: skipped channel "${raw?.name || raw?.id?._serialized || '?'}": ${e.message?.substring(0, 60)}`);
+    }
+  }
+  return out;
+}
+
+// ─── Get all chats + channels in one list ────────────────────────
+// whatsapp-web.js stores Channels (WhatsApp Channels, @newsletter JIDs)
+// in a separate collection — `client.getChats()` does NOT return them.
+// This helper merges both so scan/search/summarize can target channels
+// the same way they target groups (by name, via findChatByName).
+// Channels carry .isChannel === true; groups carry .isGroup === true.
+async function getAllChatsAndChannels(opts = {}) {
+  const { withChannels = true } = opts;
+  const chats = await client.getChats();
+  if (!withChannels) return chats;
+  const channels = await safeGetChannels();
+  return [...chats, ...channels];
+}
+
 // ─── Smart chat finder: exact > prefix > shortest-include ────────
 // Prevents "קניות" from matching "קניות חכמות ברשת" when an exact match exists.
 // Both sides are normalized via normalizeHe() so Hebrew-quote variants
@@ -464,6 +542,101 @@ registerToolHandlers({
       default: return `פעולה לא מוכרת: ${action}`;
     }
   }),
+  // ─── Telegram (user-mode, read-only) ─────────────────────────
+  // ─── Scan Presets (saved scan lists) ─────────────────────────
+  scan_presets: async ({ action, name, new_name }) => {
+    const sp = require('./src/scan-presets');
+    switch (action) {
+      case 'list': {
+        const all = sp.list();
+        if (!all.length) return '📁 *אין פריסטים שמורים.*\n\nכדי לשמור: הפעל סריקה אינטראקטיבית (שלח "סריקה"), בחר מקורות, ובסוף הסריקה תקבל אופציה לתת שם.';
+        return '📁 *פריסטים שמורים:*\n\n' + all.map((p, i) =>
+          `*${i + 1}.* ${p.name}\n   ${sp.summary(p)}`
+        ).join('\n\n') + '\n\n_להפעיל אחד מהם: שלח "סריקה" ובחר "📁 השתמש בפריסט שמור"._';
+      }
+      case 'get': {
+        if (!name) return '❌ חסר שם פריסט';
+        const p = sp.getByName(name);
+        if (!p) return `❌ לא נמצא פריסט בשם "${name}"`;
+        return `📁 *${p.name}*\n${sp.summary(p)}\n\n*המקורות:*\n` + p.sources.map((s, i) => `${i + 1}. ${s.label || s.raw}`).join('\n');
+      }
+      case 'delete': {
+        if (!name) return '❌ חסר שם פריסט';
+        const ok = sp.remove(name);
+        return ok ? `✅ פריסט "${name}" נמחק.` : `❌ לא נמצא פריסט "${name}"`;
+      }
+      case 'rename': {
+        if (!name || !new_name) return '❌ חסרים פרמטרים: name + new_name';
+        const ok = sp.rename(name, new_name);
+        return ok ? `✅ פריסט שונה: "${name}" → "${new_name}"` : `❌ לא נמצא פריסט "${name}"`;
+      }
+      default: return `❌ פעולה לא מוכרת: ${action}`;
+    }
+  },
+  telegram: async ({ action, chatName, query, kind, limit, sinceMinutes }) => {
+    const tg = require('./src/telegram');
+    if (!tg.isConfigured() && action !== 'status') {
+      return `📡 *Telegram לא מוגדר.*\nכדי להפעיל:\n1. השג API ID + HASH מ-https://my.telegram.org/auth/apps\n2. הוסף ל-.env:\n   \`TELEGRAM_API_ID=...\`\n   \`TELEGRAM_API_HASH=...\`\n3. הרץ: \`node setup-telegram.js\`\n4. הפעל את הבוט מחדש`;
+    }
+    switch (action) {
+      case 'status': {
+        return `📡 *סטטוס Telegram:* ${tg.statusLabel()}`;
+      }
+      case 'dialogs': {
+        try {
+          const list = await tg.listDialogs({ limit: limit || 30, kind });
+          if (!list.length) return '📡 אין שיחות זמינות.';
+          const kindLabel = { channel: '📢', group: '👥', private: '💬' };
+          let text = `📡 *Telegram — ${list.length} שיחות:*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+          list.forEach((d, i) => {
+            const icon = kindLabel[d.kind] || '•';
+            const unread = d.unread > 0 ? ` 🔴 ${d.unread}` : '';
+            text += `*${i + 1}.* ${icon} ${d.title}${unread}\n`;
+            if (d.lastMessage) text += `   _"${d.lastMessage.substring(0, 80)}"_\n`;
+          });
+          return text.trim();
+        } catch (e) {
+          return `❌ שגיאה ב-Telegram: ${e.message?.substring(0, 100)}`;
+        }
+      }
+      case 'read': {
+        if (!chatName) return '❌ חסר chatName';
+        try {
+          const res = await tg.readMessages({ chatName, limit: limit || 30, sinceMinutes });
+          if (res.error) return `❌ ${res.error}`;
+          if (!res.messages.length) return `📡 אין הודעות ב-"${res.chatTitle}" בטווח המבוקש.`;
+          const kindLabel = { channel: '📢', group: '👥', private: '💬' };
+          let text = `📡 *${kindLabel[res.kind] || ''} ${res.chatTitle}* — ${res.messages.length} הודעות:\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+          for (const m of res.messages) {
+            const t = new Date(m.timestamp * 1000).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+            const d = new Date(m.timestamp * 1000).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit' });
+            text += `*${d} ${t}* — ${m.fromMe ? '🟢 אתה' : `🔵 ${m.sender}`}:\n${m.body}\n\n`;
+          }
+          return text.trim();
+        } catch (e) {
+          return `❌ שגיאה ב-Telegram: ${e.message?.substring(0, 100)}`;
+        }
+      }
+      case 'search': {
+        if (!query) return '❌ חסר query';
+        try {
+          const res = await tg.searchMessages({ query, chatName, limit: limit || 20 });
+          if (res.error) return `❌ ${res.error}`;
+          if (!res.results.length) return `🔍 לא נמצאו הודעות עם "${query}"${chatName ? ` ב-"${chatName}"` : ''}`;
+          const scope = res.chatTitle ? `ב-*${res.chatTitle}*` : 'בכל הצ׳אטים';
+          let text = `🔍 *Telegram — "${query}"* ${scope} — ${res.results.length} תוצאות:\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+          for (const r of res.results) {
+            const t = new Date(r.timestamp * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            text += `*${t}*:\n${(r.body || '').substring(0, 250)}\n\n`;
+          }
+          return text.trim();
+        } catch (e) {
+          return `❌ שגיאה ב-Telegram: ${e.message?.substring(0, 100)}`;
+        }
+      }
+      default: return `פעולה לא מוכרת: ${action}`;
+    }
+  },
   // ─── Memory (unified) ────────────────────────────────────────
   memory: async ({ action, text, category, index }) => {
     switch (action) {
@@ -489,23 +662,43 @@ registerToolHandlers({
         catch { return `❌ לא הצלחתי לשלוח ל-${phone}. בדוק שהמספר נכון.`; }
       }
       case 'chats': {
-        const chats = await client.getChats();
+        const chats = await getAllChatsAndChannels();
         const max = Math.min(limit || 20, 50);
         const recent = chats.slice(0, max);
         let text = `💬 *שיחות וואטסאפ (${Math.min(recent.length, max)} מתוך ${chats.length}):*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         for (let i = 0; i < recent.length; i++) {
           const c = recent[i]; const n = c.name || c.pushname || c.id.user || '(ללא שם)';
           const unread = c.unreadCount > 0 ? ` 🔴 ${c.unreadCount}` : '';
-          const grp = c.isGroup ? ' 👥' : ''; const mt = c.isMuted ? ' 🔇' : '';
+          const grp = c.isGroup ? ' 👥' : ''; const chn = c.isChannel ? ' 📢' : ''; const mt = c.isMuted ? ' 🔇' : '';
           const lm = c.lastMessage?.body?.substring(0, 50) || '';
           const tm = c.timestamp ? new Date(c.timestamp * 1000).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }) : '';
-          text += `*${i + 1}.* ${n}${grp}${unread}${mt}\n`;
+          text += `*${i + 1}.* ${n}${grp}${chn}${unread}${mt}\n`;
           if (tm) text += `   ⏰ ${tm}`; if (lm) text += ` · _"${lm}${lm.length >= 50 ? '...' : ''}"_`; text += '\n';
         }
         return text.trim();
       }
+      case 'channels': {
+        // Dedicated list of WhatsApp Channels (@newsletter) the user is subscribed to.
+        // Useful for picking channels to add to the daily scan.
+        // Uses safeGetChannels() because wwebjs's getChannels() crashes on
+        // channels without channelMetadata.description (constructor bug).
+        const channels = await safeGetChannels();
+        if (!channels.length) return '📢 *אין ערוצים*\nלא נמצאו ערוצי WhatsApp שאתה רשום אליהם.';
+        const max = Math.min(limit || 50, 100);
+        const list = channels.slice(0, max);
+        let text = `📢 *ערוצי WhatsApp שאתה רשום אליהם (${list.length}/${channels.length}):*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        for (let i = 0; i < list.length; i++) {
+          const c = list[i];
+          const n = c.name || '(ללא שם)';
+          const verified = c.channelMetadata?.isVerified ? ' ✓' : '';
+          const sub = c.channelMetadata?.subscribersCount ? ` · ${c.channelMetadata.subscribersCount.toLocaleString('he-IL')} עוקבים` : '';
+          text += `*${i + 1}.* ${n}${verified}${sub}\n`;
+        }
+        text += '\n💡 _כדי להוסיף ערוץ לסריקה היומית: בקש "הוסף את הערוץ X לסריקה" — אני אעדכן את ה-daily task._';
+        return text.trim();
+      }
       case 'read': {
-        const chats = await client.getChats();
+        const chats = await getAllChatsAndChannels();
         const ch = findChatByName(chats, chatName);
         if (!ch) return `❌ לא נמצאה שיחה "${chatName}"`;
         const reqLimit = Math.min(limit || 20, 50);
@@ -513,7 +706,8 @@ registerToolHandlers({
         if (isFetchIncomplete(msgs, reqLimit)) {
           return `⚠️ *אין גישה להודעות של "${ch.name}"*\nWhatsApp Web לא מצא הודעות — הקבוצה לא נטענה לזיכרון.\n\n💡 *מה לעשות:*\n1. פתח את הקבוצה ב-WhatsApp ✓\n2. גלול למעלה מעט כדי לטעון הודעות ✓\n3. חכה 10 שניות ושאל שוב\n\nאם הבעיה ממשיכה — ייתכן שזו קבוצה פרטית / מוגבלת שWhatsApp Web לא יכול לגשת אליה.`;
         }
-        let text = `💬 *${ch.name || chatName}${ch.isGroup ? ' 👥' : ''}* — ${msgs.length} הודעות:\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+        const _kind = ch.isChannel ? ' 📢' : (ch.isGroup ? ' 👥' : '');
+        let text = `💬 *${ch.name || chatName}${_kind}* — ${msgs.length} הודעות:\n━━━━━━━━━━━━━━━━━━━━\n\n`;
         for (const m of msgs) {
           const t = new Date(m.timestamp * 1000).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
           const d = new Date(m.timestamp * 1000).toLocaleDateString('he-IL', { day: 'numeric', month: 'short' });
@@ -522,7 +716,7 @@ registerToolHandlers({
         return text.trim();
       }
       case 'search': {
-        const chats = await client.getChats();
+        const chats = await getAllChatsAndChannels();
         let searchIn = chatName ? [findChatByName(chats, chatName)].filter(Boolean) : chats.slice(0, 15);
         if (chatName && !searchIn.length) return `❌ לא נמצאה שיחה "${chatName}"`;
         const results = [];
@@ -540,7 +734,7 @@ registerToolHandlers({
       }
       case 'summarize': {
         try {
-          const chats = await client.getChats();
+          const chats = await getAllChatsAndChannels();
           const ch = findChatByName(chats, chatName);
           if (!ch) return `❌ לא נמצאה "${chatName}"`;
           // When filtering by time, fetch more messages so we don't lose old-but-in-window ones
@@ -588,7 +782,7 @@ registerToolHandlers({
         }
       }
       case 'forward': {
-        const chats = await client.getChats();
+        const chats = await getAllChatsAndChannels();
         const src = findChatByName(chats, chatName);
         if (!src) return `❌ לא נמצאה "${chatName}"`;
         const idx = messageIndex || 1;
@@ -663,7 +857,7 @@ registerToolHandlers({
               const allMessages = [];
               const {smartChat:sc} = require('./src/claude');
               const _scanDay = Date.now()/1000-86400;
-              const _cs1 = await client.getChats(); // fetch once
+              const _cs1 = await getAllChatsAndChannels(); // chats + channels
               for (const gn of (params.groups||[])) {
                 try {
                   const ch = findChatByName(_cs1, gn);
@@ -736,10 +930,10 @@ registerToolHandlers({
               const socialSummary = await sc(socialPrompt, [], { webSearchMaxUses: 4, timeoutMs: 150000 });
               briefing += `🐦 *רשתות (${_2dAgoISO} → ${_todayISO}):*\n${socialSummary}\n\n`;
 
-              // WhatsApp groups if specified
+              // WhatsApp groups if specified (channels supported too)
               if (params.groups?.length) {
                 for (const gn of params.groups) {
-                  const cs = await client.getChats(); const ch = findChatByName(cs, gn);
+                  const cs = await getAllChatsAndChannels(); const ch = findChatByName(cs, gn);
                   if (!ch) continue;
                   const msgs = await safeFetchMessages(ch, 50); const day = Date.now()/1000-86400;
                   const rec = msgs.filter(m => m.body && m.timestamp > day);
@@ -1395,7 +1589,7 @@ client.on('ready', () => {
           const allMessages = [];
           const {smartChat:sc} = require('./src/claude');
           const _scanDay = Date.now()/1000-86400;
-          const _cs2 = await client.getChats(); // fetch once
+          const _cs2 = await getAllChatsAndChannels(); // chats + channels
           for (const gn of (d.params.groups||[])) {
             try {
               const ch = findChatByName(_cs2, gn);
@@ -1474,7 +1668,9 @@ client.on('ready', () => {
       // Merge + dedupe (some chats may appear in both lists)
       const allTargets = [...new Set([...scanGroups, ...extraGroups])];
       if (!allTargets.length) return [];
-      const allChats = await client.getChats();
+      // Include channels — user may target WhatsApp Channels (@newsletter)
+      // in the same scan list. getAllChatsAndChannels() merges both pools.
+      const allChats = await getAllChatsAndChannels();
       const sparseGroups = [];
       logger.info(`🔥 Warming up ${allTargets.length} chats (${scanGroups.length} scan + ${extraGroups.length} extra) (${passLabel})...`);
       for (const gn of allTargets) {
@@ -1496,6 +1692,24 @@ client.on('ready', () => {
       setTimeout(() => _doWarmup('pass 2'), 45000);
     }
   }, 15000);
+
+  // ── Telegram auto-connect (if configured) ────────────────────
+  // GramJS keeps a persistent MTProto socket once connected.
+  // We connect once at startup so the first user query doesn't have
+  // to wait for handshake.
+  setTimeout(async () => {
+    try {
+      const tg = require('./src/telegram');
+      if (!tg.isConfigured()) {
+        logger.info('📡 Telegram: לא מוגדר (חסר API_ID/HASH/SESSION) — מדלג');
+        return;
+      }
+      await tg.getClient();
+      logger.info('📡 Telegram: מחובר ומוכן');
+    } catch (e) {
+      logger.warn(`📡 Telegram חיבור נכשל: ${e.message?.substring(0, 80)}`);
+    }
+  }, 5000);
 
   // ── Blocklist sweep: purge cached messages from spam groups on startup ──
   if (_BLOCKED_GROUP_PATTERNS.length > 0) {
@@ -1961,11 +2175,438 @@ async function advanceOnboardingFlow(flow) {
   onb.updateFlow(flow.chatId, { activePollId: sentMsg?.id?._serialized || null });
 }
 
+// ─── Scan disambiguation flow — interactive multi-step menu ────
+async function advanceScanFlow(flow) {
+  const sf = require('./src/scan-flow');
+  const { Poll } = require('whatsapp-web.js');
+  const oc = await client.getChatById(OWNER_ID);
+
+  // If entering 'items' step but availableItems empty — fetch them now
+  if (flow.step === 'items' && (!flow.availableItems || flow.availableItems.length === 0)) {
+    await botSend(oc, '⏳ אוסף רשימת מקורות זמינים...');
+    flow.availableItems = await fetchAvailableScanItems(flow.selections.source, flow.selections.type);
+    flow.itemsPage = 0;
+    if (flow.availableItems.length === 0) {
+      await botSend(oc, '❌ לא נמצאו מקורות מתאימים לבחירה שלך. נסה "הכל" במקום.');
+      sf.endFlow(flow.chatId);
+      return;
+    }
+  }
+
+  // ── Before showing 'confirm' — resolve the actual source list ──
+  // For scope='all', that's the daily.json scan list intersected with
+  // platform/type. For scope='select', the user's picks.
+  // Populating `flow.confirmedSources` lets the confirm screen show the
+  // exact count + names of what's about to be scanned.
+  if (flow.step === 'confirm' && !flow.confirmedSources) {
+    const s = flow.selections;
+    if (s.scope === 'select') {
+      flow.confirmedSources = (s.selectedItems || []).map(id =>
+        flow.availableItems.find(x => x.id === id)
+      ).filter(Boolean);
+    } else {
+      await botSend(oc, '⏳ טוען את רשימת המעקב שלך...');
+      flow.confirmedSources = await resolveDailyScanSources(s.source, s.type);
+    }
+  }
+
+  const poll = sf.buildPoll(flow);
+  if (!poll) return;
+
+  await botSend(oc, poll.question);
+  const wPoll = new Poll('בחר:', poll.options.map(o => o.label),
+    { allowMultipleAnswers: !!poll.multiple });
+  const sentMsg = await oc.sendMessage(wPoll);
+  // Save the option mapping (label → id) so the vote handler can resolve
+  // selections by localId (index) or by label without ambiguity.
+  sf.updateFlow(flow.chatId, {
+    activePollId: sentMsg?.id?._serialized || null,
+    lastPollOptions: poll.options,  // [{ id, label }]
+  });
+}
+
+// Fetch available items for the scope-select step.
+// Returns [{ id, label, source, type, raw }] where source ∈ {wa,tg}, type ∈ {group,channel}
+async function fetchAvailableScanItems(source, type) {
+  const items = [];
+
+  // WhatsApp groups
+  const wantWaGroups = (source === 'whatsapp' || source === 'both')
+                    && (type === 'groups' || type === 'both');
+  // WhatsApp channels
+  const wantWaChannels = (source === 'whatsapp' || source === 'both')
+                      && (type === 'channels' || type === 'both');
+  // Telegram groups
+  const wantTgGroups = (source === 'telegram' || source === 'both')
+                    && (type === 'groups' || type === 'both');
+  // Telegram channels
+  const wantTgChannels = (source === 'telegram' || source === 'both')
+                     && (type === 'channels' || type === 'both');
+
+  // WhatsApp side: getChats() returns regular chats + groups; safeGetChannels for channels
+  // ── Pre-load daily.json names (used to exempt tracked groups from activity filter) ──
+  let trackedSet = new Set();
+  try {
+    const _diskTasks = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, 'data', 'daily.json'), 'utf8'));
+    const gs = (Array.isArray(_diskTasks) ? _diskTasks : []).find(t => t.action === 'group_summary');
+    for (const n of (gs?.params?.groups || [])) {
+      if (n) trackedSet.add(normalizeHe(n));
+    }
+  } catch {}
+
+  // ── Activity filter: skip groups inactive >7 days (unless tracked) ──
+  // Without this, the user's 244 groups (family/work/etc) drown the political
+  // tracking list. Channels are kept regardless — they're explicit subscriptions.
+  const ACTIVITY_CUTOFF_SEC = Date.now() / 1000 - 7 * 24 * 3600;
+  const isRecentlyActive = (c) => {
+    const ts = c.timestamp || c.lastMessage?.timestamp || 0;
+    return ts > ACTIVITY_CUTOFF_SEC;
+  };
+  const isTrackedName = (c) => trackedSet.has(normalizeHe(c.name || ''));
+
+  try {
+    if (wantWaGroups || wantWaChannels) {
+      const chats = await client.getChats();
+      if (wantWaGroups) {
+        let total = 0, kept = 0;
+        for (const c of chats) {
+          if (!c.isGroup) continue;
+          total++;
+          // Skip muted+archived inactive groups (but keep tracked political ones)
+          if (!isTrackedName(c) && !isRecentlyActive(c)) continue;
+          // Skip if blocked
+          try {
+            const cid = c.id?._serialized;
+            if (cid && _blockedJids && _blockedJids.has && _blockedJids.has(cid)) continue;
+          } catch {}
+          items.push({ id: `wa:${c.id._serialized}`, label: `💬 ${c.name || '(ללא שם)'}`, source: 'wa', type: 'group', raw: c.name });
+          kept++;
+        }
+        logger.info(`fetchAvailableScanItems WA groups: kept ${kept}/${total} (filtered out inactive non-tracked)`);
+      }
+      if (wantWaChannels) {
+        const channels = await safeGetChannels();
+        for (const c of channels) {
+          items.push({ id: `wa:${c.id._serialized}`, label: `💬📢 ${c.name || '(ללא שם)'}`, source: 'wa', type: 'channel', raw: c.name });
+        }
+      }
+    }
+  } catch (e) { logger.warn(`fetchAvailableScanItems WA failed: ${e.message?.substring(0, 80)}`); }
+
+  // Telegram side
+  try {
+    if (wantTgGroups || wantTgChannels) {
+      const tg = require('./src/telegram');
+      if (tg.isConfigured()) {
+        const dialogs = await tg.listDialogs({ limit: 100 });
+        for (const d of dialogs) {
+          if (wantTgGroups && d.kind === 'group') {
+            items.push({ id: `tg:${d.id}`, label: `📡 ${d.title}`, source: 'tg', type: 'group', raw: d.title });
+          }
+          if (wantTgChannels && d.kind === 'channel') {
+            items.push({ id: `tg:${d.id}`, label: `📡📢 ${d.title}`, source: 'tg', type: 'channel', raw: d.title });
+          }
+        }
+      }
+    }
+  } catch (e) { logger.warn(`fetchAvailableScanItems TG failed: ${e.message?.substring(0, 80)}`); }
+
+  // ── Mark daily.json items as "tracked" and float them to the top ──
+  // Without this, the user's 10 political groups drown in 250+ personal/family
+  // chats and they have to scroll 29 pages to find them. With this:
+  // page 1 = ⭐ tracked groups (~10), then the rest alphabetically.
+  let trackedNames = [];
+  try {
+    const _diskTasks = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, 'data', 'daily.json'), 'utf8'));
+    const gs = (Array.isArray(_diskTasks) ? _diskTasks : []).find(t => t.action === 'group_summary');
+    trackedNames = (gs?.params?.groups || []).map(n => normalizeHe(n)).filter(Boolean);
+  } catch {}
+  const isTracked = (item) => trackedNames.includes(normalizeHe(item.raw || ''));
+  for (const it of items) it._tracked = isTracked(it);
+
+  // Sort: tracked first, then type (group first), then name
+  items.sort((a, b) => {
+    if (a._tracked !== b._tracked) return a._tracked ? -1 : 1;
+    if (a.type !== b.type) return a.type === 'group' ? -1 : 1;
+    return (a.raw || '').localeCompare(b.raw || '', 'he');
+  });
+
+  // Decorate tracked items with ⭐
+  for (const it of items) {
+    if (it._tracked && !it.label.startsWith('⭐')) {
+      it.label = '⭐ ' + it.label;
+    }
+  }
+  return items;
+}
+
+// Resolve the daily.json scan list to actual source items, filtered by
+// platform/type. The daily list contains chat NAMES — we look each up in
+// WhatsApp's chats/channels + Telegram dialogs, classify as group/channel,
+// and keep only those matching the user's source+type selection.
+async function resolveDailyScanSources(source, type) {
+  // Read the disk version (hot-reload — see manual-scan hot-reload logic)
+  let names = [];
+  try {
+    const _diskTasks = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, 'data', 'daily.json'), 'utf8'));
+    const gs = (Array.isArray(_diskTasks) ? _diskTasks : []).find(t => t.action === 'group_summary');
+    names = (gs?.params?.groups || []).filter(Boolean);
+  } catch (e) { logger.warn(`daily.json read failed: ${e.message?.substring(0, 80)}`); }
+  if (!names.length) return [];
+
+  const wantWa = source === 'whatsapp' || source === 'both';
+  const wantTg = source === 'telegram' || source === 'both';
+  const wantGroups = type === 'groups' || type === 'both';
+  const wantChannels = type === 'channels' || type === 'both';
+
+  const resolved = [];
+
+  // WhatsApp: load chats + channels once, then match by name
+  if (wantWa) {
+    try {
+      const chats = await client.getChats();
+      const channels = await safeGetChannels();
+      const all = [...chats, ...channels];
+      for (const n of names) {
+        const ch = findChatByName(all, n);
+        if (!ch) continue;
+        const isCh = ch.isChannel === true;
+        const isGr = ch.isGroup === true;
+        if (isCh && wantChannels) {
+          resolved.push({ id: `wa:${ch.id._serialized}`, label: `💬📢 ${ch.name}`, source: 'wa', type: 'channel', raw: ch.name });
+        } else if (isGr && wantGroups) {
+          resolved.push({ id: `wa:${ch.id._serialized}`, label: `💬 ${ch.name}`, source: 'wa', type: 'group', raw: ch.name });
+        }
+      }
+    } catch (e) { logger.warn(`resolveDailyScanSources WA failed: ${e.message?.substring(0, 80)}`); }
+  }
+
+  // Telegram: same — match by name
+  if (wantTg) {
+    try {
+      const tg = require('./src/telegram');
+      if (tg.isConfigured()) {
+        const dialogs = await tg.listDialogs({ limit: 100 });
+        for (const n of names) {
+          const dnorm = normalizeHe(n);
+          const match = dialogs.find(d => normalizeHe(d.title || '').includes(dnorm) || dnorm.includes(normalizeHe(d.title || '')));
+          if (!match) continue;
+          if (match.kind === 'channel' && wantChannels) {
+            resolved.push({ id: `tg:${match.id}`, label: `📡📢 ${match.title}`, source: 'tg', type: 'channel', raw: match.title });
+          } else if (match.kind === 'group' && wantGroups) {
+            resolved.push({ id: `tg:${match.id}`, label: `📡 ${match.title}`, source: 'tg', type: 'group', raw: match.title });
+          }
+        }
+      }
+    } catch (e) { logger.warn(`resolveDailyScanSources TG failed: ${e.message?.substring(0, 80)}`); }
+  }
+
+  return resolved;
+}
+
+// Execute the actual scan based on confirmed params.
+// Sends progress + final summary to the owner chat.
+async function executeScan(params) {
+  const oc = await client.getChatById(OWNER_ID);
+  const since = params.sinceMinutes || 1440;
+  const windowLabel = params.timeLabel || `${since} דקות אחרונות`;
+
+  // Resolve sources to scan. Prefer the pre-resolved list the user
+  // approved on the confirm screen (params.confirmedSources). Fall back
+  // to re-resolving if that wasn't passed (e.g. invocations not through
+  // the wizard).
+  let sources;
+  if (Array.isArray(params.confirmedSources) && params.confirmedSources.length > 0) {
+    sources = params.confirmedSources;
+  } else if (params.scope === 'select') {
+    sources = params.selectedItems;
+  } else {
+    // 'all' — take daily.json scan list, filter by platform/type
+    sources = await resolveDailyScanSources(params.source, params.type);
+  }
+  if (!sources || sources.length === 0) {
+    const hint = params.scope === 'select'
+      ? '❌ לא בחרת מקורות.'
+      : '❌ אין מקורות מתאימים ב-daily.json (רשימת המעקב). הוסף קבוצות/ערוצים ב-data/daily.json או בחר "מקורות ספציפיים".';
+    await botSend(oc, hint);
+    return;
+  }
+
+  await botSend(oc, `⏳ *מריץ סריקה...*\n🌐 ${sources.length} מקורות · ⏱ ${windowLabel}`);
+  const allMessages = [];
+  const stats = [];
+
+  for (let i = 0; i < sources.length; i++) {
+    const src = sources[i];
+    try {
+      if (src.source === 'wa') {
+        const chatId = src.id.replace(/^wa:/, '');
+        // For channels (@newsletter), client.getChatById() often returns null
+        // or crashes on Channel._patch (missing metadata). The cache is
+        // keyed by chatId regardless, so we build a minimal stand-in chat
+        // and let safeFetchMessages's Strategy 0 (channel disk-cache path)
+        // do the work directly.
+        let ch;
+        if (src.type === 'channel' || chatId.endsWith('@newsletter')) {
+          ch = { id: { _serialized: chatId }, name: src.raw, isChannel: true };
+        } else {
+          ch = await client.getChatById(chatId).catch(() => null);
+          if (!ch) { stats.push({ name: src.raw, count: 0, status: 'not_found', isChannel: false, source: 'wa' }); continue; }
+        }
+        const msgs = await safeFetchMessages(ch, 150);
+        const cutoff = Date.now() / 1000 - since * 60;
+        const rec = msgs.filter(m => m.body && m.timestamp > cutoff);
+        // For channels: also surface how much we have outside the window
+        // (so empty results don't look like a bug — user can widen the window)
+        const totalCached = msgs.filter(m => m.body).length;
+        const outOfWindow = totalCached - rec.length;
+        const isChannel = src.type === 'channel';
+        const lastTs = totalCached > 0 ? Math.max(...msgs.filter(m => m.body).map(m => m.timestamp || 0)) : null;
+        stats.push({
+          name: ch.name || src.raw,
+          count: rec.length,
+          status: 'ok',
+          isChannel,
+          source: 'wa',
+          totalCached,
+          outOfWindow,
+          lastSeenTs: lastTs,
+        });
+        for (const m of rec.filter(m => m.body && m.body.trim().length > 15)) {
+          allMessages.push({
+            group: ch.name || src.raw,
+            time: new Date(m.timestamp * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),
+            sender: safeTruncate(stripOrphanSurrogates(m._data?.notifyName || 'משתתף'), 15),
+            body: safeTruncate(stripOrphanSurrogates(m.body), 250),
+            ts: m.timestamp,
+            isChannel,
+            platform: 'wa',
+          });
+        }
+      } else if (src.source === 'tg') {
+        const tg = require('./src/telegram');
+        const r = await tg.readMessages({ chatName: src.raw, limit: 80, sinceMinutes: since });
+        if (r.error) { stats.push({ name: src.raw, count: 0, status: 'error', error: r.error, isChannel: src.type === 'channel', source: 'tg' }); continue; }
+        const msgs = r.messages || [];
+        stats.push({ name: r.chatTitle || src.raw, count: msgs.length, status: 'ok', isChannel: src.type === 'channel', source: 'tg' });
+        for (const m of msgs.filter(x => x.body && x.body.trim().length > 15)) {
+          allMessages.push({
+            group: r.chatTitle || src.raw,
+            time: new Date(m.timestamp * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),
+            sender: safeTruncate(stripOrphanSurrogates(m.sender || 'משתתף'), 15),
+            body: safeTruncate(stripOrphanSurrogates(m.body), 250),
+            ts: m.timestamp,
+            isChannel: src.type === 'channel',
+            platform: 'tg',
+          });
+        }
+      }
+    } catch (e) {
+      stats.push({ name: src.raw, count: 0, status: 'error', error: e.message?.substring(0, 60) });
+      logger.warn(`scan src "${src.raw}" failed: ${e.message?.substring(0, 80)}`);
+    }
+    // Progress @ halfway
+    if (sources.length >= 6 && i === Math.ceil(sources.length / 2)) {
+      try { await botSend(oc, `⏳ ${i + 1}/${sources.length} מקורות נסרקו...`); } catch {}
+    }
+  }
+
+  allMessages.sort((a, b) => a.ts - b.ts);
+  const totalM = stats.reduce((a, g) => a + g.count, 0);
+  const active = stats.filter(g => g.count > 0);
+  const silent = stats.filter(g => g.count === 0 && g.status === 'ok');
+  const errored = stats.filter(g => g.status === 'error');
+  const lvl = totalM > 300 ? '🔴🔴🔴🔴 סוער' : totalM > 100 ? '🔴🔴🔴 פעיל' : totalM > 30 ? '🟡🟡 בינוני' : '🟢 שקט';
+
+  // ── Breakdown lines — so the user can SEE channels were scanned ──
+  const activeGroups = active.filter(s => !s.isChannel);
+  const activeChannels = active.filter(s => s.isChannel);
+  const silentChannels = silent.filter(s => s.isChannel);
+  const groupMsgs = allMessages.filter(m => !m.isChannel).length;
+  const channelMsgs = allMessages.filter(m => m.isChannel).length;
+  const breakdownLines = [];
+  if (activeGroups.length) breakdownLines.push(`👥 ${activeGroups.length} קבוצות פעילות (${groupMsgs} הודעות)`);
+  if (activeChannels.length) breakdownLines.push(`📢 ${activeChannels.length} ערוצים פעילים (${channelMsgs} הודעות): ${activeChannels.slice(0, 6).map(s => s.name).join(', ')}${activeChannels.length > 6 ? ` +${activeChannels.length - 6}` : ''}`);
+  if (silentChannels.length) breakdownLines.push(`🔇 ${silentChannels.length} ערוצים שקטים: ${silentChannels.slice(0, 6).map(s => s.name).join(', ')}${silentChannels.length > 6 ? ` +${silentChannels.length - 6}` : ''}`);
+  const breakdown = breakdownLines.length ? '\n' + breakdownLines.join('\n') : '';
+
+  const header = `📋 *סריקה מותאמת — ${new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}*\n⏱ ${windowLabel}\n━━━━━━━━━━━━━━━━━━━━\n🌡️ ${lvl}  |  📊 ${totalM} הודעות · ${active.length}/${stats.length} מקורות${breakdown}\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  if (!allMessages.length) {
+    // Helpful breakdown: distinguish channels with NO cached msgs vs cached-but-out-of-window
+    const channelsWithOldMsgs = stats.filter(s => s.isChannel && s.totalCached > 0 && s.outOfWindow > 0);
+    const fmtAgo = (ts) => {
+      const m = Math.round((Date.now() / 1000 - ts) / 60);
+      if (m < 60) return `${m} דק׳ אחורה`;
+      const h = Math.round(m / 60);
+      if (h < 24) return `${h} שעות אחורה`;
+      return `${Math.round(h / 24)} ימים אחורה`;
+    };
+    let extra = '';
+    if (channelsWithOldMsgs.length) {
+      extra += `\n\n📡 *ערוצי וואטסאפ עם תוכן מחוץ לטווח:*\n` +
+        channelsWithOldMsgs.slice(0, 8).map(s =>
+          `• ${s.name} — ${s.totalCached} הודעות, אחרונה לפני ${fmtAgo(s.lastSeenTs)}`
+        ).join('\n') +
+        `\n\n💡 *רוצה לראות אותן?* נסה להריץ שוב עם טווח גדול יותר (24 שעות / 3 ימים).`;
+    }
+    const skipped = silent.filter(s => !s.isChannel || s.totalCached === 0).map(s => s.name);
+    const channelsNoCache = stats.filter(s => s.isChannel && s.totalCached === 0);
+    if (channelsNoCache.length) {
+      extra += `\n\n🔄 *ערוצים בלי תוכן בכלל ב-cache:*\n${channelsNoCache.slice(0, 8).map(s => `• ${s.name}`).join('\n')}\n_(ייתכן שלא פרסמו כלום מאז הפעלת הבוט)_`;
+    }
+    const body = `_אין הודעות בטווח (${windowLabel})_`
+      + (skipped.length ? `\n🔇 שקטים: ${skipped.join(', ')}` : '')
+      + (errored.length ? `\n⚠️ שגיאות: ${errored.map(s => s.name).join(', ')}` : '')
+      + extra;
+    await botSend(oc, header + body);
+    return;
+  }
+
+  const { smartChat } = require('./src/claude');
+  // Tag each entry as group vs channel so Claude can balance coverage.
+  // Without this, group-volume drowns out the lower-volume channels and the
+  // summary topics end up being 100% group-sourced.
+  const pool = allMessages.map(m => {
+    const icon = m.isChannel ? '📢' : '👥';
+    return `⏰${m.time} ${icon}[${m.group}] ${m.sender}: "${m.body}"`;
+  }).join('\n');
+  const channelCount = allMessages.filter(m => m.isChannel).length;
+  const groupCount = allMessages.length - channelCount;
+  const balanceHint = channelCount > 0 && groupCount > 0
+    ? `\n\n*חשוב:* יש ${groupCount} הודעות מקבוצות (👥) ו-${channelCount} מערוצים (📢). תן משקל שווה לשני הסוגים — אל תתעלם מערוצים גם אם יש פחות הודעות מהם. ציין את שם המקור (קבוצה או ערוץ) בכל נושא.`
+    : '';
+  const scanPrompt = `סכם את ההודעות הבאות בפורמט נושאים חמים (3-7 נושאים מהחם לשקט). לכל נושא — שורת כותרת ושורת מקורות+ציטוט. בלי הקדמות.${balanceHint}\n\n${pool}`;
+  const scanResult = await smartChat(scanPrompt, []);
+  await botSend(oc, header + scanResult);
+
+  // ── Post-scan: offer to save as a preset for next time ──────────
+  // Skip if this scan was launched FROM a preset (already saved), or if
+  // there are no concrete sources (scope=all-via-daily-only).
+  // Surface a simple text prompt — user replies with the desired name
+  // (or "לא"). Handled by `pendingPresetSave` map below.
+  if (!params.usedPresetName && Array.isArray(sources) && sources.length > 0) {
+    pendingPresetSave.set(OWNER_ID, {
+      sources,
+      expiresAt: Date.now() + 5 * 60 * 1000,  // 5 minutes
+    });
+    await botSend(oc,
+      `💾 *לשמור את הבחירה הזו כפריסט?*\n` +
+      `${sources.length} מקורות נסרקו. אם תרצה להריץ שוב את אותה רשימה — שלח לי *שם* (לדוגמה: \`ערוצי בוקר\`).\n` +
+      `אחרת — שלח *"לא"* או פשוט המשך לבקש משהו אחר.`
+    );
+  }
+}
+
+// ── Pending preset-save confirmations (5-min TTL) ──────────────
+const pendingPresetSave = new Map();
+
 // ─── Poll vote handler — drives all interactive flows ─────────
 client.on('vote_update', async (vote) => {
   try {
     const ifl = require('./src/interactive-flow');
     const onb = require('./src/onboarding-flow');
+    const sf = require('./src/scan-flow');
     const parentId = vote.parentMessage?.id?._serialized;
     if (!parentId) return;
 
@@ -2022,6 +2663,58 @@ client.on('vote_update', async (vote) => {
           return;
         }
         if (result.ok) { await advanceOnboardingFlow(f); }
+        return;
+      }
+    }
+
+    // Try matching the scan-disambiguation flow
+    for (const f of sf.flows.values()) {
+      if (f.activePollId === parentId) {
+        // Resolve EACH selected option's label/localId back to its option ID.
+        // For multi-select polls (items step) the user can have items selected
+        // AND a navigation button — we need to detect the navigation regardless
+        // of order. So look at ALL selectedOptions, not just [0].
+        const allSelected = vote.selectedOptions || [];
+        const resolveOne = (so) => {
+          if (!so) return null;
+          const localId = so.localId;
+          if (f.lastPollOptions && typeof localId === 'number' && f.lastPollOptions[localId]) {
+            return f.lastPollOptions[localId].id;
+          }
+          const stripCheck = (s) => String(s || '').replace(/^✔️\s+/, '').replace(/^⭐\s+/, '');
+          const found = (f.lastPollOptions || []).find(o => stripCheck(o.label) === stripCheck(so.name));
+          if (found) return found.id;
+          return so.name || so.localId;
+        };
+        const resolvedAll = allSelected.map(resolveOne).filter(Boolean);
+
+        // Navigation IDs that should take precedence over item selections.
+        const NAV_IDS = ['__next_page__', '__finish__', 'cancel', '__back__'];
+        const nav = resolvedAll.find(id => NAV_IDS.includes(id));
+        const resolvedSelected = nav || resolvedAll[resolvedAll.length - 1] || selected;
+        const result = sf.applyVote(f, resolvedSelected);
+        if (result.error) { await botSend(oc, `⚠️ ${result.error}`); await advanceScanFlow(f); return; }
+        if (result.cancel) { sf.endFlow(f.chatId); await botSend(oc, '❌ סריקה בוטלה.'); return; }
+        if (result.restart) {
+          sf.endFlow(f.chatId);
+          const fresh = sf.startFlow(f.chatId);
+          await advanceScanFlow(fresh);
+          return;
+        }
+        if (result.execute) {
+          const params = result.params;
+          // Pass through the exact list the user approved so we don't re-fetch
+          // and risk scanning a different list than what was shown on confirm.
+          if (f.confirmedSources) params.confirmedSources = f.confirmedSources;
+          // Remember if the user invoked this via a saved preset — used to
+          // suppress the "save as preset?" prompt at the end of executeScan
+          // (no point saving what's already saved).
+          if (f.usedPresetName) params.usedPresetName = f.usedPresetName;
+          sf.endFlow(f.chatId);
+          await executeScan(params);
+          return;
+        }
+        if (result.ok) { await advanceScanFlow(f); return; }
         return;
       }
     }
@@ -2103,9 +2796,37 @@ function _queueFace(fn) {
 // album = multiple photos sent at once (WhatsApp bundles them)
 const ALLOWED_TYPES = new Set(['chat', 'image', 'sticker', 'ptt', 'audio', 'document', 'album']);
 
+// ── Message-id dedup — prevents double-processing when wwebjs replays events ──
+// On WhatsApp Web reconnect (auto-restored session), wwebjs sometimes re-fires
+// `message_create` for messages already delivered. Without a dedup, one user
+// "סריקה" message can trigger the handler 5 times → 5 polls → looping cascade.
+// Bounded LRU cache so we don't grow indefinitely.
+const _processedMsgIds = new Set();
+const _processedOrder = [];
+const MAX_PROCESSED_MSGS = 2000;
+function _seenAndMark(msgIdSerialized) {
+  if (!msgIdSerialized) return false;
+  if (_processedMsgIds.has(msgIdSerialized)) return true;
+  _processedMsgIds.add(msgIdSerialized);
+  _processedOrder.push(msgIdSerialized);
+  if (_processedOrder.length > MAX_PROCESSED_MSGS) {
+    const evicted = _processedOrder.shift();
+    _processedMsgIds.delete(evicted);
+  }
+  return false;
+}
+
 client.on('message_create', async (msg) => {
   // 🔍 Early diagnostic log — visible in Railway/cloud logs
   console.log(`📩 msg_create: type=${msg.type} from=${(msg.from||'').substring(0,25)} to=${(msg.to||'').substring(0,25)} fromMe=${msg.fromMe}`);
+
+  // ── Dedup: prevent re-processing the same msg id (wwebjs replays on reconnect)
+  const _msgId = msg.id?._serialized || '';
+  if (_seenAndMark(_msgId)) {
+    console.log(`⏭️  dedup skip: ${_msgId.substring(0, 40)}`);
+    return;
+  }
+
   // Persist group messages to disk for scan resilience across restarts
   if (!msg.fromMe) _cacheGroupMsg(msg);
   try {
@@ -2536,6 +3257,71 @@ client.on('message_create', async (msg) => {
     const chat = await msg.getChat();
     await chat.sendStateTyping();
 
+    // ── Pending preset-save reply ────────────────────────────────
+    // After a scan, the bot may have asked "save as preset? send a name".
+    // The user's next short text reply is treated as the name (unless
+    // it's an explicit "no" or a recognized command).
+    {
+      const pending = pendingPresetSave.get(chatId);
+      if (pending && pending.expiresAt > Date.now()) {
+        const t = text.trim();
+        const isNegative = /^(לא|לא תודה|לא לשמור|אל תשמור|skip|no)/i.test(t);
+        const looksLikeOtherCommand = /^(?:סריקה|סקירה|תפריט|בוקר טוב|מה|תעשה|תקבע|תזכיר|תחפש|סכם|שלח|תשלח)/i.test(t);
+        if (isNegative) {
+          pendingPresetSave.delete(chatId);
+          await botSend(chat, '👌 לא שמרתי. מתי שתרצה — שלח לי שם אחרי סריקה.');
+          stats.sent++; return;
+        }
+        if (!looksLikeOtherCommand && t.length >= 2 && t.length <= 200) {
+          // Extract the actual desired name from a natural sentence.
+          // Common patterns: "כן שמור, תקרא לו X" / "שמור בשם X" / "תקרא לו 'X'" / just "X"
+          let cleanName = t;
+          // 1) If quoted — use what's inside the quotes (Hebrew gershaim or ASCII)
+          const quoted = t.match(/["״׳'`]([^"״׳'`]{2,40})["״׳'`]/);
+          if (quoted) {
+            cleanName = quoted[1].trim();
+          } else {
+            // 2) Strip common prefixes — "כן שמור" / "תקרא לו" / "בשם" / "שמור בשם"
+            cleanName = cleanName
+              .replace(/^(כן\s+)?(שמור|תשמור|תקרא\s+לו|בשם|שם|שמור\s+בשם|כן\s+שמור\s+כפריסט)\s*[.,:]?\s*/i, '')
+              .replace(/^(תקרא\s+לו|קרא\s+לו)\s*/i, '')
+              .trim();
+            // 3) Keep only up to 40 chars
+            if (cleanName.length > 40) cleanName = cleanName.substring(0, 40);
+          }
+          if (!cleanName || cleanName.length < 2) cleanName = t.substring(0, 40);
+          try {
+            const sp = require('./src/scan-presets');
+            const saved = sp.save(cleanName, pending.sources);
+            pendingPresetSave.delete(chatId);
+            await botSend(chat, `✅ *פריסט נשמר: "${saved.name}"*\n${sp.summary(saved)}\n\n_בסריקה הבאה תקבל אופציה "📁 השתמש בפריסט שמור" בשלב 1._`);
+            stats.sent++; return;
+          } catch (e) {
+            await botSend(chat, `❌ שמירת פריסט נכשלה: ${e.message}`);
+            // Clear so we don't keep intercepting
+            pendingPresetSave.delete(chatId);
+          }
+        }
+        // If text looks like another command — just clear the pending state
+        // and fall through to normal handling.
+        pendingPresetSave.delete(chatId);
+      }
+    }
+
+    // ── Scan disambiguation menu trigger ─────────────────────────
+    // For ambiguous scan requests ("סריקה" alone, "תעשה לי סריקה", etc.)
+    // open an interactive 5-step menu so the user picks exactly what
+    // they want. The menu is also explicitly available via "תפריט סריקה".
+    {
+      const sf = require('./src/scan-flow');
+      if (sf.shouldShowMenu(text) && !sf.getFlow(chatId)) {
+        const flow = sf.startFlow(chatId);
+        await advanceScanFlow(flow);
+        stats.sent++;
+        return;
+      }
+    }
+
     // ── Pending "clear references" confirmation check ────────────
     const pendingClear = pendingClearConfirm.get(chatId);
     if (pendingClear && pendingClear.expiresAt > Date.now()) {
@@ -2628,10 +3414,36 @@ client.on('message_create', async (msg) => {
       /סריקת קבוצות|סקירת קבוצות|תסרוק קבוצות|תסרוק לי את הקבוצות/i.test(text) ||
       // "תסרוק לי" alone — only when followed by time-window or nothing (not by a specific target)
       /תסרוק לי(?:\s+(?:מ|עד|עכשיו|את הקבוצות|קבוצות)|$|[\?\.!])/i.test(text) ||
+      // "סריקה של ..." anywhere in the text (e.g. "תעשה לי סריקה של כל הקבוצות והערוצים")
+      // "סקירה של ..." with multi-source mention (כל / כול / וגם / וערוצים / וקבוצות)
+      /(?:סריקה|סקירה)\s+של\s+.*(?:הקבוצות|קבוצות|הערוצים|ערוצים|כל\s+ה)/i.test(text) ||
       // english
       /^(?:run briefing|briefing now|run scan)/i.test(text)
-    )) {
-      const summaryTask = [...dailyTasks.values()].find(d => d.action === 'group_summary');
+    ) &&
+    // ── Negative guard: explicit Telegram mention → route to Claude ──
+    // Telegram has its own tool (different platform). Without this guard,
+    // "סריקה של הערוצים בטלגרם" was hijacked to the WhatsApp scanner.
+    !/\b(טלגרם|telegram|טלי?גראם)\b/i.test(text)
+    ) {
+      // ── Hot-reload daily.json so edits without restart take effect ──
+      // The in-memory dailyTasks Map can drift from disk (user edits file
+      // directly). On every manual scan request, re-read just the
+      // group_summary entry to get a fresh source list.
+      let summaryTask = [...dailyTasks.values()].find(d => d.action === 'group_summary');
+      try {
+        const _diskTasks = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'daily.json'), 'utf8'));
+        const _freshGroupSummary = (Array.isArray(_diskTasks) ? _diskTasks : []).find(t => t.action === 'group_summary');
+        if (_freshGroupSummary && summaryTask) {
+          // Replace params from disk while keeping the in-memory cron handle.
+          summaryTask = { ...summaryTask, params: _freshGroupSummary.params || summaryTask.params };
+          // Also update the in-memory Map so next time it's correct.
+          const _id = [...dailyTasks.entries()].find(([, v]) => v.action === 'group_summary')?.[0];
+          if (_id) dailyTasks.set(_id, summaryTask);
+          logger.info(`📋 Reloaded daily.json: ${(summaryTask.params?.groups || []).length} sources`);
+        }
+      } catch (e) {
+        logger.warn(`daily.json reload failed: ${e.message?.substring(0, 80)}`);
+      }
       if (!summaryTask) {
         await botSend(chat, `❌ לא נמצאה משימת סקירה מתוזמנת. הגדר אחת קודם.`);
         stats.sent++; return;
@@ -2691,7 +3503,7 @@ client.on('message_create', async (msg) => {
           const groupStats = [];
           const allMessages = [];
           const { smartChat: sc } = require('./src/claude');
-          const cs = await client.getChats(); // fetch once outside loop
+          const cs = await getAllChatsAndChannels(); // includes channels
           const _totalG = (summaryTask.params.groups || []).length;
           let _doneG = 0;
           for (const gn of (summaryTask.params.groups || [])) {
@@ -2770,13 +3582,55 @@ client.on('message_create', async (msg) => {
       return;
     }
 
-    // Send "working on it" if response takes too long
-    let slowTimer = setTimeout(async () => {
-      try { await chat.sendMessage('⏳ שנייה, עובד על זה...' + BOT_MARKER); } catch {}
-    }, 5000);
+    // ── Progressive "still working" notifications ─────────────────
+    // Long Claude operations (multi-tool, big summaries) can take 1-3 minutes.
+    // The user has no way to tell stuck-vs-working without periodic signals.
+    // Strategy: send a series of messages at 5s, 30s, 60s, 90s, 120s, ...
+    // Each message rotates through phrasings so it feels natural, not robotic.
+    // Also re-emits sendStateTyping to keep the typing indicator alive (WA drops it after ~25s).
+    const slowTicks = [
+      { at: 5000,   msg: '⏳ שנייה, עובד על זה...' },
+      { at: 30000,  msg: '🔧 עדיין כאן — אוסף מידע מכמה מקורות, זה ייקח עוד כמה שניות' },
+      { at: 60000,  msg: '⚙️ עוד עובד — הרבה תוכן לסיכום, מתקדם' },
+      { at: 90000,  msg: '🐢 לוקח קצת יותר זמן מהרגיל. עדיין רץ — לא נתקע' },
+      { at: 120000, msg: '⏱️ סבלנות, סיכום ארוך. כמעט שם' },
+      { at: 180000, msg: '⏰ עוד דקה משוערת — לא נתקע, רק אסוף הרבה מידע' },
+    ];
+    const slowTimers = slowTicks.map(({ at, msg: m }) =>
+      setTimeout(async () => {
+        try { await chat.sendStateTyping(); } catch {}
+        try { await chat.sendMessage(m + BOT_MARKER); } catch {}
+      }, at)
+    );
+    // Re-emit "typing..." every 20s to keep WhatsApp showing it
+    const typingKeepalive = setInterval(() => {
+      chat.sendStateTyping().catch(() => {});
+    }, 20000);
 
-    const response = await route(chatId, text);
-    clearTimeout(slowTimer);
+    let response;
+    try {
+      try {
+        response = await route(chatId, text);
+      } catch (firstErr) {
+        // ── Auto-recover from 400 "messages must alternate" errors ──
+        // These happen when the conversation history gets into a state
+        // with tool_use blocks missing their tool_result. Clear history
+        // and try ONCE more with a fresh slate so the user doesn't see
+        // a useless error.
+        const isStateError = firstErr?.status === 400
+          || (firstErr?.message || '').includes('tool_use')
+          || (firstErr?.message || '').includes('tool_result')
+          || (firstErr?.message || '').includes('400');
+        if (!isStateError) throw firstErr;
+        logger.warn(`🔁 400 detected — clearing history and retrying for ${chatId}`);
+        conversations.delete(chatId);
+        saveConversations(conversations);
+        response = await route(chatId, text);
+      }
+    } finally {
+      slowTimers.forEach(clearTimeout);
+      clearInterval(typingKeepalive);
+    }
     await botSend(chat, response);
     stats.sent++;
     log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
@@ -4192,7 +5046,7 @@ app.get('/run-group-scan', async (_req, res) => {
       const groupStats = [];
       const allMessages = [];
       const _scanDay = Date.now() / 1000 - 86400;
-      const _cs = await client.getChats();
+      const _cs = await getAllChatsAndChannels(); // chats + channels
 
       await botSend(oc, `🧪 *בדיקה ידנית — סקירת קבוצות*\n_סורק ${(task.params.groups || []).length} קבוצות..._`);
 

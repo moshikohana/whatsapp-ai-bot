@@ -1,0 +1,21 @@
+{
+  "name": "family-bot",
+  "version": "1.0.0",
+  "description": "Multi-tenant WhatsApp AI bot — runs on Moshiko's PC, serves family members via their WhatsApp accounts.",
+  "main": "server.js",
+  "author": "Moshiko Ohana",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "googleapis": "^144.0.0",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}
