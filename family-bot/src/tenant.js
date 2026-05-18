@@ -130,7 +130,9 @@ class Tenant {
         headless: true,
         args: [
           '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-          '--disable-gpu', '--single-process',
+          '--disable-gpu',
+          // NOTE: removed `--single-process` — it caused Chromium to crash
+          // mid-pairing on memory-constrained servers (auth timeout / "t" error).
         ],
       },
     });
@@ -152,7 +154,15 @@ class Tenant {
         // Reset flag after 30s so next QR cycle re-requests
         setTimeout(() => { pairingRequested = false; }, 25000);
       } catch (e) {
-        this._log('warn', 'pairing code request failed:', e.message);
+        // Log full error context — wwebjs sometimes throws cryptic single-char
+        // errors ('t' = timeout in WA protocol). Capture all available info.
+        const errInfo = [
+          e.message,
+          e.name,
+          e.code,
+          e.stack?.split('\n')[0],
+        ].filter(Boolean).join(' | ');
+        this._log('warn', 'pairing code request failed:', errInfo);
         pairingRequested = false;
       }
     });
