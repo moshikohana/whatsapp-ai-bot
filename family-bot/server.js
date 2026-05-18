@@ -1,13 +1,17 @@
 'use strict';
 /**
- * Family Bot — multi-tenant server running on Moshiko's PC.
+ * Family Bot — multi-tenant WhatsApp AI assistant server.
  *
- * What runs where:
- *   - Moshiko's existing bot: `node index.js` on port 3000 — UNTOUCHED.
- *   - This server:           `node server.js` on port 3001 — separate process.
+ * Architecture: runs alongside the admin's personal bot (typically on a
+ * different port). Each tenant is a separate WhatsApp Client with its own
+ * session, config, history, and Google/Telegram tokens.
+ *
+ * What runs where (typical deployment on the admin's server):
+ *   - Admin's personal bot: `node index.js` on port 3000 — UNTOUCHED.
+ *   - This server:          `node server.js` on port 3001 — separate process.
  *
  * Endpoints:
- *   GET  /                       — Moshiko admin dashboard (localhost only)
+ *   GET  /                       — admin dashboard (localhost only)
  *   POST /admin/tenants          — create a new tenant
  *   GET  /admin/tenants          — list all tenants (JSON)
  *   POST /admin/tenants/:id/restart
@@ -22,11 +26,30 @@
 
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
-// Also load from the main bot's .env if it exists — so API keys are shared
-// without duplicating them.
+
+// ── Selective sharing from main bot's .env ──────────────────────
+// Only pull APP-LEVEL secrets (API keys, OAuth client credentials).
+// NEVER pull USER-LEVEL tokens — TELEGRAM_SESSION, GOOGLE_TOKEN are
+// the admin's personal sessions; if family-bot loads them, it would
+// hijack the admin's connected Telegram/Google accounts.
+const SAFE_TO_SHARE = new Set([
+  'ANTHROPIC_API_KEY',  // Claude — billed to admin, used by everyone
+  'GROQ_API_KEY',        // Voice transcription — same
+  'GOOGLE_CLIENT_ID',   // OAuth app — same app, each user authorizes their own
+  'GOOGLE_CLIENT_SECRET',
+  'GOOGLE_CREDENTIALS',  // alternative source for client id/secret
+  'TELEGRAM_API_ID',     // Telegram APP creds — same app, each user gets own session
+  'TELEGRAM_API_HASH',
+]);
 const mainEnv = path.join(__dirname, '..', '.env');
 if (require('fs').existsSync(mainEnv)) {
-  require('dotenv').config({ path: mainEnv, override: false });
+  // Parse without applying — we'll selectively pick safe keys only.
+  const parsed = require('dotenv').parse(require('fs').readFileSync(mainEnv));
+  for (const k of Object.keys(parsed)) {
+    if (SAFE_TO_SHARE.has(k) && !process.env[k]) {
+      process.env[k] = parsed[k];
+    }
+  }
 }
 
 const express = require('express');
@@ -55,7 +78,7 @@ function requireAdmin(req, res, next) {
   return res.status(403).send('Forbidden — admin only');
 }
 
-// ── Routes: Admin (Moshiko) ──────────────────────────────────────
+// ── Routes: Admin dashboard (localhost only) ────────────────────
 app.get('/', requireAdmin, (_req, res) => {
   res.sendFile(path.join(__dirname, 'src', 'web', 'admin.html'));
 });
@@ -120,13 +143,16 @@ app.get('/onboard/status/:id', (req, res) => {
   res.json({ status: t.status, pairingCode: t.pairingCode, error: t.lastError });
 });
 
-app.post('/onboard/start', async (req, res) => {
+// /onboard/signup — public signup form posts here. Anyone can register
+// their phone; the admin then sees the pairing code in the dashboard.
+app.post('/onboard/signup', async (req, res) => {
   try {
     const { phone } = req.body || {};
+    if (!phone) return res.status(400).send('חסר מספר טלפון');
     const t = await manager.addTenant({ phone, config: {} });
     res.json({ ok: true, id: t.id });
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(400).send(e.message);
   }
 });
 
@@ -134,33 +160,20 @@ app.post('/onboard/start', async (req, res) => {
 app.get('/oauth/start/:id', (req, res) => {
   const t = manager.getTenant(req.params.id);
   if (!t) return res.status(404).send('Tenant not found');
-  const url = googleOAuth.buildAuthUrl({
-    tenantId: req.params.id,
-    redirectUri: `${PUBLIC_HOST}/oauth/callback`,
-  });
-  res.redirect(url);
+  try {
+    const url = googleOAuth.startAuthUrl(req.params.id);
+    res.redirect(url);
+  } catch (e) {
+    res.status(500).send('OAuth not configured: ' + e.message);
+  }
 });
 
 app.get('/oauth/callback', async (req, res) => {
   try {
-    const { code, state } = req.query;
-    if (!code || !state) return res.status(400).send('Missing code/state');
-    const result = await googleOAuth.exchangeAndSave({
-      code, state, redirectUri: `${PUBLIC_HOST}/oauth/callback`,
-    });
-    // Update tenant config
-    const tenant = manager.getTenant(result.tenantId);
-    if (tenant) tenant.saveConfig({ googleConnected: true, googleEmail: result.email });
-    res.set('Content-Type', 'text/html; charset=utf-8').send(`
-<!DOCTYPE html><html dir="rtl" lang="he"><head><meta charset="UTF-8"><title>חיבור Google הושלם</title>
-<style>body{font-family:'Segoe UI',sans-serif;background:#f6f7f9;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-.card{background:#fff;padding:40px 60px;border-radius:14px;box-shadow:0 4px 18px rgba(0,0,0,0.08);text-align:center}
-.ok{font-size:64px;color:#2bb673}h1{margin:16px 0 8px}p{color:#5a6470}
-</style></head>
-<body><div class="card"><div class="ok">✅</div><h1>הצלחה!</h1>
-<p>חיבור Google הושלם.</p><p>תוכל לסגור את הדף ולחזור ל-WhatsApp.</p></div></body></html>`);
+    const result = await googleOAuth.handleCallback(req.query, manager);
+    res.set('Content-Type', 'text/html; charset=utf-8').send(googleOAuth.successPage(result.email));
   } catch (e) {
-    res.status(500).send('שגיאה: ' + e.message);
+    res.status(500).set('Content-Type', 'text/html; charset=utf-8').send(googleOAuth.errorPage(e.message));
   }
 });
 

@@ -19,6 +19,8 @@ const calendarTool = require('./tools/calendar');
 const whatsappTool = require('./tools/whatsapp');
 const remindersTool = require('./tools/reminders');
 const memoryTool = require('./tools/memory');
+const scanPresets = require('./scan-presets');
+const articleTool = require('./tools/article');
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -85,6 +87,31 @@ const TOOLS = [
     },
   },
   {
+    name: 'scan_presets',
+    description: 'פריסטים שמורים של רשימות סריקה. פעולות: list (רשימה), get (פרטים), delete (מחק), rename (שנה שם). *אסור להפעיל פריסט (לסרוק) דרך הכלי* — אם המשתמש מבקש לרוץ סריקה עם פריסט, ענה לו לשלוח "סריקה" ולבחור "📁 השתמש בפריסט שמור" בשלב 1.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'get', 'delete', 'rename'] },
+        name: { type: 'string', description: 'שם פריסט' },
+        new_name: { type: 'string', description: 'שם חדש (rename)' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'article',
+    description: 'קריאה וסיכום של כתבה / קישור. פעולה: read (URL → סיכום).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['read'] },
+        url: { type: 'string', description: 'הקישור לקריאה' },
+      },
+      required: ['action', 'url'],
+    },
+  },
+  {
     type: 'web_search_20250305',
     name: 'web_search',
     max_uses: 5,
@@ -98,10 +125,44 @@ async function executeTool(name, input, context) {
       case 'whatsapp':  return await whatsappTool.run(input, context);
       case 'reminders': return await remindersTool.run(input, context);
       case 'memory':    return await memoryTool.run(input, context);
+      case 'article':   return await articleTool.run(input, context);
+      case 'scan_presets': return await _runScanPresets(input, context);
       default: return `❌ כלי לא מוכר: ${name}`;
     }
   } catch (e) {
     return `❌ שגיאה בכלי ${name}: ${e.message?.substring(0, 100)}`;
+  }
+}
+
+async function _runScanPresets(input, context) {
+  const dataDir = context.tenant?.dataDir;
+  if (!dataDir) return '❌ אין הקשר טננט (פריסטים זמינים רק בתוך family-bot)';
+  const { action, name, new_name } = input;
+  switch (action) {
+    case 'list': {
+      const all = scanPresets.list(dataDir);
+      if (!all.length) return '📁 *אין פריסטים שמורים.*\n\nכדי לשמור: שלח "סריקה", בחר מקורות, ובסוף הסריקה תקבל אופציה לתת שם.';
+      return '📁 *פריסטים שמורים:*\n\n' + all.map((p, i) =>
+        `*${i + 1}.* ${p.name}\n   ${p.isDynamic ? (p.sourceCount + ' מקורות (משתנה אוטומטית)') : scanPresets.summary(p)}`
+      ).join('\n\n') + '\n\n_להפעיל אחד: שלח "סריקה" ובחר "📁 השתמש בפריסט שמור" בשלב 1._';
+    }
+    case 'get': {
+      if (!name) return '❌ חסר שם פריסט';
+      const p = scanPresets.getByName(dataDir, name);
+      if (!p) return `❌ לא נמצא פריסט בשם "${name}"`;
+      return `📁 *${p.name}*\n${scanPresets.summary(p)}\n\n*המקורות:*\n` + p.sources.map((s, i) => `${i + 1}. ${s.label || s.raw}`).join('\n');
+    }
+    case 'delete': {
+      if (!name) return '❌ חסר שם פריסט';
+      const ok = scanPresets.remove(dataDir, name);
+      return ok ? `✅ פריסט "${name}" נמחק.` : `❌ לא נמצא פריסט "${name}"`;
+    }
+    case 'rename': {
+      if (!name || !new_name) return '❌ חסרים name + new_name';
+      const ok = scanPresets.rename(dataDir, name, new_name);
+      return ok ? `✅ שונה: "${name}" → "${new_name}"` : `❌ לא נמצא פריסט "${name}"`;
+    }
+    default: return `❌ פעולה לא מוכרת: ${action}`;
   }
 }
 
@@ -118,7 +179,7 @@ async function chat(userMessage, history = [], context = {}) {
   let response = await callClaude({
     model: MODEL,
     max_tokens: MAX_OUTPUT_TOKENS,
-    system: buildSystemPrompt(),
+    system: buildSystemPrompt(context.tenant?.config),
     tools: TOOLS,
     messages,
   });
@@ -151,7 +212,7 @@ async function chat(userMessage, history = [], context = {}) {
     response = await callClaude({
       model: MODEL,
       max_tokens: MAX_OUTPUT_TOKENS,
-      system: buildSystemPrompt(),
+      system: buildSystemPrompt(context.tenant?.config),
       tools: TOOLS,
       messages: allMessages,
     });
@@ -172,7 +233,7 @@ async function chat(userMessage, history = [], context = {}) {
       const summary = await callClaude({
         model: MODEL,
         max_tokens: 1500,
-        system: buildSystemPrompt(),
+        system: buildSystemPrompt(context.tenant?.config),
         tool_choice: { type: 'none' },
         messages: fallbackMessages,
       });

@@ -4,12 +4,13 @@
  *
  * Returns a string. Called on every Claude API request so prompt updates
  * (e.g. user changing bot name) take effect without restart.
+ *
+ * In multi-tenant mode, the caller passes the tenant's config directly:
+ *   buildSystemPrompt(tenant.config)
  */
 
-const config = require('./config');
-
-function buildSystemPrompt() {
-  const cfg = config.read() || {};
+function buildSystemPrompt(cfg) {
+  cfg = cfg || {};
   const botName = cfg.botName || 'הבוט';
   const gender = cfg.userGender || 'male';
   const firstName = cfg.firstName || null;

@@ -1,0 +1,238 @@
+/* Family Bot — shared web styles (admin + onboard). RTL Hebrew. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --primary: #25d366;
+  --primary-dark: #128c7e;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1a1d20;
+  --text-light: #5a6470;
+  --border: #e3e7ed;
+  --success: #2bb673;
+  --error: #e74c3c;
+  --warning: #f39c12;
+  --shadow: 0 4px 18px rgba(20, 30, 60, 0.08);
+}
+
+html, body {
+  font-family: 'Segoe UI', 'Heebo', 'Arial', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+/* ── Topbar / hero ─────────────────────────────────────────────── */
+.topbar {
+  margin-bottom: 24px;
+  padding: 20px 24px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+  border-radius: 14px;
+  color: white;
+}
+.topbar h1 { font-size: 24px; margin-bottom: 4px; }
+.topbar .sub { font-size: 14px; opacity: 0.9; }
+
+.hero {
+  text-align: center;
+  padding: 36px 16px 24px;
+}
+.hero-emoji { font-size: 72px; line-height: 1; margin-bottom: 12px; }
+.hero h1 { font-size: 28px; margin-bottom: 6px; }
+.hero .subtitle { color: var(--text-light); font-size: 16px; }
+
+/* ── Cards ──────────────────────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border-radius: 14px;
+  padding: 24px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow);
+}
+.card h2 {
+  font-size: 18px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card p { margin-bottom: 10px; }
+.muted { color: var(--text-light); font-size: 14px; }
+.row { display: flex; gap: 10px; align-items: center; }
+.row input { flex: 1; }
+
+input[type="text"], input[type="tel"], input[type="email"] {
+  padding: 12px 14px;
+  font-size: 16px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: white;
+  direction: rtl;
+  font-family: inherit;
+  width: 100%;
+}
+input:focus { outline: none; border-color: var(--primary); }
+
+.btn {
+  padding: 12px 22px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 15px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--bg); }
+.btn.primary { background: var(--primary); color: white; border-color: var(--primary); }
+.btn.primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
+.btn.danger { color: var(--error); border-color: rgba(231, 76, 60, 0.3); }
+.btn.danger:hover { background: rgba(231, 76, 60, 0.08); }
+
+.link { color: var(--primary-dark); text-decoration: underline; }
+
+code, .pair-code code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  background: #f3f5f9;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 14px;
+  direction: ltr;
+  display: inline-block;
+}
+
+.steps {
+  padding-right: 22px;
+  margin: 12px 0;
+}
+.steps li { margin-bottom: 8px; line-height: 1.7; }
+
+/* ── Onboard hero ─────────────────────────────────────────────── */
+.app.onboard { max-width: 640px; }
+
+/* ── Tenants list ───────────────────────────────────────────────── */
+.tenants { display: flex; flex-direction: column; gap: 12px; }
+.empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-light);
+  background: var(--bg);
+  border-radius: 10px;
+}
+.tenant {
+  background: var(--bg);
+  border-radius: 10px;
+  padding: 16px;
+  border: 1px solid var(--border);
+}
+.t-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.t-name { font-weight: 600; }
+.t-phone { color: var(--text-light); font-size: 13px; font-family: monospace; direction: ltr; }
+.t-owner { color: var(--text-light); font-size: 13px; }
+.t-meta {
+  font-size: 13px;
+  color: var(--text-light);
+  margin: 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.t-meta .ok { color: var(--success); }
+.t-actions { display: flex; gap: 8px; margin-top: 10px; }
+.t-actions .btn { padding: 8px 14px; font-size: 13px; }
+
+.status {
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(0,0,0,0.06);
+}
+.status-ready { background: rgba(43, 182, 115, 0.15); color: var(--success); }
+.status-pairing { background: rgba(243, 156, 18, 0.15); color: var(--warning); }
+.status-error { background: rgba(231, 76, 60, 0.15); color: var(--error); }
+
+.pair-code {
+  background: white;
+  padding: 12px 14px;
+  border-radius: 10px;
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.pair-code label { font-weight: 600; }
+.pair-code code { font-size: 18px; font-weight: 700; letter-spacing: 2px; padding: 6px 12px; background: #eef9f1; color: var(--primary-dark); }
+.copy {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.badge {
+  display: inline-block;
+  background: var(--primary);
+  color: white;
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 12px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* ── Status messages ──────────────────────────────────────────── */
+.error-line {
+  background: rgba(231, 76, 60, 0.1);
+  color: var(--error);
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-top: 10px;
+}
+.success-line {
+  background: rgba(43, 182, 115, 0.1);
+  color: var(--success);
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-top: 10px;
+}
+.status-box:empty { display: none; }
+.status-box { margin-top: 12px; }
+
+.footer {
+  margin-top: 24px;
+  text-align: center;
+  color: var(--text-light);
+  font-size: 12px;
+  padding: 14px;
+}
+
+/* ── Mobile ────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .app { padding: 12px; }
+  .row { flex-direction: column; align-items: stretch; }
+  .row .btn { width: 100%; }
+}

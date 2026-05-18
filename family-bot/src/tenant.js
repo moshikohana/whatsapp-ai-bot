@@ -20,6 +20,9 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const claude = require('./claude');
 const firstRun = require('./first-run');
 const remindersTool = require('./tools/reminders');
+const scanFlow = require('./scan-flow');
+const scanPresets = require('./scan-presets');
+const waTool = require('./tools/whatsapp');  // for helpers
 
 const ROOT = path.join(__dirname, '..');
 const SESSIONS_ROOT = path.join(ROOT, '.wwebjs_auth', 'family-tenants');
@@ -185,7 +188,11 @@ class Tenant {
       this._setStatus('error', { error: 'נותק: ' + reason });
     });
 
+    // ── Message-id dedup — prevents wwebjs reconnect replay loops ──
+    this._processedMsgIds = new Set();
+    this._processedOrder = [];
     this.client.on('message_create', (msg) => this._onMessage(msg).catch(e => this._log('error', 'msg handler crashed:', e.message)));
+    this.client.on('vote_update', (vote) => this._onVote(vote).catch(e => this._log('error', 'vote handler crashed:', e.message)));
 
     try {
       await this.client.initialize();
@@ -195,12 +202,28 @@ class Tenant {
     }
   }
 
+  // ── Dedup helper: stop wwebjs reconnect replay loops ───────────
+  _seenAndMark(msgIdSerialized) {
+    if (!msgIdSerialized) return false;
+    if (this._processedMsgIds.has(msgIdSerialized)) return true;
+    this._processedMsgIds.add(msgIdSerialized);
+    this._processedOrder.push(msgIdSerialized);
+    if (this._processedOrder.length > 2000) {
+      const evicted = this._processedOrder.shift();
+      this._processedMsgIds.delete(evicted);
+    }
+    return false;
+  }
+
   async _onMessage(msg) {
     if (!msg.fromMe) return;
     if (!this.ownerWid) return;
     if (msg.from !== msg.to) return;
     if (msg.from !== this.ownerWid) return;
     if (typeof msg.body === 'string' && msg.body.includes(BOT_MARKER)) return;
+    // Dedup
+    const _msgId = msg.id?._serialized || '';
+    if (this._seenAndMark(_msgId)) return;
 
     // ── Voice / audio ──
     if (msg.type === 'ptt' || msg.type === 'audio') {
@@ -252,6 +275,21 @@ class Tenant {
     );
     const keepalive = setInterval(() => chat.sendStateTyping().catch(() => {}), 20000);
 
+    // ── Pending preset-save text reply (after a scan finished) ──
+    if (this._pendingPresetSave && this._pendingPresetSave.expiresAt > Date.now()) {
+      const handled = await this._handlePendingPresetSave(text, chat);
+      if (handled) { timers.forEach(clearTimeout); clearInterval(keepalive); return; }
+    }
+
+    // ── Scan disambiguation menu — open on bare "סריקה" / "סקירה" / ambiguous ──
+    if (scanFlow.shouldShowMenu(text) && !scanFlow.getFlow(this.ownerWid)) {
+      const flow = scanFlow.startFlow(this.ownerWid);
+      timers.forEach(clearTimeout);
+      clearInterval(keepalive);
+      await this._advanceScanFlow(flow, chat);
+      return;
+    }
+
     let reply;
     try {
       // First-run wizard intercept (in-WhatsApp setup)
@@ -282,6 +320,354 @@ class Tenant {
     if (!text) return;
     try { await chat.sendMessage(text + BOT_MARKER); }
     catch (e) { this._log('warn', 'send failed:', e.message); }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //   Scan-flow methods (interactive 5-step menu + execution)
+  // ══════════════════════════════════════════════════════════════════
+
+  /** Send the next poll in a flow, populating availableItems if entering 'items'. */
+  async _advanceScanFlow(flow, chat) {
+    const { Poll } = require('whatsapp-web.js');
+
+    // If entering 'items' — fetch available items lazily
+    if (flow.step === 'items' && (!flow.availableItems || flow.availableItems.length === 0)) {
+      await this.send(chat, '⏳ אוסף רשימת מקורות זמינים...');
+      flow.availableItems = await this._fetchAvailableScanItems(flow.selections.source, flow.selections.type);
+      flow.itemsPage = 0;
+      if (flow.availableItems.length === 0) {
+        await this.send(chat, '❌ לא נמצאו מקורות מתאימים. נסה "כל המקורות" במקום.');
+        scanFlow.endFlow(flow.chatId);
+        return;
+      }
+    }
+
+    const presetsList = scanPresets.list(this.dataDir);
+    const poll = scanFlow.buildPoll(flow, { presetsList });
+    if (!poll) return;
+    await this.send(chat, poll.question);
+    const wPoll = new Poll('בחר:', poll.options.map(o => o.label),
+      { allowMultipleAnswers: !!poll.multiple });
+    const sentMsg = await chat.sendMessage(wPoll);
+    scanFlow.updateFlow(flow.chatId, {
+      activePollId: sentMsg?.id?._serialized || null,
+      lastPollOptions: poll.options,
+    });
+  }
+
+  /** Handle a vote event — dispatch to scan-flow if matching active flow. */
+  async _onVote(vote) {
+    try {
+      const parentId = vote.parentMessage?.id?._serialized;
+      if (!parentId) return;
+      // Only own votes
+      if (vote.voter && vote.voter !== this.ownerWid && !vote.voter.includes(this.id)) return;
+      const f = [...scanFlow.flows.values()].find(fl => fl.activePollId === parentId);
+      if (!f) return;
+
+      // Resolve label/localId → option ID (handles multi-select navigation)
+      const allSelected = vote.selectedOptions || [];
+      const resolveOne = (so) => {
+        if (!so) return null;
+        const localId = so.localId;
+        if (f.lastPollOptions && typeof localId === 'number' && f.lastPollOptions[localId]) {
+          return f.lastPollOptions[localId].id;
+        }
+        const stripCheck = (s) => String(s || '').replace(/^✔️\s+/, '').replace(/^⭐\s+/, '');
+        const found = (f.lastPollOptions || []).find(o => stripCheck(o.label) === stripCheck(so.name));
+        if (found) return found.id;
+        return so.name || so.localId;
+      };
+      const resolvedAll = allSelected.map(resolveOne).filter(Boolean);
+      const NAV_IDS = ['__next_page__', '__finish__', 'cancel', '__back__'];
+      const nav = resolvedAll.find(id => NAV_IDS.includes(id));
+      const resolvedSelected = nav || resolvedAll[resolvedAll.length - 1] || vote.selectedOptions?.[0]?.name;
+
+      const presetsList = scanPresets.list(this.dataDir);
+      const result = scanFlow.applyVote(f, resolvedSelected, { presetsList });
+      const chat = await this.client.getChatById(this.ownerWid);
+
+      if (result.error) {
+        await this.send(chat, `⚠️ ${result.error}`);
+        await this._advanceScanFlow(f, chat);
+        return;
+      }
+      if (result.cancel) {
+        scanFlow.endFlow(f.chatId);
+        await this.send(chat, '❌ סריקה בוטלה.');
+        return;
+      }
+      if (result.restart) {
+        scanFlow.endFlow(f.chatId);
+        const fresh = scanFlow.startFlow(f.chatId);
+        await this._advanceScanFlow(fresh, chat);
+        return;
+      }
+      if (result.execute) {
+        const params = result.params;
+        if (f.confirmedSources) params.confirmedSources = f.confirmedSources;
+        if (f.usedPresetName) params.usedPresetName = f.usedPresetName;
+        scanFlow.endFlow(f.chatId);
+        await this._executeScan(params, chat);
+        return;
+      }
+      if (result.ok) { await this._advanceScanFlow(f, chat); return; }
+    } catch (e) {
+      this._log('error', '_onVote crashed:', e.message);
+    }
+  }
+
+  /** Build the list of selectable items (WA chats/channels + TG dialogs, sorted: tracked first). */
+  async _fetchAvailableScanItems(source, type) {
+    const items = [];
+    const wantWaGroups = (source === 'whatsapp' || source === 'both') && (type === 'groups' || type === 'both');
+    const wantWaChannels = (source === 'whatsapp' || source === 'both') && (type === 'channels' || type === 'both');
+    const wantTgGroups = (source === 'telegram' || source === 'both') && (type === 'groups' || type === 'both');
+    const wantTgChannels = (source === 'telegram' || source === 'both') && (type === 'channels' || type === 'both');
+
+    // Load tracked names from per-tenant daily.json
+    let trackedSet = new Set();
+    try {
+      const dailyFile = path.join(this.dataDir, 'daily.json');
+      if (fs.existsSync(dailyFile)) {
+        const arr = JSON.parse(fs.readFileSync(dailyFile, 'utf8'));
+        const gs = Array.isArray(arr) ? arr.find(t => t.action === 'group_summary') : null;
+        for (const n of (gs?.params?.groups || [])) {
+          if (n) trackedSet.add(waTool.normalizeHe(n));
+        }
+      }
+    } catch {}
+    const isTracked = (raw) => trackedSet.has(waTool.normalizeHe(raw || ''));
+
+    // WhatsApp side
+    try {
+      if (wantWaGroups || wantWaChannels) {
+        const chats = await this.client.getChats();
+        const ACTIVITY_CUTOFF_SEC = Date.now() / 1000 - 7 * 24 * 3600;
+        if (wantWaGroups) {
+          for (const c of chats) {
+            if (!c.isGroup) continue;
+            const recent = (c.timestamp || c.lastMessage?.timestamp || 0) > ACTIVITY_CUTOFF_SEC;
+            if (!isTracked(c.name) && !recent) continue;
+            items.push({ id: `wa:${c.id._serialized}`, label: `💬 ${c.name || '(ללא שם)'}`, source: 'wa', type: 'group', raw: c.name });
+          }
+        }
+        if (wantWaChannels) {
+          const channels = await waTool.safeGetChannels(this.client);
+          for (const c of channels) {
+            items.push({ id: `wa:${c.id._serialized}`, label: `💬📢 ${c.name || '(ללא שם)'}`, source: 'wa', type: 'channel', raw: c.name });
+          }
+        }
+      }
+    } catch (e) { this._log('warn', '_fetchAvailableScanItems WA:', e.message); }
+
+    // Telegram side (per-tenant — only if this tenant has Telegram configured)
+    try {
+      if ((wantTgGroups || wantTgChannels) && this.config?.telegramConnected) {
+        const tgTool = require('./tools/telegram');
+        const tg = await tgTool.getClient(this);
+        if (tg) {
+          const dialogs = await tg.getDialogs({ limit: 100 });
+          for (const d of dialogs) {
+            const entity = d.entity;
+            let kind = 'private';
+            const title = d.title || entity?.firstName || entity?.username || '';
+            if (entity?.className === 'Channel') kind = entity.broadcast ? 'channel' : 'group';
+            else if (entity?.className === 'Chat') kind = 'group';
+            if (kind === 'group' && wantTgGroups) {
+              items.push({ id: `tg:${String(d.id)}`, label: `📡 ${title}`, source: 'tg', type: 'group', raw: title });
+            }
+            if (kind === 'channel' && wantTgChannels) {
+              items.push({ id: `tg:${String(d.id)}`, label: `📡📢 ${title}`, source: 'tg', type: 'channel', raw: title });
+            }
+          }
+        }
+      }
+    } catch (e) { this._log('warn', '_fetchAvailableScanItems TG:', e.message); }
+
+    // Mark tracked, sort: tracked first, then groups before channels, then alphabetical
+    for (const it of items) it._tracked = trackedSet.has(waTool.normalizeHe(it.raw || ''));
+    items.sort((a, b) => {
+      if (a._tracked !== b._tracked) return a._tracked ? -1 : 1;
+      if (a.type !== b.type) return a.type === 'group' ? -1 : 1;
+      return (a.raw || '').localeCompare(b.raw || '', 'he');
+    });
+    for (const it of items) {
+      if (it._tracked && !it.label.startsWith('⭐')) it.label = '⭐ ' + it.label;
+    }
+    return items;
+  }
+
+  /** Resolve daily.json entries (by name) to actual items, for scope=all scans. */
+  async _resolveDailyScanSources(source, type) {
+    let names = [];
+    try {
+      const f = path.join(this.dataDir, 'daily.json');
+      if (fs.existsSync(f)) {
+        const arr = JSON.parse(fs.readFileSync(f, 'utf8'));
+        const gs = Array.isArray(arr) ? arr.find(t => t.action === 'group_summary') : null;
+        names = (gs?.params?.groups || []).filter(Boolean);
+      }
+    } catch {}
+    if (!names.length) return [];
+
+    const wantWa = source === 'whatsapp' || source === 'both';
+    const wantTg = source === 'telegram' || source === 'both';
+    const wantGroups = type === 'groups' || type === 'both';
+    const wantChannels = type === 'channels' || type === 'both';
+    const resolved = [];
+
+    if (wantWa) {
+      try {
+        const chats = await this.client.getChats();
+        const channels = await waTool.safeGetChannels(this.client);
+        const all = [...chats, ...channels];
+        for (const n of names) {
+          const ch = waTool.findChatByName(all, n);
+          if (!ch) continue;
+          const isCh = ch.isChannel === true;
+          const isGr = ch.isGroup === true;
+          if (isCh && wantChannels) resolved.push({ id: `wa:${ch.id._serialized}`, label: `💬📢 ${ch.name}`, source: 'wa', type: 'channel', raw: ch.name });
+          else if (isGr && wantGroups) resolved.push({ id: `wa:${ch.id._serialized}`, label: `💬 ${ch.name}`, source: 'wa', type: 'group', raw: ch.name });
+        }
+      } catch (e) { this._log('warn', '_resolveDailyScanSources WA:', e.message); }
+    }
+    return resolved;
+  }
+
+  /** Run the actual scan based on confirmed params. */
+  async _executeScan(params, chat) {
+    const since = params.sinceMinutes || 1440;
+    const windowLabel = params.timeLabel || `${since} דקות אחרונות`;
+    let sources;
+    if (params.scope === 'select') sources = params.selectedItems;
+    else sources = await this._resolveDailyScanSources(params.source, params.type);
+    if (!sources || sources.length === 0) {
+      const hint = params.scope === 'select' ? '❌ לא בחרת מקורות.' : '❌ אין מקורות ברשימת המעקב היומי שלך. הוסף קבוצות לרשימה או בחר "מקורות ספציפיים".';
+      await this.send(chat, hint);
+      return;
+    }
+
+    await this.send(chat, `⏳ *מריץ סריקה...*\n🌐 ${sources.length} מקורות · ⏱ ${windowLabel}`);
+    const allMessages = [];
+    const stats = [];
+
+    for (let i = 0; i < sources.length; i++) {
+      const src = sources[i];
+      try {
+        if (src.source === 'wa') {
+          const chatId = src.id.replace(/^wa:/, '');
+          let ch;
+          if (src.type === 'channel' || chatId.endsWith('@newsletter')) {
+            ch = { id: { _serialized: chatId }, name: src.raw, isChannel: true };
+          } else {
+            ch = await this.client.getChatById(chatId).catch(() => null);
+            if (!ch) { stats.push({ name: src.raw, count: 0, status: 'not_found', isChannel: false, source: 'wa' }); continue; }
+          }
+          const msgs = await waTool.fetchMessages(ch, 150);
+          const cutoff = Date.now() / 1000 - since * 60;
+          const rec = msgs.filter(m => m.body && m.timestamp > cutoff);
+          stats.push({ name: ch.name || src.raw, count: rec.length, status: 'ok', isChannel: src.type === 'channel', source: 'wa' });
+          for (const m of rec.filter(m => m.body && m.body.trim().length > 15)) {
+            allMessages.push({
+              group: ch.name || src.raw,
+              time: new Date(m.timestamp * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),
+              sender: (m._data?.notifyName || 'משתתף').substring(0, 15),
+              body: (m.body || '').substring(0, 250),
+              ts: m.timestamp, isChannel: src.type === 'channel', platform: 'wa',
+            });
+          }
+        }
+        // TG support — only if tenant has Telegram configured
+        else if (src.source === 'tg' && this.config?.telegramConnected) {
+          // TODO: per-tenant Telegram read; implementation in tools/telegram.js
+        }
+      } catch (e) {
+        stats.push({ name: src.raw, count: 0, status: 'error', error: e.message?.substring(0, 60), isChannel: src.type === 'channel', source: src.source });
+      }
+      if (sources.length >= 6 && i === Math.ceil(sources.length / 2)) {
+        try { await this.send(chat, `⏳ ${i + 1}/${sources.length} מקורות נסרקו...`); } catch {}
+      }
+    }
+
+    allMessages.sort((a, b) => a.ts - b.ts);
+    const totalM = stats.reduce((a, g) => a + g.count, 0);
+    const active = stats.filter(g => g.count > 0);
+    const activeGroups = active.filter(s => !s.isChannel);
+    const activeChannels = active.filter(s => s.isChannel);
+    const silentChannels = stats.filter(s => s.isChannel && s.count === 0 && s.status === 'ok');
+    const lvl = totalM > 300 ? '🔴🔴🔴🔴 סוער' : totalM > 100 ? '🔴🔴🔴 פעיל' : totalM > 30 ? '🟡🟡 בינוני' : '🟢 שקט';
+    const breakdownLines = [];
+    if (activeGroups.length) breakdownLines.push(`👥 ${activeGroups.length} קבוצות פעילות`);
+    if (activeChannels.length) breakdownLines.push(`📢 ${activeChannels.length} ערוצים פעילים: ${activeChannels.slice(0, 6).map(s => s.name).join(', ')}`);
+    if (silentChannels.length) breakdownLines.push(`🔇 ${silentChannels.length} ערוצים שקטים`);
+    const breakdown = breakdownLines.length ? '\n' + breakdownLines.join('\n') : '';
+    const header = `📋 *סריקה — ${new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}*\n⏱ ${windowLabel}\n━━━━━━━━━━━━━━━━━━━━\n🌡️ ${lvl}  |  📊 ${totalM} הודעות · ${active.length}/${stats.length} מקורות${breakdown}\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    if (!allMessages.length) {
+      await this.send(chat, header + `_אין הודעות בטווח (${windowLabel})_`);
+      return;
+    }
+
+    const { default: Anthropic } = require('@anthropic-ai/sdk');
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const pool = allMessages.map(m => {
+      const icon = m.isChannel ? '📢' : '👥';
+      return `⏰${m.time} ${icon}[${m.group}] ${m.sender}: "${m.body}"`;
+    }).join('\n');
+    const prompt = `סכם את ההודעות הבאות בפורמט נושאים חמים (3-7 נושאים מהחם לשקט). לכל נושא — שורת כותרת ושורת מקורות+ציטוט. בלי הקדמות.\n\n${pool}`;
+    try {
+      const r = await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 2500, messages: [{ role: 'user', content: prompt }] });
+      const text = r.content.filter(b => b.type === 'text').map(b => b.text.trim()).join('\n\n');
+      await this.send(chat, header + (text || '(לא נוצר סיכום)'));
+    } catch (e) {
+      await this.send(chat, header + '❌ הסיכום נכשל: ' + e.message?.substring(0, 80));
+    }
+
+    // Offer to save as preset (if not invoked via existing preset)
+    if (!params.usedPresetName && Array.isArray(sources) && sources.length > 0) {
+      this._pendingPresetSave = { sources, expiresAt: Date.now() + 5 * 60 * 1000 };
+      await this.send(chat, `💾 *לשמור את הבחירה כפריסט?*\n${sources.length} מקורות נסרקו. שלח שם (לדוגמה: "ערוצי בוקר") לשמירה, או "לא".`);
+    }
+  }
+
+  /** Handle a text reply during pending preset-save window. Returns true if consumed. */
+  async _handlePendingPresetSave(text, chat) {
+    const t = text.trim();
+    const isNegative = /^(לא|לא תודה|אל תשמור|skip|no)/i.test(t);
+    const looksLikeOtherCommand = /^(?:סריקה|סקירה|תפריט|בוקר טוב|מה|תעשה|תקבע|תזכיר|תחפש|סכם|שלח|תשלח)/i.test(t);
+    if (isNegative) {
+      this._pendingPresetSave = null;
+      await this.send(chat, '👌 לא שמרתי.');
+      return true;
+    }
+    if (!looksLikeOtherCommand && t.length >= 2 && t.length <= 200) {
+      // Extract clean name from natural phrasing
+      let cleanName = t;
+      const quoted = t.match(/["״׳'`]([^"״׳'`]{2,40})["״׳'`]/);
+      if (quoted) cleanName = quoted[1].trim();
+      else {
+        cleanName = cleanName
+          .replace(/^(כן\s+)?(שמור|תשמור|תקרא\s+לו|בשם|שם|שמור\s+בשם|כן\s+שמור\s+כפריסט)\s*[.,:]?\s*/i, '')
+          .replace(/^(תקרא\s+לו|קרא\s+לו)\s*/i, '')
+          .trim();
+        if (cleanName.length > 40) cleanName = cleanName.substring(0, 40);
+      }
+      if (!cleanName || cleanName.length < 2) cleanName = t.substring(0, 40);
+      try {
+        const saved = scanPresets.save(this.dataDir, cleanName, this._pendingPresetSave.sources);
+        this._pendingPresetSave = null;
+        await this.send(chat, `✅ *פריסט נשמר: "${saved.name}"*\n${scanPresets.summary(saved)}\n\n_בסריקה הבאה תקבל אופציה "📁 השתמש בפריסט שמור" בשלב 1._`);
+        return true;
+      } catch (e) {
+        await this.send(chat, `❌ שמירת פריסט נכשלה: ${e.message}`);
+        this._pendingPresetSave = null;
+        return true;
+      }
+    }
+    // Looks like another command — clear pending state and fall through
+    this._pendingPresetSave = null;
+    return false;
   }
 
   /** Wire up the reminders module's owner-chat (for fire callbacks). */

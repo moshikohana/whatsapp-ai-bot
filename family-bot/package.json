@@ -1,9 +1,10 @@
 {
   "name": "family-bot",
   "version": "1.0.0",
-  "description": "Multi-tenant WhatsApp AI bot — runs on Moshiko's PC, serves family members via their WhatsApp accounts.",
+  "description": "Multi-tenant WhatsApp AI assistant — admin runs the server, end-users connect with their own WhatsApp accounts.",
   "main": "server.js",
   "author": "Moshiko Ohana",
+  "_comment_author": "Author is the bot maintainer/admin; tenants use the bot via their own WhatsApp.",
   "license": "UNLICENSED",
   "private": true,
   "scripts": {

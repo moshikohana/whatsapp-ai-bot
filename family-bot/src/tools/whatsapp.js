@@ -190,4 +190,12 @@ async function run(input, context) {
   }
 }
 
-module.exports = { run };
+module.exports = {
+  run,
+  // Exported helpers — used by tenant.js for scan-flow execution
+  safeGetChannels,
+  getAllChatsAndChannels,
+  findChatByName,
+  normalizeHe,
+  fetchMessages,
+};

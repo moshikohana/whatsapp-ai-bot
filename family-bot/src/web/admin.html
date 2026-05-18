@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>Family Bot — דשבורד</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <h1>🤖 Family Bot — דשבורד</h1>
+    <div class="sub">ניהול הבוטים של המשפחה — רץ אצלך, נגיש לכל בני המשפחה דרך וואטסאפ.</div>
+  </header>
+
+  <section class="card">
+    <h2>➕ הוסף משתמש חדש</h2>
+    <p class="muted">הזן מספר טלפון. הבוט ייצור קוד הזדהות בן 8 תווים — תשלח אותו ל-WhatsApp שלהם והם יזינו אותו ב-"מכשירים מקושרים — קישור עם מספר טלפון".</p>
+    <form id="addForm" class="row">
+      <input type="text" id="phone" placeholder="+972..." required />
+      <button type="submit" class="btn primary">צור קוד</button>
+    </form>
+    <div id="addResult"></div>
+  </section>
+
+  <section class="card">
+    <h2>👥 משתמשים פעילים <span id="countBadge" class="badge">0</span></h2>
+    <div id="tenants" class="tenants">
+      <div class="empty">טוען...</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>🔗 קישור Onboarding לשליחה</h2>
+    <p class="muted">תרצה לשלוח להם דף יפה במקום קוד? אם יש לך Cloudflare Tunnel דולק — שלח להם:</p>
+    <code id="onboardUrl">https://&lt;your-tunnel&gt;.trycloudflare.com/onboard?phone=+972...</code>
+    <p class="muted">או — פשוט תיתן להם את הקוד מלמעלה (אין צורך בדפדפן בכלל).</p>
+  </section>
+</div>
+
+<script>
+async function loadTenants() {
+  const r = await fetch('/admin/tenants').then(r => r.json()).catch(() => ({ tenants: [] }));
+  const tenants = r.tenants || [];
+  document.getElementById('countBadge').textContent = tenants.length;
+  const container = document.getElementById('tenants');
+  if (!tenants.length) {
+    container.innerHTML = '<div class="empty">אין עדיין משתמשים. הוסף אחד למעלה.</div>';
+    return;
+  }
+  container.innerHTML = tenants.map(t => renderTenant(t)).join('');
+}
+
+function statusBadge(s) {
+  const map = {
+    idle: ['⚪', 'idle'],
+    starting: ['🟡', 'מתחיל...'],
+    pairing: ['🔑', 'ממתין לקוד'],
+    authenticated: ['🟡', 'מאומת — טוען'],
+    ready: ['🟢', 'פעיל'],
+    error: ['🔴', 'שגיאה'],
+  };
+  const [icon, label] = map[s] || ['⚪', s];
+  return `<span class="status status-${s}">${icon} ${label}</span>`;
+}
+
+function renderTenant(t) {
+  const name = t.config?.botName || '(בלי שם)';
+  const owner = t.config?.firstName ? `· ${t.config.firstName}` : '';
+  const codeBlock = t.pairingCode
+    ? `<div class="pair-code"><label>🔑 קוד פעיל:</label><code>${t.pairingCode}</code><button class="copy" onclick="navigator.clipboard.writeText('${t.pairingCode}')">העתק</button></div>`
+    : '';
+  const err = t.lastError ? `<div class="error-line">⚠️ ${escapeHtml(t.lastError)}</div>` : '';
+  const googleStatus = t.config?.googleConnected
+    ? `<span class="ok">✓ Google מחובר</span>`
+    : `<a href="/oauth/start/${t.id}" target="_blank" class="link">חבר Google</a>`;
+  return `
+    <div class="tenant" data-id="${t.id}">
+      <div class="t-head">
+        <div class="t-name">🤖 ${escapeHtml(name)} <span class="t-phone">${escapeHtml(t.phone || '')}</span> ${owner ? `<span class="t-owner">${escapeHtml(owner)}</span>` : ''}</div>
+        ${statusBadge(t.status)}
+      </div>
+      ${codeBlock}
+      ${err}
+      <div class="t-meta">
+        ${googleStatus}
+        <span class="muted">·</span>
+        <span class="muted">היסטוריה: ${t.historyCount || 0}</span>
+      </div>
+      <div class="t-actions">
+        <button class="btn" onclick="restartTenant('${t.id}')">🔄 הפעל מחדש</button>
+        <button class="btn danger" onclick="deleteTenant('${t.id}', '${escapeHtml(name)}')">🗑️ מחק</button>
+      </div>
+    </div>
+  `;
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+document.getElementById('addForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const phone = document.getElementById('phone').value.trim();
+  const out = document.getElementById('addResult');
+  out.innerHTML = '<div class="muted">⏳ מבקש קוד הזדהות מ-WhatsApp...</div>';
+  try {
+    const r = await fetch('/admin/tenants', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone }),
+    });
+    if (!r.ok) { out.innerHTML = `<div class="error-line">❌ ${await r.text()}</div>`; return; }
+    const j = await r.json();
+    out.innerHTML = `<div class="success-line">✅ משתמש נוסף. ה-WhatsApp שלהם צריך לקבל קוד בקרוב — עקוב למטה.</div>`;
+    document.getElementById('phone').value = '';
+    setTimeout(loadTenants, 500);
+  } catch (err) {
+    out.innerHTML = `<div class="error-line">❌ ${err.message}</div>`;
+  }
+});
+
+async function restartTenant(id) {
+  await fetch(`/admin/tenants/${id}/restart`, { method: 'POST' });
+  setTimeout(loadTenants, 500);
+}
+
+async function deleteTenant(id, name) {
+  if (!confirm(`למחוק את "${name}"? פעולה לא הפיכה — כל ההיסטוריה, הסשן והטוקנים יימחקו.`)) return;
+  await fetch(`/admin/tenants/${id}`, { method: 'DELETE' });
+  setTimeout(loadTenants, 500);
+}
+
+// ── SSE: live status updates ──
+let evtSource;
+function connectEvents() {
+  evtSource = new EventSource('/admin/events');
+  evtSource.onmessage = () => loadTenants();
+  evtSource.onerror = () => { setTimeout(connectEvents, 3000); };
+}
+
+loadTenants();
+connectEvents();
+setInterval(loadTenants, 5000);
+</script>
+</body>
+</html>

@@ -11,7 +11,8 @@
  * to navigate.
  */
 
-const config = require('./config');
+// In multi-tenant mode, the tenant's config + saveConfig come from context.
+// Caller passes ctx = { tenant, chat, ... }.
 
 // ── State per session (kept in memory; resets if bot restarts) ──
 const sessions = new Map();  // chatId → { stage, idx }
@@ -161,15 +162,20 @@ function categoryDetails(cfg, n) {
 }
 
 // ── Main entry: returns reply text or null ─────────────────────
-async function maybeHandle(text, _ctx) {
-  const cfg = config.read();
-  if (!cfg) return null;
+async function maybeHandle(text, ctx) {
+  const tenant = ctx?.tenant;
+  if (!tenant) return null;
+  const cfg = tenant.config || {};
+
+  // Tenants without a botName yet — they need name/gender wizard FIRST.
+  if (!cfg.botName || !cfg.userGender) {
+    return await _onboardingWizard(text, tenant);
+  }
 
   const t = text.trim();
 
-  // "תפריט" / "הכרות" / "/help" / "מה אתה יודע" → main menu
+  // "תפריט" / "הכרות" / "/help" → main menu
   if (/^(תפריט|הכרות|\/help|\/menu|menu|help|מה אתה יודע|מה אתה יכול|איך זה עובד)/i.test(t)) {
-    config.write({ ...cfg, firstRunCompleted: false }); // not strictly needed but consistent
     return menuMessage(cfg);
   }
 
@@ -179,21 +185,88 @@ async function maybeHandle(text, _ctx) {
     if (det) return det;
   }
 
-  // "סגור" / "סיים" / "exit" → close menu (silent — just don't intercept)
+  // "סגור" / "סיים" / "exit" → close menu
   if (/^(סגור|סיים|exit|close|done)/i.test(t)) {
-    if (!cfg.firstRunCompleted) {
-      config.write({ ...cfg, firstRunCompleted: true });
-    }
+    if (!cfg.firstRunCompleted) tenant.saveConfig({ firstRunCompleted: true });
     return `סגרתי את התפריט. ${genderWord(cfg, 'תכתוב', 'תכתבי')} כל בקשה רגילה ואני אבין. 😊`;
   }
 
   // First message after install that ISN'T explicit menu — still suggest tour
   if (!cfg.firstRunCompleted && /^(היי|הי|שלום|בוקר טוב|ערב טוב|אהלן|מה קורה)/i.test(t)) {
-    config.write({ ...cfg, firstRunCompleted: true });
+    tenant.saveConfig({ firstRunCompleted: true });
     return `${genderWord(cfg, 'אהלן', 'אהלן')} ${cfg.firstName || ''}! 😊\n\nאני *${cfg.botName}*, ובאתי לעזור. רוצה שאעבור אתך הכרות מהירה? ${genderWord(cfg, 'תכתוב', 'תכתבי')} *"תפריט"*.\nאו תכתוב בקשה רגילה ואני אבין.`.trim();
   }
 
   return null;  // let Claude handle it
+}
+
+// ── First-time onboarding (bot name + gender + firstName) ──────
+// Runs INLINE in the WhatsApp chat — no installer wizard, since the user
+// never touches a computer. Three simple text exchanges:
+//   1. "מה שם שתרצה לתת לי?" → save botName
+//   2. "מתי תרצה שאפנה אליך — זכר/נקבה?" → save userGender
+//   3. "איך לקרוא לך? (השם הפרטי שלך)" → save firstName, finish.
+async function _onboardingWizard(text, tenant) {
+  const cfg = tenant.config || {};
+  const t = (text || '').trim();
+
+  if (!cfg.botName) {
+    // First message → ask for bot name
+    if (!cfg._askedBotName) {
+      tenant.saveConfig({ _askedBotName: true });
+      return [
+        `👋 *ברוכים הבאים!*`,
+        ``,
+        `אני העוזר האישי שלך ב-WhatsApp. לפני שמתחילים, רגע של הכרות.`,
+        ``,
+        `🤖 *איך תרצה לקרוא לי?*`,
+        `שלח שם (לדוגמה: "תומר", "ליה", "מקס").`,
+      ].join('\n');
+    }
+    // Validate the bot name
+    if (t.length < 2 || t.length > 20) return '⚠️ השם חייב להיות 2-20 תווים. נסה שוב.';
+    tenant.saveConfig({ botName: t });
+    return [
+      `✨ נחמד להכיר! אני *${t}*.`,
+      ``,
+      `👤 *איך תרצה שאפנה אליך?* (זה משפיע על איך אני מדבר אליך — לשון זכר/נקבה)`,
+      ``,
+      `שלח: *זכר* או *נקבה*.`,
+    ].join('\n');
+  }
+
+  if (!cfg.userGender) {
+    if (/^(זכר|גבר|m|male)/i.test(t)) {
+      tenant.saveConfig({ userGender: 'male', _askedFirstName: true });
+      return `מעולה אחי! 💪\n\n👋 *מה השם הפרטי שלך?* (כדי שאוכל לפנות אליך באופן אישי)\n\nאו שלח *"דלג"* אם לא רוצה לתת.`;
+    }
+    if (/^(נקבה|אישה|f|female)/i.test(t)) {
+      tenant.saveConfig({ userGender: 'female', _askedFirstName: true });
+      return `מעולה אחותי! 💪\n\n👋 *מה השם הפרטי שלך?* (כדי שאוכל לפנות אלייך באופן אישי)\n\nאו שלחי *"דלג"* אם לא רוצה לתת.`;
+    }
+    return '⚠️ תשובה לא ברורה. שלח *זכר* או *נקבה*.';
+  }
+
+  if (cfg._askedFirstName && !cfg.firstName && !cfg._finishedFirstName) {
+    if (/^(דלג|skip)/i.test(t)) {
+      tenant.saveConfig({ _finishedFirstName: true });
+    } else if (t.length >= 1 && t.length <= 30) {
+      tenant.saveConfig({ firstName: t, _finishedFirstName: true });
+    } else {
+      return '⚠️ השם חייב להיות 1-30 תווים. נסה שוב או שלח "דלג".';
+    }
+    const updated = tenant.config;
+    return [
+      `🎉 *מוכן!*`,
+      ``,
+      `אני *${updated.botName}*, ${updated.firstName ? `נעים מאוד ${updated.firstName}` : 'יאללה מתחילים'}.`,
+      ``,
+      `${genderWord(updated, 'תכתוב', 'תכתבי')} *"תפריט"* כדי שאסביר מה אני יודע לעשות.`,
+      `או פשוט שלח לי בקשה רגילה ואני אבין.`,
+    ].join('\n');
+  }
+
+  return null; // already onboarded — let Claude handle
 }
 
 module.exports = { welcomeMessage, menuMessage, categoryDetails, maybeHandle };

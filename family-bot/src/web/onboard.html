@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Family Bot — הצטרפות</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<div class="app onboard">
+  <header class="hero">
+    <div class="hero-emoji">🤖</div>
+    <h1>ברוכים הבאים ל-Family Bot</h1>
+    <p class="subtitle">העוזר האישי שלך ב-WhatsApp — מבוסס בינה מלאכותית</p>
+  </header>
+
+  <section class="card">
+    <h2>איך זה עובד?</h2>
+    <p>הבוט רץ אצל מנהל המערכת — אתה רק מצמיד אליו את ה-WhatsApp שלך. <strong>אתה לא מתקין כלום במחשב או בטלפון.</strong></p>
+    <ol class="steps">
+      <li>🆔 <strong>זיהוי קצר</strong> — תזין את מספר הטלפון שלך</li>
+      <li>📱 <strong>קוד הזדהות</strong> — מנהל המערכת יקבל קוד 8-תווים וישלח לך אותו</li>
+      <li>🔗 <strong>קישור</strong> — תזין את הקוד ב-WhatsApp שלך (Settings → מכשירים מקושרים → קישור עם מספר טלפון)</li>
+      <li>🎉 <strong>סיימת</strong> — הבוט יישלח לך הודעת ברוכים הבאים ותעבור הכרות בוואטסאפ</li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2>הזן את מספר הטלפון שלך</h2>
+    <p class="muted">המספר ב-WhatsApp שלך, עם קידומת בינלאומית. דוגמה: <code>+9725...</code> או <code>05...</code>.</p>
+    <form id="signupForm" class="row">
+      <input type="tel" id="phone" placeholder="+972" required />
+      <button type="submit" class="btn primary">בקש קוד</button>
+    </form>
+    <div id="status" class="status-box"></div>
+  </section>
+
+  <section class="card" id="afterCard" style="display:none;">
+    <h2>✅ נרשמת!</h2>
+    <p>מנהל המערכת יקבל עכשיו קוד 8-תווים, וישלח לך אותו תוך כמה דקות.</p>
+    <p><strong>איפה להזין את הקוד:</strong></p>
+    <ol class="steps">
+      <li>פתח את <strong>WhatsApp</strong> בטלפון שלך</li>
+      <li>⚙️ <strong>הגדרות</strong> (Settings)</li>
+      <li>📱 <strong>מכשירים מקושרים</strong> (Linked Devices)</li>
+      <li>➕ <strong>קישור מכשיר</strong> (Link a Device)</li>
+      <li>🔢 לחץ על <strong>"קישור באמצעות מספר טלפון"</strong> (Link with phone number) — לא QR!</li>
+      <li>הזן את הקוד שתקבל ממנהל המערכת</li>
+    </ol>
+    <p class="muted">לאחר הקישור — תקבל אוטומטית הודעת ברוכים הבאים מהבוט בצ׳אט הפרטי שלך עם עצמך.</p>
+  </section>
+
+  <footer class="footer">
+    <small>Family Bot — שירות AI אישי בוואטסאפ. כל הצ׳אטים שלך נשארים פרטיים ושייכים לך בלבד.</small>
+  </footer>
+</div>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const phoneParam = params.get('phone');
+if (phoneParam) document.getElementById('phone').value = phoneParam;
+
+document.getElementById('signupForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const phone = document.getElementById('phone').value.trim();
+  const status = document.getElementById('status');
+  status.innerHTML = '<div class="muted">⏳ מבקש קוד...</div>';
+  try {
+    const r = await fetch('/onboard/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone }),
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      status.innerHTML = '<div class="error-line">❌ ' + t + '</div>';
+      return;
+    }
+    status.innerHTML = '<div class="success-line">✅ הבקשה נשלחה!</div>';
+    document.getElementById('afterCard').style.display = 'block';
+    document.getElementById('afterCard').scrollIntoView({ behavior: 'smooth' });
+  } catch (err) {
+    status.innerHTML = '<div class="error-line">❌ ' + err.message + '</div>';
+  }
+});
+</script>
+</body>
+</html>
