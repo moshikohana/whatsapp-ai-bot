@@ -139,10 +139,23 @@ class Tenant {
 
     // ── Auth flow: when the QR is emitted, swap to pairing-code instead ──
     let pairingRequested = false;
+    let pairingFailures = 0;
     this.client.on('qr', async () => {
       // Only request a pairing code once per QR cycle (auto-refreshes every ~20s)
       if (pairingRequested) return;
       pairingRequested = true;
+
+      // ── Wait 3s for the WA Web page to settle after QR appears ──
+      // Without this, requestPairingCode races with the page still
+      // rendering, causing "Target closed" / Execution context destroyed.
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Bail if client died during the wait
+      if (!this.client || this.status === 'idle') {
+        this._log('warn', 'pairing aborted — client closed during wait');
+        return;
+      }
+
       try {
         // requestPairingCode wants the phone number WITHOUT '+' or formatting
         const cleanPhone = this.phone.replace(/[^\d]/g, '');
@@ -151,19 +164,27 @@ class Tenant {
         this._setStatus('pairing');
         this._log('info', `pairing code issued: ${code}`);
         try { this.onPairingCode(code); } catch {}
-        // Reset flag after 30s so next QR cycle re-requests
-        setTimeout(() => { pairingRequested = false; }, 25000);
+        pairingFailures = 0;
+        // Reset flag after 60s so next QR cycle re-requests
+        setTimeout(() => { pairingRequested = false; }, 55000);
       } catch (e) {
-        // Log full error context — wwebjs sometimes throws cryptic single-char
-        // errors ('t' = timeout in WA protocol). Capture all available info.
+        pairingFailures++;
         const errInfo = [
-          e.message,
-          e.name,
-          e.code,
-          e.stack?.split('\n')[0],
+          e.message, e.name, e.code, e.stack?.split('\n')[0],
         ].filter(Boolean).join(' | ');
-        this._log('warn', 'pairing code request failed:', errInfo);
-        pairingRequested = false;
+        this._log('warn', `pairing code request failed (attempt ${pairingFailures}):`, errInfo);
+
+        // After 5 consecutive failures, STOP retrying — the number is
+        // likely rate-limited by WhatsApp. Tell admin to wait + try later.
+        if (pairingFailures >= 5) {
+          this._log('error', 'too many pairing failures — stopping retries (likely WA rate-limit on phone)');
+          this._setStatus('error', { error: 'WhatsApp חוסם ניסיונות (rate-limit). חכה 30-60 דק׳ ונסה שוב.' });
+          try { await this.client.destroy(); } catch {}
+          this.client = null;
+          return;
+        }
+        // Otherwise, allow next QR cycle to try
+        setTimeout(() => { pairingRequested = false; }, 5000);
       }
     });
 
