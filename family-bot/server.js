@@ -58,7 +58,33 @@ const googleOAuth = require('./src/helpers/google-oauth');
 
 const PORT = parseInt(process.env.FAMILY_BOT_PORT || '3001', 10);
 const ADMIN_TOKEN = process.env.FAMILY_BOT_ADMIN_TOKEN || null;
-const PUBLIC_HOST = process.env.FAMILY_BOT_PUBLIC_HOST || `http://localhost:${PORT}`;
+
+// ── Resolve public host ─────────────────────────────────────
+// Priority: explicit env > auto-detected public IP > localhost fallback
+// (Public IP needed for OAuth callback URL — Google rejects localhost from
+// users who aren't on the same machine.)
+let PUBLIC_HOST = process.env.FAMILY_BOT_PUBLIC_HOST || '';
+if (!PUBLIC_HOST) {
+  try {
+    const nets = require('os').networkInterfaces();
+    let pubIp = null;
+    let privIp = null;
+    for (const ifname of Object.keys(nets)) {
+      for (const net of nets[ifname]) {
+        if (net.family !== 'IPv4' || net.internal) continue;
+        const isPrivate = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(net.address);
+        if (!isPrivate && !pubIp) pubIp = net.address;
+        else if (isPrivate && !privIp) privIp = net.address;
+      }
+    }
+    const ip = pubIp || privIp;
+    PUBLIC_HOST = ip ? `http://${ip}:${PORT}` : `http://localhost:${PORT}`;
+  } catch {
+    PUBLIC_HOST = `http://localhost:${PORT}`;
+  }
+}
+// Re-export so child modules (first-run, google-oauth) see the resolved host
+process.env.FAMILY_BOT_PUBLIC_HOST = PUBLIC_HOST;
 
 const manager = new TenantManager();
 const app = express();

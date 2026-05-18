@@ -14,6 +14,8 @@ function buildSystemPrompt(cfg) {
   const botName = cfg.botName || 'הבוט';
   const gender = cfg.userGender || 'male';
   const firstName = cfg.firstName || null;
+  const googleConnected = !!cfg.googleConnected;
+  const googleEmail = cfg.googleEmail || null;
 
   // Gender-aware Hebrew verb forms (a single source of truth for the prompt)
   const G = {
@@ -61,6 +63,12 @@ function buildSystemPrompt(cfg) {
     `- לתזכורות: השתמש ב-reminders (action=add/list/delete).`,
     `- לזיכרון אישי: השתמש ב-memory (action=save/list/delete).`,
     `</tool_use>`,
+    ``,
+    `<integrations>`,
+    googleConnected
+      ? `- *Google Calendar:* ✅ מחובר${googleEmail ? ` (${googleEmail})` : ''}. תוכל להשתמש בכלי calendar באופן רגיל.`
+      : `- *Google Calendar:* 🔴 *לא מחובר עדיין.* אסור לטעון שאתה מחובר. כשהמשתמש מבקש לראות יומן / להוסיף אירוע / לחבר יומן — *אל תשתמש בכלי calendar*. במקום זה, הגב בדיוק כך: "כדי להשתמש ביומן צריך לחבר אותו פעם אחת. שלח *'חבר יומן'* ואשלח קישור." (הקוד יחזיר URL אוטומטית כשהוא יאמר את זה).`,
+    `</integrations>`,
     ``,
     `<confirmation_rules>`,
     `- *פעולות כתיבה ביומן* (הוספה, מחיקה, עדכון): בקש אישור לפני ביצוע — הצג את הפרטים ובקש "כן / לא".`,

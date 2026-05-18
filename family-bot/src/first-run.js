@@ -179,6 +179,16 @@ async function maybeHandle(text, ctx) {
     return menuMessage(cfg);
   }
 
+  // "חבר יומן" / "חיבור יומן" / "google" → return OAuth URL
+  if (/^(חבר(\s+ל)?\s*יומן|חיבור\s+יומן|חבר\s+google|google|gmail|connect\s+calendar)/i.test(t)) {
+    return calendarConnectMessage(tenant);
+  }
+
+  // "הגדרות" / "settings" → status + actions
+  if (/^(הגדרות|הגדרה|settings|ניהול)/i.test(t)) {
+    return settingsMessage(tenant);
+  }
+
   // "1" .. "6" — show category details
   if (/^[1-6]$/.test(t)) {
     const det = categoryDetails(cfg, t);
@@ -269,4 +279,73 @@ async function _onboardingWizard(text, tenant) {
   return null; // already onboarded — let Claude handle
 }
 
-module.exports = { welcomeMessage, menuMessage, categoryDetails, maybeHandle };
+// ── "חבר יומן" → return live OAuth URL for the user to click ──
+function _publicHost() {
+  return process.env.FAMILY_BOT_PUBLIC_HOST ||
+         process.env.FAMILY_BOT_PUBLIC_IP   ||
+         `http://localhost:${process.env.FAMILY_BOT_PORT || 3001}`;
+}
+
+function calendarConnectMessage(tenant) {
+  const cfg = tenant.config || {};
+  if (cfg.googleConnected && cfg.googleEmail) {
+    return [
+      `✅ *Google Calendar כבר מחובר!*`,
+      `📧 חשבון: ${cfg.googleEmail}`,
+      ``,
+      `${genderWord(cfg, 'תוכל', 'תוכלי')} עכשיו לשאול אותי:`,
+      `• "מה יש לי היום?"`,
+      `• "מה בלוז השבוע?"`,
+      `• "תקבע פגישה מחר ב-15:00"`,
+      ``,
+      `_אם תרצה להתחבר לחשבון Google אחר, שלח "נתק יומן" קודם._`,
+    ].join('\n');
+  }
+  if (cfg.googleConnected) {
+    return [
+      `✅ *Google Calendar מחובר!*`,
+      ``,
+      `${genderWord(cfg, 'נסה', 'נסי')}: "מה יש לי היום?"`,
+    ].join('\n');
+  }
+  const host = _publicHost().replace(/\/+$/, '');
+  const url = `${host}/oauth/start/${tenant.id}`;
+  return [
+    `📅 *חיבור Google Calendar*`,
+    ``,
+    `${genderWord(cfg, 'לחץ', 'לחצי')} על הקישור הבא, בחר${cfg.userGender === 'female' ? 'י' : ''} חשבון Google ואשר${cfg.userGender === 'female' ? 'י' : ''} את ההרשאות:`,
+    ``,
+    url,
+    ``,
+    `אחרי האישור — חוזר${cfg.userGender === 'female' ? 'ת' : ''} לכאן ל-WhatsApp ותגיד${cfg.userGender === 'female' ? 'י' : ''} לי משהו כמו *"מה יש לי היום?"*.`,
+    ``,
+    `_הקישור פעיל 10 דקות, החיבור פעם אחת בלבד._`,
+  ].join('\n');
+}
+
+// ── "הגדרות" → status overview + quick links ──
+function settingsMessage(tenant) {
+  const cfg = tenant.config || {};
+  const bot = cfg.botName || 'הבוט';
+  const calStatus = cfg.googleConnected
+    ? `✅ מחובר${cfg.googleEmail ? ` (${cfg.googleEmail})` : ''}`
+    : `🔴 לא מחובר — שלח *"חבר יומן"*`;
+  return [
+    `⚙️ *הגדרות — ${bot}*`,
+    ``,
+    `👤 *פרופיל:*`,
+    `• שם: ${cfg.firstName || '(לא הוגדר)'}`,
+    `• מגדר: ${cfg.userGender === 'female' ? 'נקבה' : 'זכר'}`,
+    `• שם הבוט: ${cfg.botName}`,
+    ``,
+    `🔌 *חיבורים:*`,
+    `• 📅 Google Calendar: ${calStatus}`,
+    ``,
+    `💡 *פקודות שימושיות:*`,
+    `• *"תפריט"* — מה אני יודע לעשות`,
+    `• *"חבר יומן"* — להתחבר ל-Google Calendar`,
+    `• *"מה אתה זוכר עליי?"* — להציג זיכרון אישי`,
+  ].join('\n');
+}
+
+module.exports = { welcomeMessage, menuMessage, categoryDetails, maybeHandle, calendarConnectMessage, settingsMessage };
