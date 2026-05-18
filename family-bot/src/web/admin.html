@@ -147,7 +147,7 @@ async function viewLogs(id, name) {
     <label style="margin-right:10px"><input type="checkbox" id="auto" checked> רענון אוטומטי (3s)</label>
   </div>
   <pre id="logs">טוען...</pre>
-  <script>
+  <` + `script>
     async function load() {
       try {
         const r = await fetch('/admin/tenants/${id}/logs?lines=200');
@@ -158,7 +158,7 @@ async function viewLogs(id, name) {
     }
     load();
     setInterval(() => { if (document.getElementById('auto').checked) load(); }, 3000);
-  </script>
+  </` + `script>
   </body></html>`);
 }
 
