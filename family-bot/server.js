@@ -93,6 +93,23 @@ app.get('/admin/tenants/:id', requireAdmin, (req, res) => {
   res.json(t.toJSON());
 });
 
+// Read this tenant's daily log file (last N lines) for live debugging.
+app.get('/admin/tenants/:id/logs', requireAdmin, (req, res) => {
+  const t = manager.getTenant(req.params.id);
+  if (!t) return res.status(404).send('Tenant not found');
+  try {
+    const fs = require('fs');
+    const today = new Date().toISOString().slice(0, 10);
+    const file = path.join(__dirname, 'logs', `${t.id}-${today}.log`);
+    if (!fs.existsSync(file)) return res.type('text/plain; charset=utf-8').send('(no log file yet for today)');
+    const lines = parseInt(req.query.lines || '100', 10);
+    const data = fs.readFileSync(file, 'utf8').split('\n');
+    res.type('text/plain; charset=utf-8').send(data.slice(-lines).join('\n'));
+  } catch (e) {
+    res.status(500).send('Log read failed: ' + e.message);
+  }
+});
+
 app.post('/admin/tenants', requireAdmin, async (req, res) => {
   try {
     const { phone, botName, firstName, userGender } = req.body || {};

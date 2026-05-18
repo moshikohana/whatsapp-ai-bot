@@ -88,6 +88,7 @@ function renderTenant(t) {
       </div>
       <div class="t-actions">
         <button class="btn" onclick="restartTenant('${t.id}')">🔄 הפעל מחדש</button>
+        <button class="btn" onclick="viewLogs('${t.id}', '${escapeHtml(name)}')">📋 לוגים</button>
         <button class="btn danger" onclick="deleteTenant('${t.id}', '${escapeHtml(name)}')">🗑️ מחק</button>
       </div>
     </div>
@@ -128,6 +129,37 @@ async function deleteTenant(id, name) {
   if (!confirm(`למחוק את "${name}"? פעולה לא הפיכה — כל ההיסטוריה, הסשן והטוקנים יימחקו.`)) return;
   await fetch(`/admin/tenants/${id}`, { method: 'DELETE' });
   setTimeout(loadTenants, 500);
+}
+
+async function viewLogs(id, name) {
+  const w = window.open('', '_blank', 'width=900,height=600');
+  if (!w) { alert('הדפדפן חוסם פתיחת חלונות. אפשר ב-Settings.'); return; }
+  w.document.write(`<!DOCTYPE html><html dir="rtl"><head><meta charset="UTF-8"><title>Logs — ${name}</title><style>
+    body { font-family: 'Consolas', monospace; background:#1a1d20; color:#e3e7ed; padding:14px; margin:0; font-size: 12px; line-height: 1.4; }
+    h2 { margin: 0 0 8px 0; color:#25d366; font-family: sans-serif; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    .toolbar { padding: 8px 0; }
+    button { background:#25d366; color:white; border:0; padding:6px 14px; border-radius:6px; cursor:pointer; }
+  </style></head><body>
+  <h2>📋 Logs — ${name}</h2>
+  <div class="toolbar">
+    <button onclick="location.reload()">🔄 רענן</button>
+    <label style="margin-right:10px"><input type="checkbox" id="auto" checked> רענון אוטומטי (3s)</label>
+  </div>
+  <pre id="logs">טוען...</pre>
+  <script>
+    async function load() {
+      try {
+        const r = await fetch('/admin/tenants/${id}/logs?lines=200');
+        const t = await r.text();
+        document.getElementById('logs').textContent = t || '(ריק)';
+        window.scrollTo(0, document.body.scrollHeight);
+      } catch (e) { document.getElementById('logs').textContent = 'שגיאה: ' + e.message; }
+    }
+    load();
+    setInterval(() => { if (document.getElementById('auto').checked) load(); }, 3000);
+  </script>
+  </body></html>`);
 }
 
 // ── SSE: live status updates ──

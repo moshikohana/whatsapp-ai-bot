@@ -247,18 +247,38 @@ class Tenant {
   }
 
   async _onMessage(msg) {
-    // Self-DM filter: only messages this tenant sent to themselves.
-    // We accept ANY `fromMe===true && from===to` — this catches both legacy
-    // (@c.us=@c.us) and modern (@lid=@lid) WhatsApp ID formats without
-    // needing strict ownerWid match (some sessions never populate client.info).
+    // Diagnostic — log every fromMe message we see (drop after debug)
+    if (msg.fromMe) {
+      this._log('debug', `msg_create: type=${msg.type} from=${(msg.from||'').substring(0,30)} to=${(msg.to||'').substring(0,30)} body=${(msg.body||'').substring(0,40)}`);
+    }
+
     if (!msg.fromMe) return;
-    if (!msg.from || msg.from !== msg.to) return;
     if (typeof msg.body === 'string' && msg.body.includes(BOT_MARKER)) return;
 
-    // Capture ownerWid lazily if we haven't seen it yet — useful for reminders
-    // module and Google OAuth flow which need to message the user.
+    // ── Track all known owner ID aliases (c.us / lid formats) ──
+    // WhatsApp has migrated to LID identifiers — the same user account can
+    // appear as both `123@c.us` and `48129...@lid` in different messages.
+    // We learn these aliases from any from===to self-DM we see.
+    if (!this._ownerIds) this._ownerIds = new Set();
+    if (this.client?.info?.wid?._serialized) this._ownerIds.add(this.client.info.wid._serialized);
+    if (msg.from && msg.from === msg.to) this._ownerIds.add(msg.from);
+
+    const from = msg.from || '';
+    const to = msg.to || '';
+    if (!from || !to) return;
+
+    // Self-DM detection — accept if:
+    //  (a) from === to (both same ID — strict match), OR
+    //  (b) BOTH from and to are known owner aliases (handles hybrid c.us/@lid)
+    const isSelf = (from === to) || (this._ownerIds.has(from) && this._ownerIds.has(to));
+    if (!isSelf) {
+      this._log('debug', `filtered (not self-DM): from=${from.substring(0,25)} to=${to.substring(0,25)} ownerIds=${[...this._ownerIds].map(x=>x.substring(0,15)).join(',')}`);
+      return;
+    }
+
+    // Capture ownerWid for reminders/OAuth flows
     if (!this.ownerWid) {
-      this.ownerWid = msg.from;
+      this.ownerWid = from;
       this._log('info', `lazy ownerWid captured: ${this.ownerWid}`);
     }
 
