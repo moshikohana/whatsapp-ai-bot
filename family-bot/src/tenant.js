@@ -198,6 +198,46 @@ class Tenant {
       this._setStatus('ready');
       this._log('info', `ready! owner: ${this.ownerWid}`);
 
+      // ── Capture ALL owner ID aliases (c.us + @lid forms) ──
+      // Modern WhatsApp Web uses both formats interchangeably. Brother's
+      // self-DM messages had from=c.us / to=@lid — different IDs, same person.
+      // Without learning both aliases, the self-DM filter rejects them.
+      if (!this._ownerIds) this._ownerIds = new Set();
+      try {
+        // 1. Always add the legacy phone-based ID — we KNOW our phone number.
+        //    This guarantees we capture the @c.us form regardless of what
+        //    wwebjs reports in info.wid.
+        const phoneDigits = (this.phone || '').replace(/[^\d]/g, '');
+        if (phoneDigits) this._ownerIds.add(`${phoneDigits}@c.us`);
+
+        // 2. The wid as wwebjs sees it (might be @c.us OR @lid depending on
+        //    when the account was registered with WhatsApp's new protocol).
+        if (this.ownerWid) {
+          this._ownerIds.add(this.ownerWid);
+          // The self-chat (Message Yourself) — its chat.id might be in
+          // the @lid form even when our wid is in @c.us. Save BOTH.
+          try {
+            const chat = await this.client.getChatById(this.ownerWid);
+            if (chat?.id?._serialized) this._ownerIds.add(chat.id._serialized);
+          } catch {}
+        }
+        // 3. Also try the dedicated info.me / info.lid fields if present
+        const me = this.client.info?.me?._serialized;
+        const lid = this.client.info?.lid?._serialized;
+        if (me) this._ownerIds.add(me);
+        if (lid) this._ownerIds.add(lid);
+
+        // 4. Last resort — call getNumberId to map phone → both formats
+        try {
+          const contactId = await this.client.getNumberId(phoneDigits);
+          if (contactId?._serialized) this._ownerIds.add(contactId._serialized);
+        } catch {}
+
+        this._log('info', `owner ID aliases: [${[...this._ownerIds].join(', ')}]`);
+      } catch (e) {
+        this._log('warn', 'alias capture failed:', e.message);
+      }
+
       // First-time welcome (only once per tenant)
       const cfg = this.loadConfig();
       if (cfg && !cfg.firstWelcomeSent && this.ownerWid) {
