@@ -216,11 +216,21 @@ class Tenant {
   }
 
   async _onMessage(msg) {
+    // Self-DM filter: only messages this tenant sent to themselves.
+    // We accept ANY `fromMe===true && from===to` — this catches both legacy
+    // (@c.us=@c.us) and modern (@lid=@lid) WhatsApp ID formats without
+    // needing strict ownerWid match (some sessions never populate client.info).
     if (!msg.fromMe) return;
-    if (!this.ownerWid) return;
-    if (msg.from !== msg.to) return;
-    if (msg.from !== this.ownerWid) return;
+    if (!msg.from || msg.from !== msg.to) return;
     if (typeof msg.body === 'string' && msg.body.includes(BOT_MARKER)) return;
+
+    // Capture ownerWid lazily if we haven't seen it yet — useful for reminders
+    // module and Google OAuth flow which need to message the user.
+    if (!this.ownerWid) {
+      this.ownerWid = msg.from;
+      this._log('info', `lazy ownerWid captured: ${this.ownerWid}`);
+    }
+
     // Dedup
     const _msgId = msg.id?._serialized || '';
     if (this._seenAndMark(_msgId)) return;
