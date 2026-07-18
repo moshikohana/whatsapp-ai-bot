@@ -1,8 +1,16 @@
 diff --git a/node_modules/whatsapp-web.js/src/Client.js b/node_modules/whatsapp-web.js/src/Client.js
-index 6a67629..3e562bd 100644
+index 6a67629..40aeee4 100644
 --- a/node_modules/whatsapp-web.js/src/Client.js
 +++ b/node_modules/whatsapp-web.js/src/Client.js
-@@ -241,13 +241,14 @@ class Client extends EventEmitter {
+@@ -212,6 +212,7 @@ class Client extends EventEmitter {
+         });
+ 
+         await exposeFunctionIfAbsent(this.pupPage, 'onAppStateHasSyncedEvent', async () => {
++          try {
+             const authEventPayload = await this.authStrategy.getAuthEventPayload();
+             /**
+                  * Emitted when authentication is successful
+@@ -241,13 +242,14 @@ class Client extends EventEmitter {
                  }
                  let start = Date.now();
                  let res = false;
@@ -18,3 +26,23 @@ index 6a67629..3e562bd 100644
                      throw 'ready timeout';
                  }
              
+@@ -272,6 +274,10 @@ class Client extends EventEmitter {
+                  */
+             this.emit(Events.READY);
+             this.authStrategy.afterAuthReady();
++          } catch (e) {
++            console.error('whatsapp-web.js: onAppStateHasSyncedEvent crashed (client stuck forever otherwise) - ' + (e && e.stack ? e.stack : e));
++            setTimeout(() => process.exit(1), 500);
++          }
+         });
+         let lastPercent = null;
+         await exposeFunctionIfAbsent(this.pupPage, 'onOfflineProgressUpdateEvent', async (percent) => {
+@@ -756,7 +762,7 @@ class Client extends EventEmitter {
+             window.Store.Msg.on('change:body change:caption', (msg, newBody, prevBody) => { window.onEditMessageEvent(window.WWebJS.getMessageModel(msg), newBody, prevBody); });
+             window.Store.AppState.on('change:state', (_AppState, state) => { window.onAppStateChangedEvent(state); });
+             window.Store.Conn.on('change:battery', (state) => { window.onBatteryStateChangedEvent(state); });
+-            window.Store.Call.on('add', (call) => { window.onIncomingCall(call); });
++            if (window.Store.Call) { window.Store.Call.on('add', (call) => { window.onIncomingCall(call); }); } else { console.error('whatsapp-web.js: window.Store.Call missing - skipping incoming-call listener (WhatsApp removed/renamed this module)'); }
+             window.Store.Chat.on('remove', async (chat) => { window.onRemoveChatEvent(await window.WWebJS.getChatModel(chat)); });
+             window.Store.Chat.on('change:archive', async (chat, currState, prevState) => { window.onArchiveChatEvent(await window.WWebJS.getChatModel(chat), currState, prevState); });
+             window.Store.Msg.on('add', (msg) => { 
