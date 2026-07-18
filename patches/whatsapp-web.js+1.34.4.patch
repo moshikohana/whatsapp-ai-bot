@@ -46,3 +46,47 @@ index 6a67629..40aeee4 100644
              window.Store.Chat.on('remove', async (chat) => { window.onRemoveChatEvent(await window.WWebJS.getChatModel(chat)); });
              window.Store.Chat.on('change:archive', async (chat, currState, prevState) => { window.onArchiveChatEvent(await window.WWebJS.getChatModel(chat), currState, prevState); });
              window.Store.Msg.on('add', (msg) => { 
+diff --git a/node_modules/whatsapp-web.js/src/util/Injected/Store.js b/node_modules/whatsapp-web.js/src/util/Injected/Store.js
+index 3f2c8c2..b92b15f 100644
+--- a/node_modules/whatsapp-web.js/src/util/Injected/Store.js
++++ b/node_modules/whatsapp-web.js/src/util/Injected/Store.js
+@@ -44,6 +44,13 @@ exports.ExposeStore = () => {
+     };
+ 
+     window.Store = Object.assign({}, window.require('WAWebCollections'));
++    // patched: WhatsApp renamed several collection keys inside WAWebCollections
++    // (GroupMetadata -> WAWebGroupMetadataCollection etc.) which broke
++    // getChatModel/attachEventListeners. Alias them back.
++    window.Store.GroupMetadata = window.Store.GroupMetadata || window.Store.WAWebGroupMetadataCollection;
++    window.Store.Call = window.Store.Call || window.Store.WAWebCallCollection;
++    window.Store.NewsletterCollection = window.Store.NewsletterCollection || window.Store.WAWebNewsletterCollection;
++    window.Store.NewsletterMetadataCollection = window.Store.NewsletterMetadataCollection || window.Store.WAWebNewsletterMetadataCollection;
+     window.Store.AppState = window.require('WAWebSocketModel').Socket;
+     window.Store.BlockContact = window.require('WAWebBlockContactAction');
+     window.Store.Conn = window.require('WAWebConnModel').Conn;
+diff --git a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
+index af2a39a..e11e02c 100644
+--- a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
++++ b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
+@@ -655,10 +655,17 @@ exports.LoadUtils = () => {
+ 
+         model.lastMessage = null;
+         if (model.msgs && model.msgs.length) {
+-            const lastMessage = chat.lastReceivedKey
+-                ? window.Store.Msg.get(chat.lastReceivedKey._serialized) || (await window.Store.Msg.getMessagesById([chat.lastReceivedKey._serialized]))?.messages?.[0]
+-                : null;
+-            lastMessage && (model.lastMessage = window.WWebJS.getMessageModel(lastMessage));
++            // patched: WhatsApp changed the lastReceivedKey object shape - it no
++            // longer carries _serialized. Passing undefined into Msg.getMessagesById
++            // hits IndexedDB with no key and throws DataError, which crashed every
++            // getChat/getChatModel call. lastMessage is non-critical, so guard it.
++            try {
++                const lastKeySer = chat.lastReceivedKey && chat.lastReceivedKey._serialized;
++                const lastMessage = lastKeySer
++                    ? window.Store.Msg.get(lastKeySer) || (await window.Store.Msg.getMessagesById([lastKeySer]))?.messages?.[0]
++                    : null;
++                lastMessage && (model.lastMessage = window.WWebJS.getMessageModel(lastMessage));
++            } catch (e) { /* non-critical - leave lastMessage null */ }
+         }
+ 
+         delete model.msgs;
