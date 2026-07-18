@@ -2234,16 +2234,47 @@ async function advanceScanFlow(flow) {
   const poll = sf.buildPoll(flow);
   if (!poll) return;
 
-  await botSend(oc, poll.question);
-  const wPoll = new Poll('בחר:', poll.options.map(o => o.label),
-    { allowMultipleAnswers: !!poll.multiple });
-  const sentMsg = await oc.sendMessage(wPoll);
-  // Save the option mapping (label → id) so the vote handler can resolve
-  // selections by localId (index) or by label without ambiguity.
+  // Text-based menu (was a WhatsApp Poll). WhatsApp's July 2026 update
+  // broke poll-vote ingestion in whatsapp-web.js (the addon table object
+  // gets replaced after sync, erasing the vote interceptor), so votes
+  // never reached the bot and the menu appeared dead. Numbered text
+  // replies are immune to that entire class of breakage.
+  const numbered = poll.options.map((o, i) => `*${i + 1}.* ${o.label}`).join('\n');
+  const hint = poll.multiple
+    ? '\n\n_שלח מספר כדי להוסיף/להסיר מקור. אפשר כמה מספרים בהודעה ("1 3 5"). בסוף שלח "סיים"._'
+    : '\n\n_שלח את מספר האפשרות (למשל: 1)_';
+  await botSend(oc, poll.question + '\n\n' + numbered + hint);
   sf.updateFlow(flow.chatId, {
-    activePollId: sentMsg?.id?._serialized || null,
+    activePollId: null,
     lastPollOptions: poll.options,  // [{ id, label }]
   });
+}
+
+// ── Shared scan-flow advancement (used by text replies + poll votes) ──
+// Takes the resolved option ID and moves the flow forward, handling all
+// terminal states. Returns true if the selection was consumed.
+async function handleScanFlowSelection(f, selectedId) {
+  const sf = require('./src/scan-flow');
+  const oc = await client.getChatById(OWNER_ID);
+  const result = sf.applyVote(f, selectedId);
+  if (result.error) { await botSend(oc, `⚠️ ${result.error}`); await advanceScanFlow(f); return true; }
+  if (result.cancel) { sf.endFlow(f.chatId); await botSend(oc, '❌ סריקה בוטלה.'); return true; }
+  if (result.restart) {
+    sf.endFlow(f.chatId);
+    const fresh = sf.startFlow(f.chatId);
+    await advanceScanFlow(fresh);
+    return true;
+  }
+  if (result.execute) {
+    const params = result.params;
+    if (f.confirmedSources) params.confirmedSources = f.confirmedSources;
+    if (f.usedPresetName) params.usedPresetName = f.usedPresetName;
+    sf.endFlow(f.chatId);
+    await executeScan(params);
+    return true;
+  }
+  if (result.ok) { await advanceScanFlow(f); return true; }
+  return true;
 }
 
 // Fetch available items for the scope-select step.
@@ -2713,29 +2744,7 @@ client.on('vote_update', async (vote) => {
         const NAV_IDS = ['__next_page__', '__finish__', 'cancel', '__back__'];
         const nav = resolvedAll.find(id => NAV_IDS.includes(id));
         const resolvedSelected = nav || resolvedAll[resolvedAll.length - 1] || selected;
-        const result = sf.applyVote(f, resolvedSelected);
-        if (result.error) { await botSend(oc, `⚠️ ${result.error}`); await advanceScanFlow(f); return; }
-        if (result.cancel) { sf.endFlow(f.chatId); await botSend(oc, '❌ סריקה בוטלה.'); return; }
-        if (result.restart) {
-          sf.endFlow(f.chatId);
-          const fresh = sf.startFlow(f.chatId);
-          await advanceScanFlow(fresh);
-          return;
-        }
-        if (result.execute) {
-          const params = result.params;
-          // Pass through the exact list the user approved so we don't re-fetch
-          // and risk scanning a different list than what was shown on confirm.
-          if (f.confirmedSources) params.confirmedSources = f.confirmedSources;
-          // Remember if the user invoked this via a saved preset — used to
-          // suppress the "save as preset?" prompt at the end of executeScan
-          // (no point saving what's already saved).
-          if (f.usedPresetName) params.usedPresetName = f.usedPresetName;
-          sf.endFlow(f.chatId);
-          await executeScan(params);
-          return;
-        }
-        if (result.ok) { await advanceScanFlow(f); return; }
+        await handleScanFlowSelection(f, resolvedSelected);
         return;
       }
     }
@@ -3335,7 +3344,66 @@ client.on('message_create', async (msg) => {
     // they want. The menu is also explicitly available via "תפריט סריקה".
     {
       const sf = require('./src/scan-flow');
-      if (sf.shouldShowMenu(text) && !sf.getFlow(chatId)) {
+      const activeFlow = sf.getFlow(chatId);
+
+      // ── Text reply to an open menu ─────────────────────────────
+      // The menu is text-based (numbered options). Match the reply to an
+      // option: a number ("2"), several numbers for multi-select ("1 3 5"),
+      // "סיים", "ביטול", or a (partial) option label.
+      if (activeFlow && Array.isArray(activeFlow.lastPollOptions) && activeFlow.lastPollOptions.length) {
+        const opts = activeFlow.lastPollOptions;
+        const t = text.trim();
+        const resolveIds = () => {
+          // Pure numbers (possibly several, space/comma separated)
+          if (/^\d{1,2}([\s,]+\d{1,2})*\.?$/.test(t)) {
+            const ids = t.split(/[\s,]+/).map(n => {
+              const idx = parseInt(n, 10) - 1;
+              return opts[idx] ? opts[idx].id : null;
+            });
+            return ids.every(Boolean) ? ids : null;  // any out-of-range → not a menu reply
+          }
+          if (/^(סיים|סיימתי|finish)\s*!?$/i.test(t)) {
+            return opts.some(o => o.id === '__finish__') ? ['__finish__'] : null;
+          }
+          if (/^(ביטול|בטל|cancel)\s*!?$/i.test(t)) return ['cancel'];
+          if (/^(חזרה|אחורה|back)\s*!?$/i.test(t)) {
+            return opts.some(o => o.id === '__back__') ? ['__back__'] : null;
+          }
+          // Exact/partial label match (normalized) — must be unique
+          const nt = normalizeHe(t);
+          if (!nt) return null;
+          const matches = opts.filter(o => normalizeHe(o.label).includes(nt));
+          return matches.length === 1 ? [matches[0].id] : null;
+        };
+        const ids = resolveIds();
+        if (ids) {
+          // Apply all but the last selection silently (multi-select toggles),
+          // then let the last one advance/redraw the menu — avoids sending
+          // the menu once per number in a "1 3 5" batch.
+          for (const id of ids.slice(0, -1)) {
+            const still = sf.getFlow(chatId);
+            if (!still) break;
+            const r = sf.applyVote(still, id);
+            if (r.error) { await botSend(chat, `⚠️ ${r.error}`); }
+          }
+          const still = sf.getFlow(chatId);
+          if (still) await handleScanFlowSelection(still, ids[ids.length - 1]);
+          stats.sent++;
+          return;
+        }
+        // Not a menu reply — if it's a fresh scan request, restart the menu
+        // (previously this fell through to Claude, which hallucinated menus).
+        if (sf.shouldShowMenu(text)) {
+          sf.endFlow(chatId);
+          const flow = sf.startFlow(chatId);
+          await advanceScanFlow(flow);
+          stats.sent++;
+          return;
+        }
+        // Otherwise fall through — normal chat continues alongside an open menu.
+      }
+
+      if (sf.shouldShowMenu(text) && !activeFlow) {
         const flow = sf.startFlow(chatId);
         await advanceScanFlow(flow);
         stats.sent++;
