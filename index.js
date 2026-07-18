@@ -3656,6 +3656,10 @@ client.on('message_create', async (msg) => {
     stats.sent++;
     log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
   } catch (err) {
+    // chatId was declared with `const` inside the try block above, so it's
+    // out of scope here (separate block) — referencing it threw
+    // ReferenceError on every single crash, masking the real error.
+    const chatId = msg?.from || 'unknown';
     // Persist to log file so we can actually diagnose crashes afterwards.
     // Puppeteer page-context errors are often minified single-letter names
     // (e.g. message "r") — dump every own property so a future crash gives
