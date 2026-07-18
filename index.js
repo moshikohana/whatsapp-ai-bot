@@ -2,6 +2,22 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env'), override: true });
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
+
+// ─── Defensive sendSeen bypass ────────────────────────────────────
+// WhatsApp changed something server-side that broke the internal
+// `getLastMsgKeyForAction` helper whatsapp-web.js calls via sendSeen
+// on every outgoing message (sendSeen defaults to true). That crashes
+// the ENTIRE message handler on every single reply — see
+// https://github.com/wwebjs/whatsapp-web.js/issues/127056 — and it
+// reproduces across whatsapp-web.js@latest, main, and 1.34.4 alike,
+// since the break is in WhatsApp's own web client, not the npm
+// package version. We don't need read-receipts, so force
+// sendSeen:false by default (callers can still opt back in explicitly).
+const _origSendMessage = Client.prototype.sendMessage;
+Client.prototype.sendMessage = function (chatId, content, options) {
+  return _origSendMessage.call(this, chatId, content, { sendSeen: false, ...options });
+};
+
 const qrcodeTerminal = require('qrcode-terminal');
 const qrcode = require('qrcode');
 const express = require('express');
@@ -1683,7 +1699,12 @@ client.on('ready', () => {
       }
       logger.info(`✅ Warm-up (${passLabel}) complete — ${sparseGroups.length} sparse groups remain`);
       return sparseGroups;
-    } catch (e) { logger.warn('⚠️ Warm-up failed:', e.message?.substring(0, 60)); return []; }
+    } catch (e) {
+      let eFull = '';
+      try { eFull = JSON.stringify(e, Object.getOwnPropertyNames(e)).substring(0, 500); } catch { eFull = '(not serializable)'; }
+      logger.warn(`⚠️ Warm-up failed: [${e?.name}] ${e?.message} | full: ${eFull}`);
+      return [];
+    }
   };
   setTimeout(async () => {
     const sparse = await _doWarmup('pass 1');
@@ -3635,10 +3656,16 @@ client.on('message_create', async (msg) => {
     stats.sent++;
     log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
   } catch (err) {
-    // Persist to log file so we can actually diagnose crashes afterwards
+    // Persist to log file so we can actually diagnose crashes afterwards.
+    // Puppeteer page-context errors are often minified single-letter names
+    // (e.g. message "r") — dump every own property so a future crash gives
+    // more than just "r: r" to work with.
     const errMsg = err?.message || String(err);
-    const errStack = (err?.stack || '').split('\n').slice(0, 4).join(' | ');
-    logger.error(`❌ Message handler crashed for ${chatId}: ${errMsg} | ${errStack}`);
+    const errName = err?.name || typeof err;
+    let errFull = '';
+    try { errFull = JSON.stringify(err, Object.getOwnPropertyNames(err)).substring(0, 500); } catch { errFull = '(not serializable)'; }
+    const errStack = (err?.stack || '').split('\n').slice(0, 8).join(' | ');
+    logger.error(`❌ Message handler crashed for ${chatId}: [${errName}] ${errMsg} | full: ${errFull} | ${errStack}`);
     console.error('שגיאה:', errMsg);
     // If it's a 400 API error, clear history for this chat to recover
     if (err.status === 400 || (errMsg && errMsg.includes('400'))) {
