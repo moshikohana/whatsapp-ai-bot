@@ -1,0 +1,20 @@
+diff --git a/node_modules/whatsapp-web.js/src/Client.js b/node_modules/whatsapp-web.js/src/Client.js
+index 6a67629..3e562bd 100644
+--- a/node_modules/whatsapp-web.js/src/Client.js
++++ b/node_modules/whatsapp-web.js/src/Client.js
+@@ -241,13 +241,14 @@ class Client extends EventEmitter {
+                 }
+                 let start = Date.now();
+                 let res = false;
+-                while(start > (Date.now() - 30000)){
++                while(start > (Date.now() - 90000)){ // patched: 30s was too short for large sessions
+                     // Check window.Store Injection
+                     res = await this.pupPage.evaluate('window.Store != undefined');
+                     if(res){break;}
+                     await new Promise(r => setTimeout(r, 200));
+                 }
+                 if(!res){
++                    console.error('whatsapp-web.js: window.Store injection timed out after 90s - WhatsApp Web took too long to sync');
+                     throw 'ready timeout';
+                 }
+             
