@@ -1550,6 +1550,9 @@ process.on('unhandledRejection', (reason) => {
 // Pairing code arrives via the 'code' event when PAIR_PHONE is set
 client.on('code', (code) => {
   console.log(`\n🔢 קוד קישור לוואטסאפ: ${code}\n   בטלפון: הגדרות ← מכשירים מקושרים ← קשר מכשיר ← "קשר עם מספר טלפון"\n`);
+  // Pairing mode never sets botStatus='qr', so without this the
+  // stuck-state watchdog kills the process mid-pairing after 12 min.
+  _notConnectedSince = Date.now();
 });
 
 client.on('qr', async (qr) => {
