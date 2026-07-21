@@ -2847,6 +2847,8 @@ function _seenAndMark(msgIdSerialized) {
 }
 
 client.on('message_create', async (msg) => {
+  // Feed the zombie watchdog — any event here proves listeners are alive
+  _lastMsgEventAt = Date.now();
   // 🔍 Early diagnostic log — visible in Railway/cloud logs
   console.log(`📩 msg_create: type=${msg.type} from=${(msg.from||'').substring(0,25)} to=${(msg.to||'').substring(0,25)} fromMe=${msg.fromMe}`);
 
@@ -4428,7 +4430,10 @@ client.on('message', async (msg) => {
   } catch (err) {
     // Silent — don't spam logs for every group photo error
     if (err.message?.includes('not initialized')) return; // models still loading
-    console.error('Photo filter error:', (err.message || '').substring(0, 80));
+    // Page-side errors arrive minified ("r") — log the stack head too so
+    // the failing call site is identifiable.
+    const stackHead = (err.stack || '').split('\n').slice(0, 3).join(' | ');
+    console.error(`Photo filter error: ${err.message || err} | ${stackHead}`);
   }
   }); // closes _queueFace
 });
@@ -5279,6 +5284,15 @@ app.get('/auth/google/callback', async (req, res) => {
 // Checks every 20 min whether the WhatsApp Web page is truly alive.
 // If it becomes unresponsive (page crashed, WebSocket died) we logout
 // and exit so Railway restarts the container with a clean session.
+//
+// Zombie detection: the page-alive probe (window.Store exists) passes
+// even when the event listeners inside the page are dead — the classic
+// "connected but never responds" state this bot suffered for weeks.
+// The reliable signal is EVENT FLOW: this account sits in dozens of
+// active groups/channels, so message_create events arrive near-
+// constantly. If NONE arrived for 45 minutes, the listeners are dead
+// no matter what the probe says — exit for a clean pm2 restart.
+let _lastMsgEventAt = Date.now();
 setInterval(async () => {
   if (botStatus !== 'connected') return;
   try {
@@ -5288,8 +5302,16 @@ setInterval(async () => {
       client.pupPage.evaluate(() => typeof window.Store !== 'undefined'),
       new Promise((_, reject) => setTimeout(() => reject(new Error('watchdog-timeout')), 15000)),
     ]);
-    logger.info(`🔍 Watchdog: page=${pageAlive ? 'alive' : 'dead'}`);
     if (!pageAlive) throw new Error('Store not found');
+
+    const silentMin = Math.round((Date.now() - _lastMsgEventAt) / 60000);
+    logger.info(`🔍 Watchdog: page=alive | last msg event ${silentMin}min ago`);
+    if (silentMin >= 45) {
+      logger.warn(`💀 Watchdog: page alive but ZERO message events for ${silentMin}min — listeners are dead (zombie). Exiting for clean pm2 restart.`);
+      notifyOwnerBotDown('watchdog-zombie', `no events ${silentMin}min`).catch(()=>{});
+      setTimeout(() => process.exit(1), 1500);
+      return;
+    }
   } catch (e) {
     const why = e.message?.substring(0, 60) || 'unknown';
     logger.warn(`⚠️ Watchdog: connection dead (${why}) — trying in-process reconnect`);
