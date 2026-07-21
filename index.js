@@ -1556,6 +1556,18 @@ client.on('ready', () => {
   currentQR = null;
   const info = client.info;
   logger.info(`✅ בוטי מחובר! | ${info.pushname} (+${info.wid.user})`);
+
+  // ── Chrome-death detector ─────────────────────────────────────
+  // Chrome can hard-crash (renderer segfault) leaving this Node process
+  // alive but eventless, stuck at "disconnected" forever — happened
+  // three times on 2026-07-21. The browser 'disconnected' event is the
+  // direct signal; exit so pm2 brings everything back clean.
+  try {
+    client.pupBrowser?.once('disconnected', () => {
+      logger.error('💥 Chrome browser process died — exiting for clean pm2 restart');
+      setTimeout(() => process.exit(1), 1000);
+    });
+  } catch (e) { /* pupBrowser unavailable — stuck-state watchdog still covers us */ }
   io.emit('status', 'connected');
   botName = info.pushname || 'בוטי';
   botPhone = info.wid.user || '';
@@ -5293,6 +5305,26 @@ app.get('/auth/google/callback', async (req, res) => {
 // constantly. If NONE arrived for 45 minutes, the listeners are dead
 // no matter what the probe says — exit for a clean pm2 restart.
 let _lastMsgEventAt = Date.now();
+
+// ── Stuck-state watchdog ────────────────────────────────────────
+// Covers Chrome dying DURING initialization (before 'ready'): the
+// process then sits at 'disconnected'/'authenticated' forever with no
+// QR and no events — the main watchdog skips non-connected states, so
+// nothing recovered it. If we're not connected and not showing a QR
+// for 12+ minutes straight, restart clean.
+let _notConnectedSince = Date.now();
+setInterval(() => {
+  if (botStatus === 'connected' || botStatus === 'qr') {
+    _notConnectedSince = Date.now();
+    return;
+  }
+  const stuckMin = Math.round((Date.now() - _notConnectedSince) / 60000);
+  if (stuckMin >= 12) {
+    logger.error(`💀 Stuck in "${botStatus}" for ${stuckMin}min (no QR either) — exiting for clean pm2 restart`);
+    setTimeout(() => process.exit(1), 1000);
+  }
+}, 60 * 1000);
+
 setInterval(async () => {
   if (botStatus !== 'connected') return;
   try {
