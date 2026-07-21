@@ -1496,6 +1496,10 @@ const client = new Client({
   puppeteer: {
     headless: true,
     executablePath: process.env.CHROMIUM_PATH || undefined,
+    // CHROME_DUMPIO=1 pipes Chrome's own stdout/stderr into pm2 logs —
+    // the only way to see WHY the renderer hard-crashes (segfault dumps
+    // land in crashpad with no readable reason otherwise).
+    dumpio: process.env.CHROME_DUMPIO === '1',
     // Increase CDP protocol timeout for cloud environments (Railway/Render
     // in distant regions like Singapore can be slow under load — 5 min
     // headroom prevents Runtime.callFunctionOn timeouts during warm-up).
