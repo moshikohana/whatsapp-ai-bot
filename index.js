@@ -1486,6 +1486,13 @@ let dailyIdCounter = 1;
 // ─── WhatsApp Client ─────────────────────────────────────────────
 const client = new Client({
   authStrategy: new LocalAuth({ clientId: 'ai-personal-bot', dataPath: path.join(__dirname, '.wwebjs_auth') }),
+  // Phone-number pairing (instead of QR): the library only wires the
+  // pairing-code machinery when this option is present at construction —
+  // calling requestPairingCode() manually without it fails with
+  // "window.onCodeReceivedEvent is not a function".
+  ...(process.env.PAIR_PHONE ? {
+    pairWithPhoneNumber: { phoneNumber: process.env.PAIR_PHONE, showNotification: true },
+  } : {}),
   puppeteer: {
     headless: true,
     executablePath: process.env.CHROMIUM_PATH || undefined,
@@ -1536,26 +1543,14 @@ process.on('unhandledRejection', (reason) => {
   }
 });
 
-let _pairingRequested = false;
+// Pairing code arrives via the 'code' event when PAIR_PHONE is set
+client.on('code', (code) => {
+  console.log(`\n🔢 קוד קישור לוואטסאפ: ${code}\n   בטלפון: הגדרות ← מכשירים מקושרים ← קשר מכשיר ← "קשר עם מספר טלפון"\n`);
+});
+
 client.on('qr', async (qr) => {
   qrcodeTerminal.generate(qr, { small: true });
   console.log('\n📱 סרוק QR בוואטסאפ, או פתח http://localhost:3000\n');
-
-  // ── Phone-number pairing (alternative to QR) ──────────────────
-  // Set PAIR_PHONE=9725XXXXXXXX in .env to get an 8-char pairing code
-  // in the logs instead of scanning. Requested once per boot; the 3s
-  // delay avoids the "requested too early" failure family-bot hit.
-  if (process.env.PAIR_PHONE && !_pairingRequested) {
-    _pairingRequested = true;
-    setTimeout(async () => {
-      try {
-        const code = await client.requestPairingCode(process.env.PAIR_PHONE, true);
-        console.log(`\n🔢 קוד קישור לוואטסאפ: ${code}\n   בטלפון: הגדרות ← מכשירים מקושרים ← קשר מכשיר ← "קשר עם מספר טלפון"\n`);
-      } catch (e) {
-        console.error('Pairing code request failed:', e.message?.substring(0, 80));
-      }
-    }, 3000);
-  }
   currentQR = await qrcode.toDataURL(qr);
   currentQRRaw = qr;
   qrCount += 1;
