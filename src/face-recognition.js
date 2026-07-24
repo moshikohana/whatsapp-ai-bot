@@ -36,24 +36,37 @@ function _isVideoBuffer(buf) {
   return false;
 }
 
+// Extract ONE representative frame (used by addReference etc.)
 async function _extractFrameFromVideo(videoBuffer) {
-  const tmpIn = path.join(os.tmpdir(), `face-vid-${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`);
-  const tmpOut = `${tmpIn}.jpg`;
+  const frames = await _extractFramesFromVideo(videoBuffer, 1);
+  if (!frames.length) throw new Error('ffmpeg extracted no frame from video');
+  return frames[0];
+}
+
+// Extract up to `maxFrames` still frames sampled across a Live Photo/video.
+// A single frame can land on motion blur; sampling several and taking the
+// best face match recovers the quality lost vs an original still.
+async function _extractFramesFromVideo(videoBuffer, maxFrames = 6) {
+  const base = path.join(os.tmpdir(), `face-vid-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const tmpIn = `${base}.mp4`;
+  const pattern = `${base}-%02d.jpg`;
   fs.writeFileSync(tmpIn, videoBuffer);
   try {
     await new Promise((resolve, reject) => {
-      // `thumbnail` picks the most representative frame across the clip —
-      // avoids the motion-blurred lead-in frames of a Live Photo. Analyze
-      // up to 300 frames so it spans the whole short clip.
-      execFile('ffmpeg', ['-y', '-i', tmpIn, '-vf', 'thumbnail=300', '-frames:v', '1', '-q:v', '2', tmpOut],
+      // 3 fps sampling + thumbnail-ish quality; cap frame count. Covers the
+      // whole ~1-3s Live Photo clip with several sharp candidates.
+      execFile('ffmpeg', ['-y', '-i', tmpIn, '-vf', 'fps=3', '-frames:v', String(maxFrames), '-q:v', '2', pattern],
         { timeout: 30000 }, (err) => err ? reject(err) : resolve());
     });
-    const frame = fs.readFileSync(tmpOut);
-    logger.info(`🎞️ Live Photo/video → extracted ${frame.length}B representative frame for face detection`);
-    return frame;
+    const frames = [];
+    for (let i = 1; i <= maxFrames; i++) {
+      const p = `${base}-${String(i).padStart(2, '0')}.jpg`;
+      if (fs.existsSync(p)) { frames.push(fs.readFileSync(p)); try { fs.unlinkSync(p); } catch {} }
+    }
+    logger.info(`🎞️ Live Photo/video → extracted ${frames.length} candidate frame(s) for face detection`);
+    return frames;
   } finally {
     try { fs.unlinkSync(tmpIn); } catch {}
-    try { fs.unlinkSync(tmpOut); } catch {}
   }
 }
 
@@ -220,8 +233,20 @@ async function findMatches(imageBuffer) {
   const config = loadConfig();
   if (!config.enabled || Object.keys(config.referenceDescriptors).length === 0) return [];
 
-  const detections = await detectFaces(imageBuffer);
-  logger.info(`🔎 findMatches: ${detections.length} face(s) detected`);
+  // Video/Live Photo → run detection across several sampled frames and
+  // pool all faces, so the best-quality frame drives the match distance.
+  let detections;
+  if (_isVideoBuffer(imageBuffer)) {
+    const frames = await _extractFramesFromVideo(imageBuffer, 6);
+    detections = [];
+    for (const f of frames) {
+      try { detections.push(...await detectFaces(f)); } catch (e) { /* skip bad frame */ }
+    }
+    logger.info(`🔎 findMatches (video): ${frames.length} frames → ${detections.length} face(s) pooled`);
+  } else {
+    detections = await detectFaces(imageBuffer);
+    logger.info(`🔎 findMatches: ${detections.length} face(s) detected`);
+  }
   if (detections.length === 0) return [];
 
   const matches = [];
