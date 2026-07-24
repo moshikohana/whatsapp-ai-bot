@@ -4461,10 +4461,12 @@ client.on('message', async (msg) => {
   } catch (err) {
     // Silent — don't spam logs for every group photo error
     if (err.message?.includes('not initialized')) return; // models still loading
-    // Page-side errors arrive minified ("r") — log the stack head too so
-    // the failing call site is identifiable.
-    const stackHead = (err.stack || '').split('\n').slice(0, 3).join(' | ');
-    console.error(`Photo filter error: ${err.message || err} | ${stackHead}`);
+    // Page-side errors arrive minified ("r"): dump every own property +
+    // deeper stack so the actual failing WhatsApp Web call is identifiable.
+    let full = '';
+    try { full = JSON.stringify(err, Object.getOwnPropertyNames(err)).substring(0, 400); } catch { full = '(unserializable)'; }
+    const stackHead = (err.stack || '').split('\n').slice(0, 6).join(' | ');
+    console.error(`Photo filter error: [${err?.name}] ${err.message || err} | full=${full} | ${stackHead}`);
   }
   }); // closes _queueFace
 });
