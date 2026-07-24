@@ -226,8 +226,11 @@ async function addReference(name, imageBuffer) {
 // Minimum confidence to actually forward a match to the owner.
 // Without this floor, faces whose distance is JUST below threshold round to
 // 0-15% confidence — the user sees photos with score 0% and asks "why?".
-// 25% means: distance must be ≤ 75% of threshold (clearly inside, not borderline).
-const MIN_FORWARD_CONFIDENCE = 25;
+// 10% floor: Live Photos come through as compressed video frames whose face
+// descriptors sit ~0.1 further from still references, so a genuine match
+// lands close to the threshold. A 25% floor rejected real matches; 10%
+// keeps clear borderline matches while still dropping near-zero noise.
+const MIN_FORWARD_CONFIDENCE = 10;
 
 async function findMatches(imageBuffer) {
   const config = loadConfig();
