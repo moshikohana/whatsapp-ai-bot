@@ -128,15 +128,15 @@ async function initFaceAPI() {
 }
 
 // ─── Convert image buffer → tf.Tensor3D via sharp ──────────────
-// Use 1280px for higher resolution — critical for small faces in group photos.
-async function bufferToTensor(imageBuffer) {
+// `maxDim` caps the long edge. Default 1280 is fine for close-up faces;
+// small faces (e.g. a face inside a phone-screen screenshot) need a
+// bigger canvas so the face stays above the detector's minimum size.
+async function bufferToTensor(imageBuffer, maxDim = 1280) {
   // iPhone Live Photos / videos arrive as MP4 even when tagged "image" —
   // transparently pull a still frame so face detection works on them.
   if (_isVideoBuffer(imageBuffer)) {
     imageBuffer = await _extractFrameFromVideo(imageBuffer);
   }
-  // Diagnostic: log the buffer's magic bytes so we can see what format
-  // actually arrives when sharp rejects it ("unsupported image format").
   const _magic = Buffer.isBuffer(imageBuffer)
     ? imageBuffer.slice(0, 12).toString('hex')
     : `(not a buffer: ${typeof imageBuffer})`;
@@ -144,7 +144,7 @@ async function bufferToTensor(imageBuffer) {
     .rotate() // apply EXIF orientation — iPhone portrait photos are stored
               // rotated with an orientation flag; without this the face comes
               // out sideways and the detector (expects upright faces) misses it
-    .resize(1280, 1280, { fit: 'inside', withoutEnlargement: true })
+    .resize(maxDim, maxDim, { fit: 'inside', withoutEnlargement: true })
     .sharpen({ sigma: 1.2, m1: 0.5, m2: 0.8 }) // enhance edges — helps with blurry distant faces
     .removeAlpha()
     .raw()
@@ -162,21 +162,36 @@ async function bufferToTensor(imageBuffer) {
 const DETECTION_OPTIONS = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3, maxResults: 50 });
 
 // ─── Detect faces in image buffer ───────────────────────────────
+async function _detectAt(imageBuffer, maxDim) {
+  const tensor = await bufferToTensor(imageBuffer, maxDim);
+  try {
+    return await faceapi
+      .detectAllFaces(tensor, DETECTION_OPTIONS)
+      .withFaceLandmarks()
+      .withFaceDescriptors();
+  } finally {
+    tensor.dispose();
+  }
+}
+
 async function detectFaces(imageBuffer) {
   if (!(await initFaceAPI())) {
     throw new Error('Face recognition not initialized: ' + initError);
   }
 
-  const tensor = await bufferToTensor(imageBuffer);
-  try {
-    const detections = await faceapi
-      .detectAllFaces(tensor, DETECTION_OPTIONS)
-      .withFaceLandmarks()
-      .withFaceDescriptors();
-    return detections;
-  } finally {
-    tensor.dispose();
+  // Fast pass at 1280px.
+  let detections = await _detectAt(imageBuffer, 1280);
+  // Nothing found? The face may be small (e.g. a screenshot where the face
+  // occupies a small part of a tall phone-screen frame). Retry once at
+  // 2200px so the face stays above the detector's minimum size.
+  if (detections.length === 0) {
+    const hi = await _detectAt(imageBuffer, 2200);
+    if (hi.length > 0) {
+      logger.info(`🔍 detectFaces: 0 at 1280px, ${hi.length} at 2200px (small/screenshot face)`);
+      detections = hi;
+    }
   }
+  return detections;
 }
 
 // ─── Add reference photo for a person ───────────────────────────
