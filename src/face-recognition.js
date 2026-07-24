@@ -77,12 +77,21 @@ async function initFaceAPI() {
 // ─── Convert image buffer → tf.Tensor3D via sharp ──────────────
 // Use 1280px for higher resolution — critical for small faces in group photos.
 async function bufferToTensor(imageBuffer) {
-  const { data, info } = await sharp(imageBuffer)
+  // Diagnostic: log the buffer's magic bytes so we can see what format
+  // actually arrives when sharp rejects it ("unsupported image format").
+  const _magic = Buffer.isBuffer(imageBuffer)
+    ? imageBuffer.slice(0, 12).toString('hex')
+    : `(not a buffer: ${typeof imageBuffer})`;
+  const { data, info } = await sharp(imageBuffer, { failOn: 'none' })
     .resize(1280, 1280, { fit: 'inside', withoutEnlargement: true })
     .sharpen({ sigma: 1.2, m1: 0.5, m2: 0.8 }) // enhance edges — helps with blurry distant faces
     .removeAlpha()
     .raw()
-    .toBuffer({ resolveWithObject: true });
+    .toBuffer({ resolveWithObject: true })
+    .catch(err => {
+      logger.warn(`bufferToTensor: sharp rejected buffer (len=${imageBuffer?.length}, magic=${_magic}): ${err.message}`);
+      throw err;
+    });
 
   return tf.tensor3d(new Uint8Array(data), [info.height, info.width, 3]);
 }
