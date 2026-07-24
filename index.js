@@ -2949,13 +2949,10 @@ client.on('message_create', async (msg) => {
           if (isOwnerGroup) {
             console.log(`📷 Owner photo in test group "${groupName}" — checking faces...`);
             const media = await safeDownloadMedia(msg);
-            console.log(`   [face] downloadMedia ok: ${!!media?.data}`);
             if (media?.data) {
               const imageBuffer = Buffer.from(media.data, 'base64');
               const matches = await findMatches(imageBuffer);
-              console.log(`   [face] findMatches ok: ${matches.length} match(es)`);
               const ownerChat = await client.getChatById(OWNER_ID);
-              console.log(`   [face] getChatById ok`);
               if (matches.length > 0) {
                 const match = matches[0];
                 const allNames = matches.map(m => `${m.name} (${m.confidence}%)`).join(', ');
@@ -2973,9 +2970,7 @@ client.on('message_create', async (msg) => {
                 // Send to owner DM
                 if (markedBuf) {
                   const mm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'test.jpg');
-                  console.log(`   [face] sending image to owner DM...`);
                   await ownerChat.sendMessage(mm, { caption: baseCaption + hlNote + BOT_MARKER });
-                  console.log(`   [face] image sent to owner DM ok`);
                 } else {
                   await ownerChat.sendMessage(baseCaption + BOT_MARKER);
                 }
