@@ -232,57 +232,28 @@ async function addReference(name, imageBuffer) {
 // keeps clear borderline matches while still dropping near-zero noise.
 const MIN_FORWARD_CONFIDENCE = 10;
 
-async function findMatches(imageBuffer) {
-  const config = loadConfig();
-  if (!config.enabled || Object.keys(config.referenceDescriptors).length === 0) return [];
-
-  // Video/Live Photo → run detection across several sampled frames and
-  // pool all faces, so the best-quality frame drives the match distance.
-  let detections;
-  if (_isVideoBuffer(imageBuffer)) {
-    const frames = await _extractFramesFromVideo(imageBuffer, 6);
-    detections = [];
-    for (const f of frames) {
-      try { detections.push(...await detectFaces(f)); } catch (e) { /* skip bad frame */ }
-    }
-    logger.info(`🔎 findMatches (video): ${frames.length} frames → ${detections.length} face(s) pooled`);
-  } else {
-    detections = await detectFaces(imageBuffer);
-    logger.info(`🔎 findMatches: ${detections.length} face(s) detected`);
-  }
-  if (detections.length === 0) return [];
-
+// Match a set of detected faces against the references.
+// Each face is assigned ONLY to its closest person (winner-takes-the-face)
+// so similar-looking people (e.g. sisters) don't both get reported for the
+// same face. Returns deduped matches sorted best-first.
+function _matchDetections(detections, config) {
   const matches = [];
-
   for (const det of detections) {
-    // A single physical face is ONE person. Compute the distance to every
-    // configured person, then assign this face ONLY to the closest one —
-    // otherwise similar-looking people (e.g. sisters) both get reported for
-    // the same face. Winner-takes-the-face.
     let winner = null; // { name, distance, threshold }
     for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
       if (!descriptors.length) continue;
-
       let bestDistance = Infinity;
       for (const refDesc of descriptors) {
-        const dist = faceapi.euclideanDistance(
-          det.descriptor,
-          new Float32Array(refDesc),
-        );
+        const dist = faceapi.euclideanDistance(det.descriptor, new Float32Array(refDesc));
         if (dist < bestDistance) bestDistance = dist;
       }
-
       const effectiveThreshold = config.perPersonThresholds?.[name] ?? config.threshold;
-      logger.info(`   ↳ face vs "${name}": dist=${bestDistance.toFixed(3)} threshold=${effectiveThreshold} ${bestDistance < effectiveThreshold ? 'PASS' : 'fail'}`);
       if (bestDistance < effectiveThreshold && (!winner || bestDistance < winner.distance)) {
         winner = { name, distance: bestDistance, threshold: effectiveThreshold };
       }
     }
-
     if (winner) {
       const confidence = Math.round(Math.max(0, (1 - winner.distance / winner.threshold) * 100));
-      // Skip borderline matches that round to a low confidence — almost
-      // certainly false positives or low-quality face crops.
       if (confidence >= MIN_FORWARD_CONFIDENCE) {
         matches.push({
           name: winner.name,
@@ -293,17 +264,43 @@ async function findMatches(imageBuffer) {
       }
     }
   }
-
-  // Deduplicate: keep only the best (highest confidence) entry per name
   const deduped = {};
   for (const m of matches) {
-    if (!deduped[m.name] || m.confidence > deduped[m.name].confidence) {
-      deduped[m.name] = m;
-    }
+    if (!deduped[m.name] || m.confidence > deduped[m.name].confidence) deduped[m.name] = m;
+  }
+  return Object.values(deduped).sort((a, b) => b.confidence - a.confidence);
+}
+
+async function findMatches(imageBuffer) {
+  const config = loadConfig();
+  if (!config.enabled || Object.keys(config.referenceDescriptors).length === 0) return [];
+
+  // Still image → single detection pass.
+  if (!_isVideoBuffer(imageBuffer)) {
+    const detections = await detectFaces(imageBuffer);
+    logger.info(`🔎 findMatches: ${detections.length} face(s) detected`);
+    if (detections.length === 0) return [];
+    return _matchDetections(detections, config);
   }
 
-  // Best match first
-  return Object.values(deduped).sort((a, b) => b.confidence - a.confidence);
+  // Video/Live Photo → process frames ONE AT A TIME and stop at the first
+  // frame that yields a match. Detection on pure-JS tfjs is the slow part
+  // (~10-20s/frame), so early-exit turns the common "clear match" case from
+  // ~2 min (all 6 frames) into a few seconds. Only ambiguous / no-match
+  // photos pay for extra frames.
+  const frames = await _extractFramesFromVideo(imageBuffer, 6);
+  for (let i = 0; i < frames.length; i++) {
+    let dets;
+    try { dets = await detectFaces(frames[i]); } catch (e) { continue; }
+    if (!dets.length) continue;
+    const m = _matchDetections(dets, config);
+    if (m.length) {
+      logger.info(`🔎 findMatches (video): matched on frame ${i + 1}/${frames.length} → ${m.map(x => x.name + ' ' + x.confidence + '%').join(', ')}`);
+      return m;
+    }
+  }
+  logger.info(`🔎 findMatches (video): no match across ${frames.length} frames`);
+  return [];
 }
 
 // ─── Blur non-matching faces in image ───────────────────────────
