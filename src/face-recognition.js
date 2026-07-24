@@ -12,10 +12,48 @@ Module._resolveFilename = function (request, parent, isMain, opts) {
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { execFile } = require('child_process');
 const tf = require('@tensorflow/tfjs');
 const sharp = require('sharp');
 const faceapi = require('@vladmandic/face-api/dist/face-api.node.js');
 const logger = require('./logger');
+
+// ─── Live Photo / video → still frame ───────────────────────────
+// iPhone Live Photos (and any video) arrive as MP4/MOV even when
+// WhatsApp tags the message type as "image". Sharp can't read those,
+// so detect the ISO-BMFF/QuickTime container by magic bytes and pull a
+// single representative frame via ffmpeg before face detection.
+function _isVideoBuffer(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return false;
+  // Bytes 4-7 == 'ftyp' → ISO base media (mp4/m4v/mov/heic-seq etc.)
+  if (buf.slice(4, 8).toString('ascii') === 'ftyp') {
+    const brand = buf.slice(8, 12).toString('ascii');
+    // HEIC/HEIF still images also use ftyp — those sharp CAN read, so
+    // only treat known video brands as video.
+    return /^(mp4|mp42|isom|iso2|M4V|qt|avc1|dash)/i.test(brand);
+  }
+  return false;
+}
+
+async function _extractFrameFromVideo(videoBuffer) {
+  const tmpIn = path.join(os.tmpdir(), `face-vid-${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`);
+  const tmpOut = `${tmpIn}.jpg`;
+  fs.writeFileSync(tmpIn, videoBuffer);
+  try {
+    await new Promise((resolve, reject) => {
+      // Grab a frame ~0.5s in (past any black lead-in), scaled sanely.
+      execFile('ffmpeg', ['-y', '-ss', '0.5', '-i', tmpIn, '-frames:v', '1', '-q:v', '2', tmpOut],
+        { timeout: 30000 }, (err) => err ? reject(err) : resolve());
+    });
+    const frame = fs.readFileSync(tmpOut);
+    logger.info(`🎞️ Live Photo/video → extracted ${frame.length}B frame for face detection`);
+    return frame;
+  } finally {
+    try { fs.unlinkSync(tmpIn); } catch {}
+    try { fs.unlinkSync(tmpOut); } catch {}
+  }
+}
 
 const CONFIG_FILE = path.join(__dirname, '..', 'photo-filter-config.json');
 const MODELS_DIR = path.join(__dirname, '..', 'node_modules', '@vladmandic', 'face-api', 'model');
@@ -77,6 +115,11 @@ async function initFaceAPI() {
 // ─── Convert image buffer → tf.Tensor3D via sharp ──────────────
 // Use 1280px for higher resolution — critical for small faces in group photos.
 async function bufferToTensor(imageBuffer) {
+  // iPhone Live Photos / videos arrive as MP4 even when tagged "image" —
+  // transparently pull a still frame so face detection works on them.
+  if (_isVideoBuffer(imageBuffer)) {
+    imageBuffer = await _extractFrameFromVideo(imageBuffer);
+  }
   // Diagnostic: log the buffer's magic bytes so we can see what format
   // actually arrives when sharp rejects it ("unsupported image format").
   const _magic = Buffer.isBuffer(imageBuffer)
