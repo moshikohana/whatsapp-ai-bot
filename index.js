@@ -365,6 +365,38 @@ function normalizeHe(s) {
     .toLowerCase();
 }
 
+// ─── Safe media download — works around wwebjs downloadMedia bug ──
+// After WhatsApp's LID migration, msg.downloadMedia() returns a small,
+// distorted PREVIEW (e.g. 83KB / 942x2048) instead of the full image —
+// face detection then finds 0 faces. We bypass the broken wrapper and
+// decrypt the media directly from the message model in the page, which
+// returns the full-resolution original. Returns { data(base64), mimetype }
+// or null. Falls back to the library method if the direct path fails.
+async function safeDownloadMedia(msg) {
+  const msgId = msg?.id?._serialized;
+  if (!msgId) { try { return await msg.downloadMedia(); } catch { return null; } }
+  try {
+    const result = await client.pupPage.evaluate(async (mid) => {
+      const all = window.Store.Msg.getModelsArray();
+      const m = window.Store.Msg.get(mid) || all.find(x => x.id && x.id._serialized === mid);
+      if (!m || !m.mediaKey || !m.directPath) return null;
+      const mockQpl = { addAnnotations() { return this; }, addPoint() { return this; } };
+      const dec = await window.Store.DownloadManager.downloadAndMaybeDecrypt({
+        directPath: m.directPath, encFilehash: m.encFilehash, filehash: m.filehash,
+        mediaKey: m.mediaKey, mediaKeyTimestamp: m.mediaKeyTimestamp, type: m.type,
+        signal: (new AbortController).signal, downloadQpl: mockQpl,
+      });
+      const data = await window.WWebJS.arrayBufferToBase64Async(dec);
+      return { data, mimetype: m.mimetype || 'image/jpeg' };
+    }, msgId);
+    if (result && result.data) return result;
+  } catch (e) {
+    logger.warn(`safeDownloadMedia direct path failed: ${e.message?.substring(0, 80)}`);
+  }
+  // Fallback to the library method
+  try { return await msg.downloadMedia(); } catch { return null; }
+}
+
 // ─── Safe channel list — works around wwebjs constructor bug ─────
 // whatsapp-web.js v1.34's Channel._patch does `data.channelMetadata.description`
 // without null-checking, so any channel without metadata crashes the whole
@@ -2916,7 +2948,7 @@ client.on('message_create', async (msg) => {
           const isOwnerGroup = ownerGroups.some(g => groupName.includes(g) || g.includes(groupName));
           if (isOwnerGroup) {
             console.log(`📷 Owner photo in test group "${groupName}" — checking faces...`);
-            const media = await msg.downloadMedia();
+            const media = await safeDownloadMedia(msg);
             console.log(`   [face] downloadMedia ok: ${!!media?.data}`);
             if (media?.data) {
               const imageBuffer = Buffer.from(media.data, 'base64');
@@ -3837,7 +3869,7 @@ async function transcribeAudio(audioBuffer, mimetype, fileName) {
 // ─── Voice Handler (Groq Whisper transcription) ────────────────
 async function handleVoice(msg, chatId) {
   try {
-    const media = await msg.downloadMedia();
+    const media = await safeDownloadMedia(msg);
     if (!media || !media.data) return '❌ לא הצלחתי להוריד את ההודעה הקולית';
 
     const audioBuffer = Buffer.from(media.data, 'base64');
@@ -3912,7 +3944,7 @@ ${transcript}
 // ─── Call Recording Handler ─────────────────────────────────────
 async function handleCallRecording(msg, caption, fileName, chatId) {
   try {
-    const media = await msg.downloadMedia();
+    const media = await safeDownloadMedia(msg);
     if (!media || !media.data) return '❌ לא הצלחתי להוריד את ההקלטה';
 
     const audioBuffer = Buffer.from(media.data, 'base64');
@@ -3977,7 +4009,7 @@ async function handleCallRecording(msg, caption, fileName, chatId) {
 // ─── Reference Photo Handler (face recognition) ────────────────
 async function handleReferencePhoto(msg, name) {
   try {
-    const media = await msg.downloadMedia();
+    const media = await safeDownloadMedia(msg);
     if (!media || !media.data) return '❌ לא הצלחתי להוריד את התמונה';
 
     const imageBuffer = Buffer.from(media.data, 'base64');
@@ -4147,7 +4179,7 @@ async function handlePhotoFeedback(feedbackText, photoData, quotedMsgId) {
 // highlightAndBlur: green border on match + blur others
 async function handleFaceTest(msg, withBlur = false, withHighlight = false, highlightAndBlur = false) {
   try {
-    const media = await msg.downloadMedia();
+    const media = await safeDownloadMedia(msg);
     if (!media || !media.data) return '❌ לא הצלחתי להוריד את התמונה';
 
     const imageBuffer = Buffer.from(media.data, 'base64');
@@ -4343,7 +4375,7 @@ client.on('message', async (msg) => {
 
     console.log(`📷 Group photo from "${groupName}" — checking faces...`);
 
-    const media = await msg.downloadMedia();
+    const media = await safeDownloadMedia(msg);
     if (!media || !media.data) return;
 
     const imageBuffer = Buffer.from(media.data, 'base64');
@@ -4482,7 +4514,7 @@ client.on('message', async (msg) => {
 // ─── Image Handler ───────────────────────────────────────────────
 async function handleImage(msg, caption, chatId) {
   try {
-    const media = await msg.downloadMedia();
+    const media = await safeDownloadMedia(msg);
     if (!media || !media.data) return '❌ לא הצלחתי להוריד את התמונה';
 
     const Anthropic = require('@anthropic-ai/sdk');
@@ -4540,7 +4572,7 @@ async function handleImage(msg, caption, chatId) {
 // ─── Document Handler ────────────────────────────────────────────
 async function handleDocument(msg, caption, fileName, chatId) {
   try {
-    const media = await msg.downloadMedia();
+    const media = await safeDownloadMedia(msg);
     if (!media || !media.data) return '❌ לא הצלחתי להוריד את הקובץ';
 
     const buf = Buffer.from(media.data, 'base64');
