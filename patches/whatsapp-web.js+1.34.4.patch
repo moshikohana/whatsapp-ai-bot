@@ -1,5 +1,5 @@
 diff --git a/node_modules/whatsapp-web.js/src/Client.js b/node_modules/whatsapp-web.js/src/Client.js
-index 6a67629..40aeee4 100644
+index 6a67629..b79dab5 100644
 --- a/node_modules/whatsapp-web.js/src/Client.js
 +++ b/node_modules/whatsapp-web.js/src/Client.js
 @@ -212,6 +212,7 @@ class Client extends EventEmitter {
@@ -46,6 +46,219 @@ index 6a67629..40aeee4 100644
              window.Store.Chat.on('remove', async (chat) => { window.onRemoveChatEvent(await window.WWebJS.getChatModel(chat)); });
              window.Store.Chat.on('change:archive', async (chat, currState, prevState) => { window.onArchiveChatEvent(await window.WWebJS.getChatModel(chat), currState, prevState); });
              window.Store.Msg.on('add', (msg) => { 
+@@ -773,54 +779,71 @@ class Client extends EventEmitter {
+             window.Store.Chat.on('change:unreadCount', (chat) => {window.onChatUnreadCountEvent(chat);});
+ 
+             if (window.compareWwebVersions(window.Debug.VERSION, '>=', '2.3000.1014111620')) {
+-                const module = window.Store.AddonReactionTable;
+-                const ogMethod = module.bulkUpsert;
+-                module.bulkUpsert = ((...args) => {
+-                    window.onReaction(args[0].map(reaction => {
+-                        const msgKey = reaction.id;
+-                        const parentMsgKey = reaction.reactionParentKey;
+-                        const timestamp = reaction.reactionTimestamp / 1000;
+-                        const sender = reaction.author ?? reaction.from;
+-                        const senderUserJid = sender._serialized;
+-
+-                        return {...reaction, msgKey, parentMsgKey, senderUserJid, timestamp };
+-                    }));
+-
+-                    return ogMethod(...args);
+-                }).bind(module);
+-
+-                const pollVoteModule = window.Store.AddonPollVoteTable;
+-                const ogPollVoteMethod = pollVoteModule.bulkUpsert;
+-
+-                pollVoteModule.bulkUpsert = (async (...args) => {
+-                    const votes = await Promise.all(args[0].map(async vote => {
+-                        const msgKey = vote.id;
+-                        const parentMsgKey = vote.pollUpdateParentKey;
+-                        const timestamp = vote.t / 1000;
+-                        const sender = vote.author ?? vote.from;
+-                        const senderUserJid = sender._serialized;
+-
+-                        let parentMessage = window.Store.Msg.get(parentMsgKey._serialized);
+-                        if (!parentMessage) {
+-                            const fetched = await window.Store.Msg.getMessagesById([parentMsgKey._serialized]);
+-                            parentMessage = fetched?.messages?.[0] || null;
+-                        }
+-
+-                        return {
+-                            ...vote,
+-                            msgKey,
+-                            sender,
+-                            parentMsgKey,
+-                            senderUserJid,
+-                            timestamp,
+-                            parentMessage
+-                        };
+-                    }));
+-
+-                    window.onPollVoteEvent(votes);
++                // patched: WhatsApp replaces the addon table-mode objects shortly
++                // after initial sync, erasing one-shot wrappers. Install idempotently
++                // and re-check every 30s so reaction/poll-vote events keep flowing.
++                const installAddonHooks = () => {
++                    const module = window.Store.AddonReactionTable;
++                    if (module && typeof module.bulkUpsert === 'function' && !module.bulkUpsert.__wwebjsWrapped) {
++                        const ogMethod = module.bulkUpsert;
++                        const wrappedReaction = ((...args) => {
++                            window.onReaction(args[0].map(reaction => {
++                                const msgKey = reaction.id;
++                                const parentMsgKey = reaction.reactionParentKey;
++                                const timestamp = reaction.reactionTimestamp / 1000;
++                                const sender = reaction.author ?? reaction.from;
++                                const senderUserJid = sender._serialized;
++
++                                return {...reaction, msgKey, parentMsgKey, senderUserJid, timestamp };
++                            }));
++
++                            return ogMethod.apply(module, args);
++                        });
++                        wrappedReaction.__wwebjsWrapped = true;
++                        module.bulkUpsert = wrappedReaction;
++                    }
+ 
+-                    return ogPollVoteMethod.apply(pollVoteModule, args);
+-                }).bind(pollVoteModule);
++                    const pollVoteModule = window.Store.AddonPollVoteTable;
++                    if (pollVoteModule && typeof pollVoteModule.bulkUpsert === 'function' && !pollVoteModule.bulkUpsert.__wwebjsWrapped) {
++                        const ogPollVoteMethod = pollVoteModule.bulkUpsert;
++                        const wrappedPollVote = (async (...args) => {
++                            const votes = await Promise.all(args[0].map(async vote => {
++                                const msgKey = vote.id;
++                                const parentMsgKey = vote.pollUpdateParentKey;
++                                const timestamp = vote.t / 1000;
++                                const sender = vote.author ?? vote.from;
++                                const senderUserJid = sender._serialized;
++
++                                const parentKeySer = parentMsgKey && parentMsgKey._serialized;
++                                let parentMessage = parentKeySer ? window.Store.Msg.get(parentKeySer) : null;
++                                if (!parentMessage && parentKeySer) {
++                                    try {
++                                        const fetched = await window.Store.Msg.getMessagesById([parentKeySer]);
++                                        parentMessage = fetched?.messages?.[0] || null;
++                                    } catch (e) { parentMessage = null; }
++                                }
++
++                                return {
++                                    ...vote,
++                                    msgKey,
++                                    sender,
++                                    parentMsgKey,
++                                    senderUserJid,
++                                    timestamp,
++                                    parentMessage
++                                };
++                            }));
++
++                            window.onPollVoteEvent(votes);
++
++                            return ogPollVoteMethod.apply(pollVoteModule, args);
++                        });
++                        wrappedPollVote.__wwebjsWrapped = true;
++                        pollVoteModule.bulkUpsert = wrappedPollVote;
++                    }
++                };
++                installAddonHooks();
++                setInterval(installAddonHooks, 30000);
+             } else {
+                 const module = window.Store.createOrUpdateReactionsModule;
+                 const ogMethod = module.createOrUpdateReactions;
+diff --git a/node_modules/whatsapp-web.js/src/structures/Message.js b/node_modules/whatsapp-web.js/src/structures/Message.js
+index 0c57775..e220afe 100644
+--- a/node_modules/whatsapp-web.js/src/structures/Message.js
++++ b/node_modules/whatsapp-web.js/src/structures/Message.js
+@@ -311,7 +311,7 @@ class Message extends Base {
+      */
+     async reload() {
+         const newData = await this.client.pupPage.evaluate(async (msgId) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+             if (!msg) return null;
+             return window.WWebJS.getMessageModel(msg);
+         }, this.id._serialized);
+@@ -370,7 +370,7 @@ class Message extends Base {
+         if (!this.hasQuotedMsg) return undefined;
+ 
+         const quotedMsg = await this.client.pupPage.evaluate(async (msgId) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+             const quotedMsg = window.Store.QuotedMsg.getQuotedMsgObj(msg);
+             return window.WWebJS.getMessageModel(quotedMsg);
+         }, this.id._serialized);
+@@ -448,7 +448,7 @@ class Message extends Base {
+         }
+ 
+         const result = await this.client.pupPage.evaluate(async (msgId) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+ 
+             // REUPLOADING mediaStage means the media is expired and the download button is spinning, cannot be downloaded now
+             if (!msg || !msg.mediaData || msg.mediaData.mediaStage === 'REUPLOADING') {
+@@ -508,7 +508,7 @@ class Message extends Base {
+      */
+     async delete(everyone, clearMedia = true) {
+         await this.client.pupPage.evaluate(async (msgId, everyone, clearMedia) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+             const chat = window.Store.Chat.get(msg.id.remote) || (await window.Store.Chat.find(msg.id.remote));
+             
+             const canRevoke =
+@@ -531,7 +531,7 @@ class Message extends Base {
+      */
+     async star() {
+         await this.client.pupPage.evaluate(async (msgId) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+             if (window.Store.MsgActionChecks.canStarMsg(msg)) {
+                 let chat = await window.Store.Chat.find(msg.id.remote);
+                 return window.Store.Cmd.sendStarMsgs(chat, [msg], false);
+@@ -544,7 +544,7 @@ class Message extends Base {
+      */
+     async unstar() {
+         await this.client.pupPage.evaluate(async (msgId) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+             if (window.Store.MsgActionChecks.canStarMsg(msg)) {
+                 let chat = await window.Store.Chat.find(msg.id.remote);
+                 return window.Store.Cmd.sendUnstarMsgs(chat, [msg], false);
+@@ -591,7 +591,7 @@ class Message extends Base {
+      */
+     async getInfo() {
+         const info = await this.client.pupPage.evaluate(async (msgId) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+             if (!msg || !msg.id.fromMe) return null;
+ 
+             return new Promise((resolve) => {
+@@ -625,7 +625,7 @@ class Message extends Base {
+     async getPayment() {
+         if (this.type === MessageTypes.PAYMENT) {
+             const msg = await this.client.pupPage.evaluate(async (msgId) => {
+-                const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++                const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+                 if(!msg) return null;
+                 return msg.serialize();
+             }, this.id._serialized);
+@@ -700,7 +700,7 @@ class Message extends Base {
+             return null;
+         }
+         const messageEdit = await this.client.pupPage.evaluate(async (msgId, message, options) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+             if (!msg) return null;
+ 
+             let canEdit = window.Store.MsgActionChecks.canEditText(msg) || window.Store.MsgActionChecks.canEditCaption(msg);
+@@ -728,7 +728,7 @@ class Message extends Base {
+         }
+ 
+         const edittedEventMsg = await this.client.pupPage.evaluate(async (msgId, editedEventObject) => {
+-            const msg = window.Store.Msg.get(msgId) || (await window.Store.Msg.getMessagesById([msgId]))?.messages?.[0];
++            const msg = window.Store.Msg.get(msgId) || window.Store.Msg.getModelsArray().find(_m => _m.id && _m.id._serialized === msgId) || (msgId ? (await window.Store.Msg.getMessagesById([msgId]).catch(() => null))?.messages?.[0] : null);
+             if (!msg) return null;
+ 
+             const { name, startTimeTs, eventSendOptions } = editedEventObject;
 diff --git a/node_modules/whatsapp-web.js/src/util/Injected/Store.js b/node_modules/whatsapp-web.js/src/util/Injected/Store.js
 index 3f2c8c2..b92b15f 100644
 --- a/node_modules/whatsapp-web.js/src/util/Injected/Store.js
