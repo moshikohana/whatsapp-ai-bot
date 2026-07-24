@@ -221,6 +221,7 @@ async function findMatches(imageBuffer) {
   if (!config.enabled || Object.keys(config.referenceDescriptors).length === 0) return [];
 
   const detections = await detectFaces(imageBuffer);
+  logger.info(`🔎 findMatches: ${detections.length} face(s) detected`);
   if (detections.length === 0) return [];
 
   const matches = [];
@@ -239,6 +240,7 @@ async function findMatches(imageBuffer) {
       }
 
       const effectiveThreshold = config.perPersonThresholds?.[name] ?? config.threshold;
+      logger.info(`   ↳ face vs "${name}": dist=${bestDistance.toFixed(3)} threshold=${effectiveThreshold} ${bestDistance < effectiveThreshold ? 'PASS' : 'fail'}`);
       if (bestDistance < effectiveThreshold) {
         const confidence = Math.round(Math.max(0, (1 - bestDistance / effectiveThreshold) * 100));
         // Skip borderline matches that round to a low confidence — they were
