@@ -42,12 +42,14 @@ async function _extractFrameFromVideo(videoBuffer) {
   fs.writeFileSync(tmpIn, videoBuffer);
   try {
     await new Promise((resolve, reject) => {
-      // Grab a frame ~0.5s in (past any black lead-in), scaled sanely.
-      execFile('ffmpeg', ['-y', '-ss', '0.5', '-i', tmpIn, '-frames:v', '1', '-q:v', '2', tmpOut],
+      // `thumbnail` picks the most representative frame across the clip —
+      // avoids the motion-blurred lead-in frames of a Live Photo. Analyze
+      // up to 300 frames so it spans the whole short clip.
+      execFile('ffmpeg', ['-y', '-i', tmpIn, '-vf', 'thumbnail=300', '-frames:v', '1', '-q:v', '2', tmpOut],
         { timeout: 30000 }, (err) => err ? reject(err) : resolve());
     });
     const frame = fs.readFileSync(tmpOut);
-    logger.info(`🎞️ Live Photo/video → extracted ${frame.length}B frame for face detection`);
+    logger.info(`🎞️ Live Photo/video → extracted ${frame.length}B representative frame for face detection`);
     return frame;
   } finally {
     try { fs.unlinkSync(tmpIn); } catch {}
