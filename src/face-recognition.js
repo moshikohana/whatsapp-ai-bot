@@ -255,6 +255,11 @@ async function findMatches(imageBuffer) {
   const matches = [];
 
   for (const det of detections) {
+    // A single physical face is ONE person. Compute the distance to every
+    // configured person, then assign this face ONLY to the closest one —
+    // otherwise similar-looking people (e.g. sisters) both get reported for
+    // the same face. Winner-takes-the-face.
+    let winner = null; // { name, distance, threshold }
     for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
       if (!descriptors.length) continue;
 
@@ -269,20 +274,21 @@ async function findMatches(imageBuffer) {
 
       const effectiveThreshold = config.perPersonThresholds?.[name] ?? config.threshold;
       logger.info(`   ↳ face vs "${name}": dist=${bestDistance.toFixed(3)} threshold=${effectiveThreshold} ${bestDistance < effectiveThreshold ? 'PASS' : 'fail'}`);
-      if (bestDistance < effectiveThreshold) {
-        const confidence = Math.round(Math.max(0, (1 - bestDistance / effectiveThreshold) * 100));
-        // Skip borderline matches that round to a low confidence — they were
-        // almost certainly false positives or low-quality face crops.
-        if (confidence < MIN_FORWARD_CONFIDENCE) {
-          // (kept for log visibility — debug aid)
-          // console.log(`🚫 Low-confidence match suppressed: ${name} (${confidence}%, dist=${bestDistance.toFixed(3)}/threshold=${effectiveThreshold})`);
-          continue;
-        }
+      if (bestDistance < effectiveThreshold && (!winner || bestDistance < winner.distance)) {
+        winner = { name, distance: bestDistance, threshold: effectiveThreshold };
+      }
+    }
+
+    if (winner) {
+      const confidence = Math.round(Math.max(0, (1 - winner.distance / winner.threshold) * 100));
+      // Skip borderline matches that round to a low confidence — almost
+      // certainly false positives or low-quality face crops.
+      if (confidence >= MIN_FORWARD_CONFIDENCE) {
         matches.push({
-          name,
-          distance: Math.round(bestDistance * 1000) / 1000,
+          name: winner.name,
+          distance: Math.round(winner.distance * 1000) / 1000,
           confidence,
-          threshold: effectiveThreshold,
+          threshold: winner.threshold,
         });
       }
     }
