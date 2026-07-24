@@ -181,9 +181,11 @@ async function addReference(name, imageBuffer) {
   const detections = await detectFaces(imageBuffer);
 
   // Quality guard: reject images that are too dark or overexposed
+  let brightness = null;
   try {
     const imgStats = await sharp(imageBuffer).stats();
-    const brightness = imgStats.channels.reduce((s, c) => s + c.mean, 0) / imgStats.channels.length;
+    brightness = imgStats.channels.reduce((s, c) => s + c.mean, 0) / imgStats.channels.length;
+    logger.info(`📸 addReference "${name}": ${detections.length} face(s), brightness=${brightness.toFixed(0)}, buf=${(imageBuffer.length/1024).toFixed(0)}KB`);
     if (brightness < 30) {
       return { success: false, error: 'התמונה חשוכה מדי — נסה תמונה עם תאורה טובה יותר 💡', facesFound: 0 };
     }
@@ -196,14 +198,27 @@ async function addReference(name, imageBuffer) {
     return { success: false, error: 'לא זוהו פנים בתמונה', facesFound: 0 };
   }
 
-  // If multiple faces detected, reject: storing the wrong face contaminates the reference set
-  // and causes 100% false-positive matches for other children in the photo.
+  // Multiple faces: instead of rejecting outright (annoying for close-up
+  // photos that catch a bit of a bystander), pick the LARGEST face — the
+  // subject you photographed up close is almost always the biggest. Only
+  // block when two faces are similarly large (ambiguous who to store).
+  let chosen = detections[0];
   if (detections.length > 1) {
-    return {
-      success: false,
-      error: `זוהו ${detections.length} פנים בתמונה — אנא שלח תמונה עם פנים של ${name} בלבד`,
-      facesFound: detections.length,
-    };
+    const area = d => (d.detection?.box?.width || 0) * (d.detection?.box?.height || 0);
+    const sorted = [...detections].sort((a, b) => area(b) - area(a));
+    const biggest = area(sorted[0]);
+    const second = area(sorted[1]);
+    // If the second-largest face is ≥70% the size of the largest, it's
+    // ambiguous — refuse rather than risk storing the wrong child.
+    if (second >= biggest * 0.7) {
+      return {
+        success: false,
+        error: `זוהו ${detections.length} פנים בגודל דומה — שלח תמונה שרואים בה בעיקר את ${name}`,
+        facesFound: detections.length,
+      };
+    }
+    chosen = sorted[0];
+    logger.info(`📸 addReference "${name}": ${detections.length} faces, picked largest (${Math.round(biggest)}px² vs ${Math.round(second)}px²)`);
   }
 
   const config = loadConfig();
@@ -211,8 +226,8 @@ async function addReference(name, imageBuffer) {
     config.referenceDescriptors[name] = [];
   }
 
-  // Only add the single detected face's descriptor
-  config.referenceDescriptors[name].push(Array.from(detections[0].descriptor));
+  // Store the chosen (largest / only) face descriptor
+  config.referenceDescriptors[name].push(Array.from(chosen.descriptor));
 
   saveConfig(config);
   return {
