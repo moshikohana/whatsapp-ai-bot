@@ -141,6 +141,9 @@ async function bufferToTensor(imageBuffer) {
     ? imageBuffer.slice(0, 12).toString('hex')
     : `(not a buffer: ${typeof imageBuffer})`;
   const { data, info } = await sharp(imageBuffer, { failOn: 'none' })
+    .rotate() // apply EXIF orientation — iPhone portrait photos are stored
+              // rotated with an orientation flag; without this the face comes
+              // out sideways and the detector (expects upright faces) misses it
     .resize(1280, 1280, { fit: 'inside', withoutEnlargement: true })
     .sharpen({ sigma: 1.2, m1: 0.5, m2: 0.8 }) // enhance edges — helps with blurry distant faces
     .removeAlpha()
