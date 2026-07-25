@@ -2993,11 +2993,14 @@ client.on('message_create', async (msg) => {
                 const time = new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
                 const { MessageMedia } = require('whatsapp-web.js');
                 const baseCaption = `🧪 *בדיקה:* זוהה — *${allNames}*\n📍 ${groupName} · ⏰ ${time}`;
-                // Compute highlight once — reuse for both owner DM and group reply
+                // Compute highlight once — reuse for both owner DM and group reply.
+                // Pass the ALREADY-detected faces + the exact frame findMatches
+                // used, so we don't run a second (slow) detection pass.
                 let markedBuf = null; let hlNote = '';
                 try {
+                  const hlBuffer = matches.frameBuffer || imageBuffer;
                   const { buffer: _b, highlighted, blurred: hlB } =
-                    await highlightMatchingFaces(imageBuffer, { blurOthers: false });
+                    await highlightMatchingFaces(hlBuffer, { blurOthers: false, preDetected: matches.detections });
                   markedBuf = _b;
                   hlNote = ` · 🟢 ${highlighted} זוהה${hlB > 0 ? ` · 🔴 ${hlB} לא זוהה` : ''}`;
                 } catch (hlErr) { /* will send text fallback */ }

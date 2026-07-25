@@ -310,12 +310,16 @@ async function findMatches(imageBuffer) {
   const config = loadConfig();
   if (!config.enabled || Object.keys(config.referenceDescriptors).length === 0) return [];
 
-  // Still image → single detection pass.
+  // Still image → single detection pass. Attach the detections + the exact
+  // image used so callers (highlight/blur) can reuse them instead of running
+  // a second full detection pass (halves per-photo time).
   if (!_isVideoBuffer(imageBuffer)) {
     const detections = await detectFaces(imageBuffer);
     logger.info(`🔎 findMatches: ${detections.length} face(s) detected`);
-    if (detections.length === 0) return [];
-    return _matchDetections(detections, config);
+    if (detections.length === 0) { const e = []; e.detections = []; e.frameBuffer = imageBuffer; return e; }
+    const m = _matchDetections(detections, config);
+    m.detections = detections; m.frameBuffer = imageBuffer;
+    return m;
   }
 
   // Video/Live Photo → process frames ONE AT A TIME and stop at the first
@@ -331,11 +335,12 @@ async function findMatches(imageBuffer) {
     const m = _matchDetections(dets, config);
     if (m.length) {
       logger.info(`🔎 findMatches (video): matched on frame ${i + 1}/${frames.length} → ${m.map(x => x.name + ' ' + x.confidence + '%').join(', ')}`);
+      m.detections = dets; m.frameBuffer = frames[i];
       return m;
     }
   }
   logger.info(`🔎 findMatches (video): no match across ${frames.length} frames`);
-  return [];
+  const e = []; e.detections = []; e.frameBuffer = frames[0] || imageBuffer; return e;
 }
 
 // ─── Blur non-matching faces in image ───────────────────────────
