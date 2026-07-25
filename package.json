@@ -15,6 +15,7 @@
     "@remotion/renderer": "4.0.242",
     "@remotion/transitions": "4.0.242",
     "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow/tfjs-node": "^4.22.0",
     "@vladmandic/face-api": "^1.7.15",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",

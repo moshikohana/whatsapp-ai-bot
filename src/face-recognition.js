@@ -1,23 +1,36 @@
 'use strict';
 
-// ─── Mock tfjs-node → pure JS tfjs (no native deps needed) ─────
-const Module = require('module');
-const origResolve = Module._resolveFilename;
-Module._resolveFilename = function (request, parent, isMain, opts) {
-  if (request === '@tensorflow/tfjs-node') {
-    return origResolve.call(this, '@tensorflow/tfjs', parent, isMain, opts);
-  }
-  return origResolve.call(this, request, parent, isMain, opts);
-};
-
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
-const tf = require('@tensorflow/tfjs');
 const sharp = require('sharp');
-const faceapi = require('@vladmandic/face-api/dist/face-api.node.js');
 const logger = require('./logger');
+
+// ─── TensorFlow backend: prefer NATIVE (tfjs-node) ─────────────
+// tfjs-node uses the native libtensorflow (oneDNN/AVX2) — face detection
+// is ~5-10x faster than pure-JS tfjs. If the native binary can't load
+// (missing on a host, arch mismatch), fall back to pure-JS tfjs via a
+// module shim so the bot never crashes.
+let tf, faceapi;
+let TF_NATIVE = false;
+try {
+  tf = require('@tensorflow/tfjs-node');
+  faceapi = require('@vladmandic/face-api/dist/face-api.node.js');
+  TF_NATIVE = true;
+} catch (e) {
+  logger.warn('⚠️ tfjs-node unavailable — using pure-JS tfjs: ' + (e.message || '').substring(0, 80));
+  const Module = require('module');
+  const origResolve = Module._resolveFilename;
+  Module._resolveFilename = function (request, parent, isMain, opts) {
+    if (request === '@tensorflow/tfjs-node') {
+      return origResolve.call(this, '@tensorflow/tfjs', parent, isMain, opts);
+    }
+    return origResolve.call(this, request, parent, isMain, opts);
+  };
+  tf = require('@tensorflow/tfjs');
+  faceapi = require('@vladmandic/face-api/dist/face-api.node.js');
+}
 
 // ─── Live Photo / video → still frame ───────────────────────────
 // iPhone Live Photos (and any video) arrive as MP4/MOV even when
@@ -110,7 +123,10 @@ async function initFaceAPI() {
   if (initError) return false;
 
   try {
-    await tf.setBackend('cpu');
+    // With native tfjs-node the backend is 'tensorflow' — do NOT force 'cpu'
+    // (that would drop back to the slow pure-JS kernels). Only pin 'cpu' for
+    // the pure-JS fallback.
+    if (!TF_NATIVE) await tf.setBackend('cpu');
     await tf.ready();
 
     await faceapi.nets.ssdMobilenetv1.loadFromDisk(MODELS_DIR);
@@ -118,7 +134,7 @@ async function initFaceAPI() {
     await faceapi.nets.faceRecognitionNet.loadFromDisk(MODELS_DIR);
 
     initialized = true;
-    logger.info('✅ Face recognition models loaded');
+    logger.info(`✅ Face recognition models loaded (backend: ${tf.getBackend()}${TF_NATIVE ? ' — native' : ''})`);
     return true;
   } catch (err) {
     initError = err.message;
