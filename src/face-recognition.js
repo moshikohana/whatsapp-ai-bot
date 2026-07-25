@@ -261,6 +261,29 @@ async function addReference(name, imageBuffer) {
     config.referenceDescriptors[name] = [];
   }
 
+  // ── Contamination guard ───────────────────────────────────────
+  // If this person already has references, make sure the new face actually
+  // resembles them. A face that's far from EVERY existing reference is very
+  // likely the wrong person (e.g. an adult accidentally captured) — storing
+  // it poisons the set and causes false positives. Reject clear outliers.
+  const existing = config.referenceDescriptors[name];
+  if (existing.length >= 2) {
+    const newDesc = chosen.descriptor;
+    let minDist = Infinity;
+    for (const refArr of existing) {
+      const d = faceapi.euclideanDistance(newDesc, new Float32Array(refArr));
+      if (d < minDist) minDist = d;
+    }
+    if (minDist > 0.62) {
+      logger.warn(`📸 addReference "${name}": rejected outlier (min dist ${minDist.toFixed(3)} from existing refs)`);
+      return {
+        success: false,
+        error: `הפנים בתמונה לא דומות ל-${existing.length} הייחוסים הקיימים של *${name}* — נראה שזה אדם אחר. אם זו באמת ${name}, ודא שהתמונה ברורה; אחרת שלח תמונה נכונה 🙏`,
+        facesFound: detections.length,
+      };
+    }
+  }
+
   // Store the chosen (largest / only) face descriptor
   config.referenceDescriptors[name].push(Array.from(chosen.descriptor));
 
