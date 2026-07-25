@@ -201,8 +201,10 @@ async function addReference(name, imageBuffer) {
   // Quality guard: reject images that are too dark or overexposed
   let brightness = null;
   try {
+    const _m = await sharp(imageBuffer).metadata();
     const imgStats = await sharp(imageBuffer).stats();
     brightness = imgStats.channels.reduce((s, c) => s + c.mean, 0) / imgStats.channels.length;
+    logger.info(`📸 addReference "${name}": ${detections.length} face(s) | ${_m.width}x${_m.height} | bright=${brightness.toFixed(0)} | ${(imageBuffer.length/1024).toFixed(0)}KB`);
     if (brightness < 30) {
       return { success: false, error: 'התמונה חשוכה מדי — נסה תמונה עם תאורה טובה יותר 💡', facesFound: 0 };
     }
