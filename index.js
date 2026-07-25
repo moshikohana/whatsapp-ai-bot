@@ -3687,7 +3687,10 @@ client.on('message_create', async (msg) => {
     // scan list. Interpret the owner's next short reply: "כן"/"הכל"/numbers to
     // add, "לא" to decline (with cooldown). Unrelated commands fall through.
     {
-      const gp = pendingGroupSuggest.get(chatId);
+      // Keyed by OWNER_ID (not chatId): this block only runs for owner
+      // self-chat, whose msg.from can be either OWNER_ID or the owner's @lid
+      // depending on message format — OWNER_ID is the one stable key.
+      const gp = pendingGroupSuggest.get(OWNER_ID);
       if (gp && gp.expiresAt > Date.now()) {
         const t = text.trim();
         const isNegative = /^(לא|לא תודה|דלג|skip|no|לא צריך)/i.test(t);
@@ -3697,7 +3700,7 @@ client.on('message_create', async (msg) => {
           st.declined = st.declined || {};
           for (const c of gp.candidates) st.declined[c.name] = Date.now();
           _saveGroupSuggestState(st);
-          pendingGroupSuggest.delete(chatId);
+          pendingGroupSuggest.delete(OWNER_ID);
           await botSend(chat, '👌 לא הוספתי. אשאל שוב אם קבוצה חדשה תהיה פעילה במיוחד.');
           stats.sent++; return;
         }
@@ -3719,7 +3722,7 @@ client.on('message_create', async (msg) => {
             else st.added[c.name] = Date.now(); // already present — mark so we stop re-asking
           }
           _saveGroupSuggestState(st);
-          pendingGroupSuggest.delete(chatId);
+          pendingGroupSuggest.delete(OWNER_ID);
           await botSend(chat,
             added.length
               ? `✅ *נוסף לסריקה היומית:*\n${added.map(n => `• ${n}`).join('\n')}\n\n_יופיע אוטומטית בסריקות וב-סיכום הבוקר._`
@@ -3732,7 +3735,7 @@ client.on('message_create', async (msg) => {
           stats.sent++; return;
         }
         // Looks like a different request — drop the pending state, fall through.
-        pendingGroupSuggest.delete(chatId);
+        pendingGroupSuggest.delete(OWNER_ID);
       }
     }
 
