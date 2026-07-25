@@ -515,6 +515,7 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
     // still got a green box here. Green only for confident matches.
     const _effTh = config.perPersonThresholds?.[matchedName] ?? config.threshold;
     const isMatch = bestDist < _effTh * (1 - MIN_FORWARD_CONFIDENCE / 100);
+    logger.info(`   🖍️ face: closest=${matchedName} dist=${bestDist.toFixed(3)} → ${isMatch ? 'GREEN' : 'skip'}`);
     const box = det.detection.box;
     const pad = Math.round(box.width * scaleX * 0.35);
     const x = Math.max(0, Math.round(box.x * scaleX - pad));
