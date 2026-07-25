@@ -2358,19 +2358,51 @@ async function advanceScanFlow(flow) {
   const poll = sf.buildPoll(flow);
   if (!poll) return;
 
-  // Text-based menu (was a WhatsApp Poll). WhatsApp's July 2026 update
-  // broke poll-vote ingestion in whatsapp-web.js (the addon table object
-  // gets replaced after sync, erasing the vote interceptor), so votes
-  // never reached the bot and the menu appeared dead. Numbered text
-  // replies are immune to that entire class of breakage.
-  const numbered = poll.options.map((o, i) => `*${i + 1}.* ${o.label}`).join('\n');
-  const hint = poll.multiple
-    ? '\n\n_שלח מספר כדי להוסיף/להסיר מקור. אפשר כמה מספרים בהודעה ("1 3 5"). בסוף שלח "סיים"._'
-    : '\n\n_שלח את מספר האפשרות (למשל: 1)_';
-  await botSend(oc, poll.question + '\n\n' + numbered + hint);
+  // ── Hybrid menu: interactive WhatsApp Poll + numbered-text fallback ──
+  // WhatsApp's July 2026 update made poll-vote ingestion in wwebjs flaky
+  // (the addon table object gets replaced after sync, erasing the vote
+  // interceptor — patched to reinstall every 30s but delivery can still
+  // drop). So: send a real tappable Poll for the short steps (nicer UX the
+  // owner asked for), but ALWAYS keep lastPollOptions set so a typed number
+  // still advances the flow if a vote never arrives — the menu is never dead.
+  // The manual 'items' step stays text-only: WhatsApp caps polls at 12
+  // options and that step now pages 20 sources at a time.
+  let activePollId = null;
+  const canPoll = flow.step !== 'items' && poll.options.length <= 12;
+
+  if (canPoll) {
+    try {
+      // Poll question (pollName) is capped ~255 chars. The confirm screen's
+      // question is long (source preview + mode explanation), so send it as
+      // text first and give the poll a short title.
+      let pollTitle = poll.question;
+      if (poll.question.length > 230) {
+        await botSend(oc, poll.question);
+        pollTitle = flow.step === 'confirm' ? '👆 איזה דוח להריץ?' : '👆 בחר אפשרות';
+      }
+      const sent = await oc.sendMessage(new Poll(
+        pollTitle,
+        poll.options.map(o => o.label),
+        { allowMultipleAnswers: !!poll.multiple }
+      ));
+      activePollId = sent?.id?._serialized || null;
+    } catch (e) {
+      logger.warn('scan poll send failed → text menu: ' + (e.message || '').substring(0, 60));
+    }
+  }
+
+  if (!activePollId) {
+    // Text menu — items step, >12 options, or poll send failed.
+    const numbered = poll.options.map((o, i) => `*${i + 1}.* ${o.label}`).join('\n');
+    const hint = poll.multiple
+      ? '\n\n_שלח מספר כדי להוסיף/להסיר מקור. אפשר כמה מספרים בהודעה ("1 3 5"). בסוף שלח "סיים"._'
+      : '\n\n_שלח את מספר האפשרות (למשל: 1)_';
+    await botSend(oc, poll.question + '\n\n' + numbered + hint);
+  }
+
   sf.updateFlow(flow.chatId, {
-    activePollId: null,
-    lastPollOptions: poll.options,  // [{ id, label }]
+    activePollId,                   // set → vote_update can match; null → text-only
+    lastPollOptions: poll.options,  // [{ id, label }] — powers the typed-number fallback
   });
 }
 
