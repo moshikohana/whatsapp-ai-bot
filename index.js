@@ -2986,14 +2986,10 @@ client.on('message_create', async (msg) => {
                   markedBuf = _b;
                   hlNote = ` · 🟢 ${highlighted} זוהה${hlB > 0 ? ` · 🔴 ${hlB} לא זוהה` : ''}`;
                 } catch (hlErr) { /* will send text fallback */ }
-                // Send to owner DM
-                if (markedBuf) {
-                  const mm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'test.jpg');
-                  await ownerChat.sendMessage(mm, { caption: baseCaption + hlNote + BOT_MARKER });
-                } else {
-                  await ownerChat.sendMessage(baseCaption + BOT_MARKER);
-                }
-                // Reply directly to the photo in the group (test group only)
+                // Reply directly to the photo in the group FIRST (this is what
+                // the user watches for). Best-effort — wwwebjs sendMessage can
+                // intermittently throw "getChat undefined" on LID chats; don't
+                // let one failed send abort the whole response.
                 try {
                   if (markedBuf) {
                     const gm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'result.jpg');
@@ -3001,7 +2997,16 @@ client.on('message_create', async (msg) => {
                   } else {
                     await msg.reply(`🟢 זוהה: *${allNames}*` + BOT_MARKER);
                   }
-                } catch (e) { /* silent */ }
+                } catch (e) { console.warn(`face group-reply failed: ${e.message?.substring(0, 60)}`); }
+                // Then notify owner DM — also best-effort.
+                try {
+                  if (markedBuf) {
+                    const mm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'test.jpg');
+                    await ownerChat.sendMessage(mm, { caption: baseCaption + hlNote + BOT_MARKER });
+                  } else {
+                    await ownerChat.sendMessage(baseCaption + BOT_MARKER);
+                  }
+                } catch (e) { console.warn(`face owner-DM send failed: ${e.message?.substring(0, 60)}`); }
                 console.log(`🎀 Test match: ${allNames} in "${groupName}"`);
               } else {
                 console.log(`📷 No match in owner test photo from "${groupName}"`);
