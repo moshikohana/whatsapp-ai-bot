@@ -211,7 +211,7 @@ async function detectFaces(imageBuffer) {
 }
 
 // ─── Add reference photo for a person ───────────────────────────
-async function addReference(name, imageBuffer) {
+async function addReference(name, imageBuffer, { force = false } = {}) {
   const detections = await detectFaces(imageBuffer);
 
   // Quality guard: reject images that are too dark or overexposed
@@ -267,19 +267,33 @@ async function addReference(name, imageBuffer) {
   // likely the wrong person (e.g. an adult accidentally captured) — storing
   // it poisons the set and causes false positives. Reject clear outliers.
   const existing = config.referenceDescriptors[name];
-  if (existing.length >= 2) {
+  if (existing.length >= 2 && !force) {
     const newDesc = chosen.descriptor;
     let minDist = Infinity;
     for (const refArr of existing) {
       const d = faceapi.euclideanDistance(newDesc, new Float32Array(refArr));
       if (d < minDist) minDist = d;
     }
-    if (minDist > 0.62) {
-      logger.warn(`📸 addReference "${name}": rejected outlier (min dist ${minDist.toFixed(3)} from existing refs)`);
+    // Only hard-reject CLEAR outliers (a different person sits ~0.75+ away).
+    // The 0.62–0.75 band can be the same child in a very different photo
+    // (age/angle/expression), so let it through with the "!" override.
+    if (minDist > 0.75) {
+      logger.warn(`📸 addReference "${name}": rejected outlier (min dist ${minDist.toFixed(3)})`);
       return {
         success: false,
-        error: `הפנים בתמונה לא דומות ל-${existing.length} הייחוסים הקיימים של *${name}* — נראה שזה אדם אחר. אם זו באמת ${name}, ודא שהתמונה ברורה; אחרת שלח תמונה נכונה 🙏`,
+        error: `הפנים בתמונה רחוקות מאוד מ-${existing.length} הייחוסים הקיימים של *${name}* — כנראה אדם אחר. אם זו באמת ${name}, שלח עם כיתוב "ייחוס ${name}!" (עם סימן קריאה) כדי לאלץ 🙏`,
         facesFound: detections.length,
+      };
+    }
+    if (minDist > 0.55) {
+      logger.info(`📸 addReference "${name}": borderline (min dist ${minDist.toFixed(3)}) — added with note`);
+      config.referenceDescriptors[name].push(Array.from(chosen.descriptor));
+      saveConfig(config);
+      return {
+        success: true,
+        facesAdded: 1,
+        totalReferences: config.referenceDescriptors[name].length,
+        note: `⚠️ התמונה נראית קצת שונה מהייחוסים הקיימים של ${name} (מרחק ${minDist.toFixed(2)}). אם הזיהוי יתחיל לטעות, אפשר למחוק אותה.`,
       };
     }
   }

@@ -3318,15 +3318,19 @@ client.on('message_create', async (msg) => {
       const activeBatchRef = batchRef && batchRef.expiresAt > Date.now() ? batchRef : null;
 
       if (refMatch || activeBatchRef) {
-        const refName = refMatch ? refMatch[1].trim() : activeBatchRef.name;
-        // Update/extend the batch context
-        recentRefContext.set(chatId, { name: refName, expiresAt: Date.now() + 8000 });
-        console.log(`📨 [${ts()}] 📸 תמונת ייחוס: ${refName}`);
+        let refName = refMatch ? refMatch[1].trim() : activeBatchRef.name;
+        // A trailing "!" forces the add past the contamination guard
+        // (user is certain it's the right person despite a different look).
+        const force = /!\s*$/.test(refName) || !!activeBatchRef?.force;
+        refName = refName.replace(/\s*!+\s*$/, '').trim();
+        // Update/extend the batch context (carry the force flag through a batch)
+        recentRefContext.set(chatId, { name: refName, force, expiresAt: Date.now() + 8000 });
+        console.log(`📨 [${ts()}] 📸 תמונת ייחוס: ${refName}${force ? ' (force)' : ''}`);
         stats.received++;
         log({ time: ts(), from: 'מושיקו', text: `📸 ייחוס ${refName}`, direction: 'in' });
         const chat = await msg.getChat();
         await chat.sendMessage('📸 _שומר תמונת ייחוס..._' + BOT_MARKER);
-        const response = await handleReferencePhoto(msg, refName);
+        const response = await handleReferencePhoto(msg, refName, force);
         await botSend(chat, response);
         stats.sent++;
         log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
@@ -4091,19 +4095,21 @@ async function handleCallRecording(msg, caption, fileName, chatId) {
 }
 
 // ─── Reference Photo Handler (face recognition) ────────────────
-async function handleReferencePhoto(msg, name) {
+async function handleReferencePhoto(msg, name, force = false) {
   try {
     const media = await safeDownloadMedia(msg);
     if (!media || !media.data) return '❌ לא הצלחתי להוריד את התמונה';
 
     const imageBuffer = Buffer.from(media.data, 'base64');
-    console.log(`📸 Adding reference for "${name}" (${(imageBuffer.length / 1024).toFixed(0)}KB)`);
+    console.log(`📸 Adding reference for "${name}" (${(imageBuffer.length / 1024).toFixed(0)}KB)${force ? ' [force]' : ''}`);
 
-    const result = await addReference(name, imageBuffer);
+    const result = await addReference(name, imageBuffer, { force });
 
     if (!result.success) {
-      return `❌ ${result.error}\nנסה תמונה אחרת שרואים בה את הפנים בבירור 🙏`;
+      return `❌ ${result.error}`;
     }
+
+    const noteLine = result.note ? `\n${result.note}` : '';
 
     const tips = result.totalReferences < 3
       ? `\n💡 _לדיוק טוב — שלח עוד ${3 - result.totalReferences} תמונות מזוויות שונות עם כיתוב "ייחוס ${name}"_`
@@ -4118,7 +4124,7 @@ async function handleReferencePhoto(msg, name) {
 
     return `✅ *תמונת ייחוס נוספה ל-${name}!*\n` +
       `👤 פנים שנשמרו: ${result.facesAdded} | 📊 סה"כ: ${result.totalReferences}` +
-      tips + nextSteps;
+      noteLine + tips + nextSteps;
   } catch (err) {
     console.error('Reference photo error:', err.message);
     return '❌ שגיאה בעיבוד תמונת ייחוס: ' + err.message.substring(0, 80);
