@@ -463,7 +463,7 @@ async function blurNonMatchingFaces(imageBuffer, preDetected = null) {
 }
 
 // ─── Highlight matching faces (draw colored border around them) ──
-async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDetected = null } = {}) {
+async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDetected = null, matchedOnly = false } = {}) {
   const config = loadConfig();
   const detections = preDetected || await detectFaces(imageBuffer);
   if (detections.length === 0) return { buffer: imageBuffer, highlighted: 0, blurred: 0, matched: 0 };
@@ -516,8 +516,10 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
     } catch {}
   }
 
-  // Blur OR red border for unmatched faces
-  for (const { x, y, w, h } of unmatchedBoxes) {
+  // Blur OR red border for unmatched faces — unless matchedOnly, in which
+  // case we leave unrecognized faces (e.g. an adult next to the child)
+  // completely untouched and only mark the recognized person.
+  for (const { x, y, w, h } of (matchedOnly ? [] : unmatchedBoxes)) {
     if (w <= 4 || h <= 4) continue;
     try {
       if (blurOthers) {

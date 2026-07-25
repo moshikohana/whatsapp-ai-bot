@@ -3042,7 +3042,7 @@ client.on('message_create', async (msg) => {
                 try {
                   const hlBuffer = matches.frameBuffer || imageBuffer;
                   const { buffer: _b, highlighted, blurred: hlB } =
-                    await highlightMatchingFaces(hlBuffer, { blurOthers: false, preDetected: matches.detections });
+                    await highlightMatchingFaces(hlBuffer, { blurOthers: false, preDetected: matches.detections, matchedOnly: true });
                   markedBuf = _b;
                   hlNote = ` · 🟢 ${highlighted} זוהה${hlB > 0 ? ` · 🔴 ${hlB} לא זוהה` : ''}`;
                 } catch (hlErr) { /* will send text fallback */ }
@@ -4221,7 +4221,7 @@ async function handlePhotoFeedback(feedbackText, photoData, quotedMsgId) {
       // Person was blurred — send highlighted version so they can see who was found
       const ownerChat = await client.getChatById(OWNER_ID);
       try {
-        const { buffer: markedBuf } = await highlightMatchingFaces(imageBuffer, { blurOthers: false });
+        const { buffer: markedBuf } = await highlightMatchingFaces(imageBuffer, { blurOthers: false, matchedOnly: true });
         const markedMedia = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'fixed.jpg');
         await ownerChat.sendMessage(markedMedia, {
           caption: `🟢 *תיקון:* סימון פנים ללא טשטוש — ${name} מסומן בירוק` + BOT_MARKER,
@@ -4567,7 +4567,7 @@ client.on('message', async (msg) => {
       if (isTestGrp) {
         try {
           const { MessageMedia: MMA } = require('whatsapp-web.js');
-          const { buffer: grpBuf } = await highlightMatchingFaces(imageBuffer, { blurOthers: false });
+          const { buffer: grpBuf } = await highlightMatchingFaces(imageBuffer, { blurOthers: false, matchedOnly: true });
           const grpMedia = new MMA('image/jpeg', grpBuf.toString('base64'), 'result.jpg');
           const allNames = matches.map(m => `*${m.name}* (${m.confidence}%)`).join(', ');
           await msg.reply(grpMedia, null, { caption: `🟢 זוהה: ${allNames}` + BOT_MARKER });
