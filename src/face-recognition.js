@@ -486,7 +486,12 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
         if (dist < bestDist) { bestDist = dist; matchedName = name; }
       }
     }
-    const isMatch = bestDist < config.threshold;
+    // Use the SAME criterion as findMatches — not just distance < threshold,
+    // but distance inside the MIN_FORWARD_CONFIDENCE band — otherwise a face
+    // that findMatches rejected as too-borderline (e.g. an adult at ~0.42)
+    // still got a green box here. Green only for confident matches.
+    const _effTh = config.perPersonThresholds?.[matchedName] ?? config.threshold;
+    const isMatch = bestDist < _effTh * (1 - MIN_FORWARD_CONFIDENCE / 100);
     const box = det.detection.box;
     const pad = Math.round(box.width * scaleX * 0.35);
     const x = Math.max(0, Math.round(box.x * scaleX - pad));
