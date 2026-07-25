@@ -90,7 +90,8 @@ async function fetchAllEvents(timeMin, timeMax, maxPerCal = 250, maxPagesPerCal 
   const calList = await calendar.calendarList.list();
   const calendars = (calList.data.items || []).filter(c => c.selected !== false);
 
-  console.log(`📅 Fetching from ${calendars.length} calendars: ${calendars.map(c => c.summary).join(', ')}`);
+  // (was a per-fetch console.log of the full calendar list — removed; it
+  // flooded the logs since interview/travel checks poll every 5 min.)
 
   // Helper: fetch ALL pages for a single calendar
   async function fetchAllPagesForCalendar(cal) {
