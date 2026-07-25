@@ -374,11 +374,17 @@ function normalizeHe(s) {
 // or null. Falls back to the library method if the direct path fails.
 async function safeDownloadMedia(msg) {
   const msgId = msg?.id?._serialized;
-  if (!msgId) { try { return await msg.downloadMedia(); } catch { return null; } }
+  // The unique message hash (e.g. AC094A1E...). In self-chats the page-side
+  // message has NO _serialized, so matching on it fails — id.id is stable on
+  // both sides and is the reliable key.
+  const msgIdId = msg?.id?.id;
+  if (!msgId && !msgIdId) { try { return await msg.downloadMedia(); } catch { return null; } }
   try {
-    const result = await client.pupPage.evaluate(async (mid) => {
+    const result = await client.pupPage.evaluate(async ({ mid, midid }) => {
       const all = window.Store.Msg.getModelsArray();
-      const m = window.Store.Msg.get(mid) || all.find(x => x.id && x.id._serialized === mid);
+      const m = (mid && window.Store.Msg.get(mid))
+        || (midid && all.find(x => x.id && x.id.id === midid))
+        || (mid && all.find(x => x.id && x.id._serialized === mid));
       if (!m || !m.mediaData) return null;
       // Media may still be uploading/unresolved (esp. for a photo the owner
       // JUST sent — a race that made reference-add fail with "couldn't
@@ -397,7 +403,7 @@ async function safeDownloadMedia(msg) {
       });
       const data = await window.WWebJS.arrayBufferToBase64Async(dec);
       return { data, mimetype: m.mimetype || 'image/jpeg' };
-    }, msgId);
+    }, { mid: msgId, midid: msgIdId });
     if (result && result.data) return result;
   } catch (e) {
     logger.warn(`safeDownloadMedia direct path failed: ${e.message?.substring(0, 80)}`);
