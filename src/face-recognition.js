@@ -260,11 +260,12 @@ async function addReference(name, imageBuffer) {
 // Minimum confidence to actually forward a match to the owner.
 // Without this floor, faces whose distance is JUST below threshold round to
 // 0-15% confidence — the user sees photos with score 0% and asks "why?".
-// 10% floor: Live Photos come through as compressed video frames whose face
-// descriptors sit ~0.1 further from still references, so a genuine match
-// lands close to the threshold. A 25% floor rejected real matches; 10%
-// keeps clear borderline matches while still dropping near-zero noise.
-const MIN_FORWARD_CONFIDENCE = 10;
+// 25% floor (distance ≤ 0.75×threshold): with a CLEAN reference set + strict
+// threshold (0.43), a genuine match lands well inside, so borderline hits
+// (which turned out to be false positives — e.g. an adult face matching a
+// toddler at 30%) can be safely rejected. Do NOT lower this without also
+// cleaning the reference set, or unrelated faces slip through.
+const MIN_FORWARD_CONFIDENCE = 25;
 
 // Match a set of detected faces against the references.
 // Each face is assigned ONLY to its closest person (winner-takes-the-face)
