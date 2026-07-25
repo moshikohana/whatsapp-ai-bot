@@ -299,12 +299,12 @@ async function addReference(name, imageBuffer) {
 // Minimum confidence to actually forward a match to the owner.
 // Without this floor, faces whose distance is JUST below threshold round to
 // 0-15% confidence — the user sees photos with score 0% and asks "why?".
-// 25% floor (distance ≤ 0.75×threshold): with a CLEAN reference set + strict
-// threshold (0.43), a genuine match lands well inside, so borderline hits
-// (which turned out to be false positives — e.g. an adult face matching a
-// toddler at 30%) can be safely rejected. Do NOT lower this without also
-// cleaning the reference set, or unrelated faces slip through.
-const MIN_FORWARD_CONFIDENCE = 25;
+// 10% floor (distance ≤ 0.9×threshold). The floor exists to drop near-zero
+// "0% confidence" noise. It was briefly 25% to fight a false positive, but the
+// real cause was a CONTAMINATED reference set — once cleaned, wrong people sit
+// far away (~0.68), so a low floor is safe and lets genuine matches in the
+// 0.32–0.43 band (fresh photos of the real child) through instead of "No match".
+const MIN_FORWARD_CONFIDENCE = 10;
 
 // Match a set of detected faces against the references.
 // Each face is assigned ONLY to its closest person (winner-takes-the-face)
@@ -570,8 +570,9 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
   if (composites.length === 0) return { buffer: imageBuffer, highlighted: matchedBoxes.length, blurred: 0, matched: matchedBoxes.length };
 
   const result = await sharp(imageBuffer).composite(composites).jpeg({ quality: 88 }).toBuffer();
-  logger.info(`🟢 Highlighted ${matchedBoxes.length} matched, ${blurOthers ? 'blurred' : 'marked'} ${unmatchedBoxes.length} others`);
-  return { buffer: result, highlighted: matchedBoxes.length, blurred: blurOthers ? unmatchedBoxes.length : 0, matched: matchedBoxes.length };
+  const othersShown = matchedOnly ? 0 : unmatchedBoxes.length;
+  logger.info(`🟢 Highlighted ${matchedBoxes.length} matched${othersShown ? `, ${blurOthers ? 'blurred' : 'marked'} ${othersShown} others` : ' (only matched)'}`);
+  return { buffer: result, highlighted: matchedBoxes.length, blurred: blurOthers ? othersShown : 0, matched: matchedBoxes.length };
 }
 
 // ─── Group management ───────────────────────────────────────────
