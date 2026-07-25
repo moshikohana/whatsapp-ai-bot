@@ -2904,6 +2904,20 @@ function _queueFace(fn) {
   return next;
 }
 
+// Separate fast-lane queue for OWNER test photos (the "קניות" control group).
+// The main _faceQueue can be backed up for minutes by a flood of monitored-
+// group photos (e.g. the babies group), which delayed the owner's own test
+// photos. Giving owner tests their own queue means they respond promptly and
+// one-per-photo, independent of the monitoring backlog.
+let _ownerFaceQueue = Promise.resolve();
+function _queueOwnerFace(fn) {
+  const next = _ownerFaceQueue
+    .then(fn)
+    .catch((err) => console.error('Owner face queue error:', err.message?.substring(0, 80)));
+  _ownerFaceQueue = next.catch(() => {});
+  return next;
+}
+
 // ─── Message Handler ─────────────────────────────────────────────
 // album = multiple photos sent at once (WhatsApp bundles them)
 const ALLOWED_TYPES = new Set(['chat', 'image', 'sticker', 'ptt', 'audio', 'document', 'album']);
@@ -2955,8 +2969,9 @@ client.on('message_create', async (msg) => {
     if (msg.fromMe && (msg.type === 'image' || msg.type === 'album') && _isGroupMsg) {
       // Guard: skip the bot's own result photos to prevent infinite loop
       if (msg.body?.includes(BOT_MARKER)) return;
-      // Queue — don't run concurrent face detections (CPU saturation)
-      _queueFace(async () => {
+      // Owner test photos use their OWN fast-lane queue so they respond
+      // promptly instead of waiting behind the monitored-group backlog.
+      _queueOwnerFace(async () => {
       try {
         const status = getFaceStatus();
         if (status.enabled && status.totalReferences > 0 && (status.ownerGroups || []).length > 0) {
