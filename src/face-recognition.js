@@ -383,6 +383,15 @@ async function findMatches(imageBuffer) {
   if (!_isVideoBuffer(imageBuffer)) {
     const detections = await detectFaces(imageBuffer);
     logger.info(`🔎 findMatches: ${detections.length} face(s) detected`);
+    // Per-face diagnostics: closest person + distance for EVERY face, so
+    // we can see why a clear photo didn't match (distance just over threshold).
+    for (let i = 0; i < detections.length; i++) {
+      let bn = null, bd = Infinity;
+      for (const [name, refs] of Object.entries(config.referenceDescriptors)) {
+        for (const r of refs) { const d = faceapi.euclideanDistance(detections[i].descriptor, new Float32Array(r)); if (d < bd) { bd = d; bn = name; } }
+      }
+      logger.info(`   👤 face${i}: closest=${bn} dist=${bd.toFixed(3)} (threshold ${config.threshold})`);
+    }
     if (detections.length === 0) { const e = []; e.detections = []; e.frameBuffer = imageBuffer; return e; }
     const m = _matchDetections(detections, config);
     m.detections = detections; m.frameBuffer = imageBuffer;
