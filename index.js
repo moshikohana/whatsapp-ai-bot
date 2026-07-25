@@ -379,7 +379,16 @@ async function safeDownloadMedia(msg) {
     const result = await client.pupPage.evaluate(async (mid) => {
       const all = window.Store.Msg.getModelsArray();
       const m = window.Store.Msg.get(mid) || all.find(x => x.id && x.id._serialized === mid);
-      if (!m || !m.mediaKey || !m.directPath) return null;
+      if (!m || !m.mediaData) return null;
+      // Media may still be uploading/unresolved (esp. for a photo the owner
+      // JUST sent — a race that made reference-add fail with "couldn't
+      // download"). Resolve it first, retrying briefly.
+      for (let i = 0; i < 20 && m.mediaData.mediaStage !== 'RESOLVED'; i++) {
+        try { await m.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 }); } catch (_) {}
+        if (m.mediaData.mediaStage === 'RESOLVED') break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+      if (!m.mediaKey || !m.directPath) return null;
       const mockQpl = { addAnnotations() { return this; }, addPoint() { return this; } };
       const dec = await window.Store.DownloadManager.downloadAndMaybeDecrypt({
         directPath: m.directPath, encFilehash: m.encFilehash, filehash: m.filehash,
@@ -393,8 +402,12 @@ async function safeDownloadMedia(msg) {
   } catch (e) {
     logger.warn(`safeDownloadMedia direct path failed: ${e.message?.substring(0, 80)}`);
   }
-  // Fallback to the library method
-  try { return await msg.downloadMedia(); } catch { return null; }
+  // Fallback to the library method (also retry a couple times for unresolved media)
+  for (let i = 0; i < 3; i++) {
+    try { const m = await msg.downloadMedia(); if (m && m.data) return m; } catch (_) {}
+    await new Promise(r => setTimeout(r, 800));
+  }
+  return null;
 }
 
 // ─── Safe channel list — works around wwebjs constructor bug ─────
