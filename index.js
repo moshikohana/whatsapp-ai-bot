@@ -2879,13 +2879,26 @@ function _readDailyGroupNames() {
     return (gs?.params?.groups || []).filter(Boolean);
   } catch { return []; }
 }
-// Append a chat name to the daily.json scan list (idempotent). Returns true if added.
+// Append a chat name to the daily.json scan list (idempotent). Returns true if
+// added. Creates the group_summary task if the file is empty/missing one — this
+// is the normal case when the owner is building their scan list from scratch.
 function _addGroupToDailyList(name) {
   try {
     const fp = require('path').join(__dirname, 'data', 'daily.json');
-    const tasks = JSON.parse(require('fs').readFileSync(fp, 'utf8'));
-    const gs = (Array.isArray(tasks) ? tasks : []).find(t => t.action === 'group_summary');
-    if (!gs) return false;
+    let tasks;
+    try { tasks = JSON.parse(require('fs').readFileSync(fp, 'utf8')); } catch { tasks = []; }
+    if (!Array.isArray(tasks)) tasks = [];
+    let gs = tasks.find(t => t.action === 'group_summary');
+    if (!gs) {
+      gs = {
+        id: Date.now() % 100000,
+        time: '08:30',
+        action: 'group_summary',
+        params: { groups: [], format: 'נושאים עם ציון מקור הקבוצה לכל פרסום' },
+        label: 'סקירת קבוצות בוקר',
+      };
+      tasks.push(gs);
+    }
     gs.params.groups = gs.params.groups || [];
     if (gs.params.groups.some(g => normalizeHe(g) === normalizeHe(name))) return false;
     gs.params.groups.push(name);
