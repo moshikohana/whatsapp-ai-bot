@@ -1796,6 +1796,48 @@ client.on('ready', () => {
     }
   }, 15000);
 
+  // ── Post-startup health check ─────────────────────────────────
+  // WhatsApp keeps changing internals (LID migration etc.) that silently
+  // break core operations while the bot still shows "connected". Instead of
+  // discovering it days later, actively verify the critical paths ~40s after
+  // startup and alert the owner immediately if one is broken.
+  setTimeout(async () => {
+    const results = [];
+    // 1. Can we resolve + would we be able to message the owner chat?
+    try {
+      const oc = await client.getChatById(OWNER_ID);
+      results.push(['owner-chat', !!oc]);
+    } catch (e) { results.push(['owner-chat', false, e.message]); }
+    // 2. Is the WhatsApp Store responsive (page alive + injected)?
+    try {
+      const ok = await Promise.race([
+        client.pupPage.evaluate(() => typeof window.Store !== 'undefined' && typeof window.WWebJS !== 'undefined'),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000)),
+      ]);
+      results.push(['wa-store', !!ok]);
+    } catch (e) { results.push(['wa-store', false, e.message]); }
+    // 3. Is face detection actually working (only if references exist)?
+    try {
+      const st = getFaceStatus();
+      if (st.enabled && st.totalReferences > 0) {
+        const okFace = await initFaceAPI();
+        results.push(['face-detect', !!okFace]);
+      }
+    } catch (e) { results.push(['face-detect', false, e.message]); }
+
+    const failed = results.filter(r => !r[1]);
+    if (failed.length === 0) {
+      logger.info(`💚 Health check passed: ${results.map(r => r[0]).join(', ')}`);
+    } else {
+      const detail = failed.map(r => `${r[0]}${r[2] ? ' (' + String(r[2]).substring(0, 40) + ')' : ''}`).join(', ');
+      logger.error(`🚑 Health check FAILED: ${detail}`);
+      try {
+        const oc = await client.getChatById(OWNER_ID);
+        await botSend(oc, `🚑 *בדיקת בריאות נכשלה אחרי הפעלה*\nרכיבים תקולים: ${detail}\n\nייתכן שוואטסאפ שינה משהו — כדאי לבדוק את הלוגים.`);
+      } catch (_) { /* if we can't even message, the failure log stands */ }
+    }
+  }, 40000);
+
   // ── Telegram auto-connect (if configured) ────────────────────
   // GramJS keeps a persistent MTProto socket once connected.
   // We connect once at startup so the first user query doesn't have
