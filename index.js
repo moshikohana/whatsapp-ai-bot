@@ -2853,6 +2853,100 @@ ${pool}`;
 // ── Pending preset-save confirmations (5-min TTL) ──────────────
 const pendingPresetSave = new Map();
 
+// ─── Daily "add active new group to scans?" suggestion ──────────
+// Once a day, look for groups the owner is in that got a lot of traffic
+// today (> threshold) but are NOT in the daily scan list, and offer to add
+// them. Keeps the scan list current as the owner joins new groups without
+// them having to edit data/daily.json by hand.
+const GROUP_SUGGEST_THRESHOLD = 30;                 // msgs/24h to qualify
+const GROUP_SUGGEST_COOLDOWN_MS = 14 * 24 * 3600 * 1000; // re-ask window after "no"
+const _GROUP_SUGGEST_FILE = require('path').join(__dirname, 'data', 'group-suggest-state.json');
+const pendingGroupSuggest = new Map();              // ownerId → { candidates, expiresAt }
+
+function _loadGroupSuggestState() {
+  try { return JSON.parse(require('fs').readFileSync(_GROUP_SUGGEST_FILE, 'utf8')); }
+  catch { return { declined: {}, added: {}, lastRun: 0 }; }
+}
+function _saveGroupSuggestState(s) {
+  try { require('fs').writeFileSync(_GROUP_SUGGEST_FILE, JSON.stringify(s, null, 2)); } catch {}
+}
+
+// Read the daily.json group_summary list (chat names).
+function _readDailyGroupNames() {
+  try {
+    const tasks = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, 'data', 'daily.json'), 'utf8'));
+    const gs = (Array.isArray(tasks) ? tasks : []).find(t => t.action === 'group_summary');
+    return (gs?.params?.groups || []).filter(Boolean);
+  } catch { return []; }
+}
+// Append a chat name to the daily.json scan list (idempotent). Returns true if added.
+function _addGroupToDailyList(name) {
+  try {
+    const fp = require('path').join(__dirname, 'data', 'daily.json');
+    const tasks = JSON.parse(require('fs').readFileSync(fp, 'utf8'));
+    const gs = (Array.isArray(tasks) ? tasks : []).find(t => t.action === 'group_summary');
+    if (!gs) return false;
+    gs.params.groups = gs.params.groups || [];
+    if (gs.params.groups.some(g => normalizeHe(g) === normalizeHe(name))) return false;
+    gs.params.groups.push(name);
+    require('fs').writeFileSync(fp, JSON.stringify(tasks, null, 2));
+    return true;
+  } catch (e) { logger.warn('addGroupToDaily failed: ' + (e.message || '').substring(0, 60)); return false; }
+}
+
+async function runGroupSuggestionCheck(opts = {}) {
+  const dryRun = !!opts.dryRun;
+  const threshold = opts.threshold || GROUP_SUGGEST_THRESHOLD;
+  try {
+    const state = _loadGroupSuggestState();
+    const sinceSec = Date.now() / 1000 - 24 * 3600;
+    const dailyNames = _readDailyGroupNames().map(normalizeHe).filter(Boolean);
+
+    const candidates = [];
+    for (const cid of Object.keys(_msgCache)) {
+      if (!cid.endsWith('@g.us')) continue;             // real groups only (not channels)
+      const count = (_msgCache[cid] || []).filter(m => m.ts > sinceSec).length;
+      if (count < threshold) continue;
+
+      let name = _jidNames.get(cid);
+      if (!name) {
+        try { const c = await client.getChatById(cid); name = c?.name || null; _jidNames.set(cid, name); } catch {}
+      }
+      if (!name) continue;
+      const nn = normalizeHe(name);
+      // Already tracked? (fuzzy — daily list uses short names like "המצודה"
+      // while the real chat is "המצודה 12")
+      if (dailyNames.some(d => nn.includes(d) || d.includes(nn))) continue;
+      if (!dryRun && state.added && state.added[name]) continue;   // added before — never re-ask
+      if (!dryRun && state.declined && state.declined[name] && (Date.now() - state.declined[name]) < GROUP_SUGGEST_COOLDOWN_MS) continue;
+      candidates.push({ cid, name, count });
+    }
+
+    candidates.sort((a, b) => b.count - a.count);
+    const top = candidates.slice(0, 3);
+    if (dryRun) return top;
+
+    state.lastRun = Date.now();
+    if (!candidates.length) { _saveGroupSuggestState(state); return top; }
+
+    const oc = await client.getChatById(OWNER_ID);
+    let body;
+    if (top.length === 1) {
+      body = `📈 *קבוצה חדשה פעילה*\nהיום קיבלת *${top[0].count} הודעות* בקבוצה *"${top[0].name}"*, והיא לא ברשימת הסריקה היומית.\n\nלהוסיף אותה לסריקות? *כן* / *לא*`;
+    } else {
+      body = `📈 *קבוצות פעילות שלא בסריקה*\nכמה קבוצות קיבלו היום הרבה הודעות ולא נמצאות ברשימת הסריקה:\n` +
+        top.map((c, i) => `*${i + 1}.* ${c.name} — ${c.count} הודעות`).join('\n') +
+        `\n\nלהוסיף? שלח מספרים (למשל "1 2"), *הכל*, או *לא*.`;
+    }
+    pendingGroupSuggest.set(OWNER_ID, { candidates: top, expiresAt: Date.now() + 24 * 3600 * 1000 });
+    _saveGroupSuggestState(state);
+    await botSend(oc, body);
+  } catch (e) { logger.warn('group-suggest check failed: ' + (e.message || '').substring(0, 80)); }
+}
+
+// Daily at 20:00 (server TZ, same as the other crons).
+try { nodeCron.schedule('0 20 * * *', () => { runGroupSuggestionCheck().catch(() => {}); }); } catch {}
+
 // ─── Poll vote handler — drives all interactive flows ─────────
 client.on('vote_update', async (vote) => {
   try {
@@ -3572,6 +3666,60 @@ client.on('message_create', async (msg) => {
         // If text looks like another command — just clear the pending state
         // and fall through to normal handling.
         pendingPresetSave.delete(chatId);
+      }
+    }
+
+    // ── Pending "add active group to scans?" reply ───────────────
+    // The daily suggestion asked to add one or more active new groups to the
+    // scan list. Interpret the owner's next short reply: "כן"/"הכל"/numbers to
+    // add, "לא" to decline (with cooldown). Unrelated commands fall through.
+    {
+      const gp = pendingGroupSuggest.get(chatId);
+      if (gp && gp.expiresAt > Date.now()) {
+        const t = text.trim();
+        const isNegative = /^(לא|לא תודה|דלג|skip|no|לא צריך)/i.test(t);
+        const looksLikeOtherCommand = /^(?:סריקה|סקירה|תפריט|בוקר טוב|מה|תעשה|תקבע|תזכיר|תחפש|סכם|שלח|תשלח)/i.test(t);
+        if (isNegative) {
+          const st = _loadGroupSuggestState();
+          st.declined = st.declined || {};
+          for (const c of gp.candidates) st.declined[c.name] = Date.now();
+          _saveGroupSuggestState(st);
+          pendingGroupSuggest.delete(chatId);
+          await botSend(chat, '👌 לא הוספתי. אשאל שוב אם קבוצה חדשה תהיה פעילה במיוחד.');
+          stats.sent++; return;
+        }
+        // Which candidates did they pick?
+        let chosen = [];
+        if (/\b(הכל|כולם|all)\b/i.test(t)) {
+          chosen = gp.candidates.slice();
+        } else {
+          const nums = t.match(/\d+/g);
+          if (nums) chosen = nums.map(n => gp.candidates[parseInt(n, 10) - 1]).filter(Boolean);
+          else if (/^(כן|הוסף|בטח|כן בבקשה|yes|ok|אוקיי)/i.test(t) && gp.candidates.length === 1) chosen = [gp.candidates[0]];
+        }
+        if (chosen.length) {
+          const st = _loadGroupSuggestState();
+          st.added = st.added || {};
+          const added = [];
+          for (const c of chosen) {
+            if (_addGroupToDailyList(c.name)) { st.added[c.name] = Date.now(); added.push(c.name); }
+            else st.added[c.name] = Date.now(); // already present — mark so we stop re-asking
+          }
+          _saveGroupSuggestState(st);
+          pendingGroupSuggest.delete(chatId);
+          await botSend(chat,
+            added.length
+              ? `✅ *נוסף לסריקה היומית:*\n${added.map(n => `• ${n}`).join('\n')}\n\n_יופיע אוטומטית בסריקות וב-סיכום הבוקר._`
+              : '👌 הקבוצות כבר היו ברשימה.');
+          stats.sent++; return;
+        }
+        // Not a yes/no/number and not another command → nudge once, keep pending.
+        if (!looksLikeOtherCommand && t.length <= 30) {
+          await botSend(chat, '🤔 לא הבנתי — שלח *כן*/מספרים כדי להוסיף, או *לא* כדי לדלג.');
+          stats.sent++; return;
+        }
+        // Looks like a different request — drop the pending state, fall through.
+        pendingGroupSuggest.delete(chatId);
       }
     }
 
@@ -5208,6 +5356,22 @@ server.listen(PORT, () => {
 // ─── Health endpoint (for hosting keep-alive) ──────────────────
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', bot: botStatus, uptime: Math.round(process.uptime()), mem: Math.round(process.memoryUsage.rss?.() / 1048576 || process.memoryUsage().rss / 1048576) + 'MB' });
+});
+
+// ─── Test endpoint — daily group-suggestion check ──────────────
+// GET /debug/group-suggest            → dry-run, returns candidates as JSON
+// GET /debug/group-suggest?threshold=5 → lower bar for testing
+// GET /debug/group-suggest?send=1     → actually DM the owner (real flow)
+app.get('/debug/group-suggest', async (req, res) => {
+  try {
+    const threshold = req.query.threshold ? parseInt(req.query.threshold, 10) : GROUP_SUGGEST_THRESHOLD;
+    if (req.query.send === '1') {
+      await runGroupSuggestionCheck({ threshold });
+      return res.json({ ok: true, sent: true, threshold });
+    }
+    const top = await runGroupSuggestionCheck({ dryRun: true, threshold });
+    res.json({ ok: true, dryRun: true, threshold, dailyList: _readDailyGroupNames(), candidates: top });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── Debug endpoint — single-shot diagnostic for Railway/cloud deploys ──
