@@ -2609,6 +2609,23 @@ async function executeScan(params) {
   }
 
   await botSend(oc, `⏳ *מריץ סריקה...*\n🌐 ${sources.length} מקורות · ⏱ ${windowLabel}`);
+
+  // Persist this run so the menu can offer a one-tap "repeat last scan".
+  try {
+    require('./src/scan-flow').saveLastScan({
+      label: params.usedPresetName || `${sources.length} מקורות · ${windowLabel}`,
+      params: {
+        source: params.source,
+        type: params.type,
+        sinceMinutes: since,
+        timeLabel: windowLabel,
+        scope: params.scope,
+        confirmedSources: sources,
+        usedPresetName: params.usedPresetName,
+      },
+    });
+  } catch {}
+
   const allMessages = [];
   const stats = [];
 
@@ -2750,9 +2767,24 @@ async function executeScan(params) {
   const channelCount = allMessages.filter(m => m.isChannel).length;
   const groupCount = allMessages.length - channelCount;
   const balanceHint = channelCount > 0 && groupCount > 0
-    ? `\n\n*חשוב:* יש ${groupCount} הודעות מקבוצות (👥) ו-${channelCount} מערוצים (📢). תן משקל שווה לשני הסוגים — אל תתעלם מערוצים גם אם יש פחות הודעות מהם. ציין את שם המקור (קבוצה או ערוץ) בכל נושא.`
+    ? `\n- יש ${groupCount} הודעות מקבוצות (👥) ו-${channelCount} מערוצים (📢). תן משקל שווה לשני הסוגים — אל תתעלם מערוצים גם אם יש בהם פחות הודעות.`
     : '';
-  const scanPrompt = `סכם את ההודעות הבאות בפורמט נושאים חמים (3-7 נושאים מהחם לשקט). לכל נושא — שורת כותרת ושורת מקורות+ציטוט. בלי הקדמות.${balanceHint}\n\n${pool}`;
+  const scanPrompt =
+`אתה מסייע למושיקו, דובר/עוזר של ח"כ אריאל קלנר (הליכוד). לפניך הודעות מקבוצות/ערוצים. הפק תדריך תמציתי לקריאה מהירה בטלפון. עברית בלבד, בלי הקדמות.
+
+מבנה קבוע:
+
+⚠️ *דורש תשומת לב*
+כאן ורק כאן — כל אזכור של אריאל קלנר, הליכוד, הקואליציה/הממשלה, ביקורת שדורשת תגובה, או פנייה/הזדמנות תקשורתית. הכי דחוף קודם, שורה לכל פריט עם שם המקור. אם אין שום דבר כזה — כתוב שורה אחת "אין" ועבור הלאה.
+
+🔥 *נושאים חמים*
+3-6 נושאים מהחם לשקט. *מזג כפילויות* — אם אותו סיפור מופיע בכמה מקורות, אחד אותו לנושא אחד וציין כמה מקורות דיווחו (למשל: "5 מקורות"). לכל נושא: שורת כותרת קצרה + שורת מקורות + ציטוט קצר אחד.
+
+כללים:${balanceHint}
+- ציין תמיד את שם המקור (קבוצה/ערוץ) בכל פריט.
+- קצר וענייני. עדיף פחות נושאים חדים מהרבה רדודים.
+
+${pool}`;
   const scanResult = await smartChat(scanPrompt, []);
   await botSend(oc, header + scanResult);
 

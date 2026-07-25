@@ -26,6 +26,30 @@ const flows = new Map();  // chatId → flow state
 const STEPS = ['source', 'preset_pick', 'type', 'time', 'scope', 'items', 'confirm'];
 
 const presets = require('./scan-presets');
+const fs = require('fs');
+const path = require('path');
+
+// ── Items pagination ────────────────────────────────────────────
+// The menu is a numbered TEXT list now (not a WhatsApp Poll), so the old
+// 12-option-per-poll cap is gone. Show a big page so picking sources takes
+// far less scrolling/tapping. Must match applyVote's usage.
+const ITEMS_PER_PAGE = 20;
+
+// ── "Repeat last scan" persistence ──────────────────────────────
+// executeScan() saves the exact params of the last run here so the source
+// step can offer a one-tap "run the same scan again" shortcut — the single
+// biggest step-count win for the common "same scan as yesterday" case.
+const LAST_SCAN_FILE = path.join(__dirname, '..', 'data', 'last-scan.json');
+function getLastScan() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(LAST_SCAN_FILE, 'utf8'));
+    if (raw && raw.ts && (Date.now() - raw.ts) < 14 * 24 * 3600 * 1000) return raw; // 14-day freshness
+  } catch {}
+  return null;
+}
+function saveLastScan(rec) {
+  try { fs.writeFileSync(LAST_SCAN_FILE, JSON.stringify({ ...rec, ts: Date.now() })); } catch {}
+}
 
 // ── Option labels (Hebrew) ──────────────────────────────────────
 function buildSourceOptions() {
@@ -38,6 +62,12 @@ function buildSourceOptions() {
   // platform/type/scope/items selection entirely.
   if (presets.list().length > 0) {
     opts.unshift({ id: 'preset', label: '📁 השתמש בפריסט שמור' });
+  }
+  // One-tap "run the same scan again" — the fastest path for the common
+  // "same as last time" case. Sits at the very top when available.
+  const last = getLastScan();
+  if (last && last.label) {
+    opts.unshift({ id: 'repeat', label: `🔁 חזור על האחרונה: ${last.label}` });
   }
   opts.push({ id: 'cancel', label: '❌ ביטול' });
   return opts;
@@ -145,10 +175,9 @@ function buildPoll(flow) {
     case 'scope':
       return { question: '🔍 *סריקה — שלב 4/5*\nמה ההיקף?', options: SCOPE_OPTIONS };
     case 'items': {
-      // Paginated multi-select poll. WhatsApp Poll limit = 12 options.
-      // We need to fit: PAGE_SIZE items + optional "next" + "finish" + "cancel".
-      // PAGE_SIZE=9 → max 9+1+1+1 = 12 = limit. Safe.
-      const PAGE_SIZE = 9;
+      // Paginated multi-select — numbered TEXT list (no poll cap anymore),
+      // so we page in big chunks to make source-picking far less tedious.
+      const PAGE_SIZE = ITEMS_PER_PAGE;
       const start = flow.itemsPage * PAGE_SIZE;
       const slice = flow.availableItems.slice(start, start + PAGE_SIZE);
       const hasMore = (start + PAGE_SIZE) < flow.availableItems.length;
@@ -196,18 +225,25 @@ function buildPoll(flow) {
         ? `🌐 רשימת המעקב היומי — *${sources.length} מקורות*${breakdown.length ? ` (${breakdown.join(' · ')})` : ''}`
         : `🎯 *${sources.length} מקורות נבחרים*${breakdown.length ? ` (${breakdown.join(' · ')})` : ''}`;
 
-      // Always show the full list of sources to be scanned (this is what the
-      // user explicitly asked for — see what's about to run)
-      const itemsList = sources.length > 0
-        ? '\n\n*המקורות לסריקה:*\n' + sources.slice(0, 30).map((item, i) =>
-            `${i + 1}. ${item.label || item.raw}`
-          ).join('\n') + (sources.length > 30 ? `\n... ועוד ${sources.length - 30}` : '')
-        : '\n\n_אין מקורות לסריקה — דאג להוסיף ל-data/daily.json או לבחור ספציפיים_';
+      // Compact source display. When the run came from a named preset the user
+      // already knows what's in it — show a one-line summary, not the whole
+      // list. Otherwise show a short preview (first 6 names) + "+N more".
+      let itemsList;
+      if (sources.length === 0) {
+        itemsList = '\n\n_אין מקורות לסריקה — הוסף ל-data/daily.json או בחר ספציפיים_';
+      } else if (flow.usedPresetName) {
+        itemsList = `\n\n📁 *${flow.usedPresetName}* — ${sources.length} מקורות${breakdown.length ? ` (${breakdown.join(' · ')})` : ''}`;
+      } else {
+        const preview = sources.slice(0, 6).map((item, i) => `${i + 1}. ${item.label || item.raw}`).join('\n');
+        itemsList = `\n\n*${sources.length} מקורות*${breakdown.length ? ` (${breakdown.join(' · ')})` : ''}:\n${preview}` +
+          (sources.length > 6 ? `\n… ועוד ${sources.length - 6}` : '');
+      }
 
       const platformLine = platformBreak.length ? `\n${platformBreak.join(' · ')}` : '';
+      const presetHead = flow.usedPresetName ? `📁 ${flow.usedPresetName}\n` : `${sourceLabel}\n${typeLabel}\n`;
 
       return {
-        question: `🔍 *אישור לפני הרצה:*\n\n${sourceLabel}\n${typeLabel}\n${timeLabel}${platformLine}\n${itemsList}\n\nלהריץ?`,
+        question: `🔍 *אישור לפני הרצה:*\n\n${presetHead}${timeLabel}${platformLine}${itemsList}\n\nלהריץ?`,
         options: CONFIRM_OPTIONS,
       };
     }
@@ -257,6 +293,12 @@ function applyVote(flow, selected) {
 
   switch (flow.step) {
     case 'source': {
+      // One-tap repeat — bypass the whole wizard and re-run the saved params.
+      if (selected === 'repeat') {
+        const last = getLastScan();
+        if (!last || !last.params) return { error: 'אין סריקה אחרונה שמורה' };
+        return { execute: true, params: last.params };
+      }
       const o = matchOption(SOURCE_OPTIONS, selected);
       if (!o || o.id === 'cancel') return { error: 'בחירה לא תקפה' };
       // Preset shortcut: skip type/scope/items steps
@@ -346,9 +388,8 @@ function applyVote(flow, selected) {
     case 'items': {
       // Multi-select votes arrive individually as the user toggles each.
       // Handle: '__next_page__', '__finish__', or 'item:N'
-      // IMPORTANT: PAGE_SIZE must match buildPoll's value (9, due to
-      // WhatsApp's 12-option-per-poll cap).
-      const PAGE_SIZE = 9;
+      // IMPORTANT: PAGE_SIZE must match buildPoll's value.
+      const PAGE_SIZE = ITEMS_PER_PAGE;
       if (selected === '__next_page__') {
         if ((flow.itemsPage + 1) * PAGE_SIZE < flow.availableItems.length) {
           flow.itemsPage += 1;
@@ -439,5 +480,7 @@ module.exports = {
   applyVote,
   shouldShowMenu,
   timeOptionToMinutes,
+  getLastScan,
+  saveLastScan,
   STEPS,
 };
