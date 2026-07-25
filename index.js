@@ -2612,14 +2612,16 @@ async function executeScan(params) {
 
   // Persist this run so the menu can offer a one-tap "repeat last scan".
   try {
+    const modeTag = (params.reportMode || 'kellner') === 'general' ? '📰 כללית' : '🎯 קלנר';
     require('./src/scan-flow').saveLastScan({
-      label: params.usedPresetName || `${sources.length} מקורות · ${windowLabel}`,
+      label: `${params.usedPresetName || `${sources.length} מקורות`} · ${windowLabel} · ${modeTag}`,
       params: {
         source: params.source,
         type: params.type,
         sinceMinutes: since,
         timeLabel: windowLabel,
         scope: params.scope,
+        reportMode: params.reportMode || 'kellner',
         confirmedSources: sources,
         usedPresetName: params.usedPresetName,
       },
@@ -2769,7 +2771,8 @@ async function executeScan(params) {
   const balanceHint = channelCount > 0 && groupCount > 0
     ? `\n- יש ${groupCount} הודעות מקבוצות (👥) ו-${channelCount} מערוצים (📢). תן משקל שווה לשני הסוגים — אל תתעלם מערוצים גם אם יש בהם פחות הודעות.`
     : '';
-  const scanPrompt =
+  const reportMode = params.reportMode || 'kellner';
+  const kellnerPrompt =
 `אתה מסייע למושיקו, דובר/עוזר של ח"כ אריאל קלנר (הליכוד). לפניך הודעות מקבוצות/ערוצים. הפק תדריך תמציתי לקריאה מהירה בטלפון. עברית בלבד, בלי הקדמות.
 
 מבנה קבוע:
@@ -2785,6 +2788,15 @@ async function executeScan(params) {
 - קצר וענייני. עדיף פחות נושאים חדים מהרבה רדודים.
 
 ${pool}`;
+  const generalPrompt =
+`סכם את ההודעות הבאות לסקירת חדשות כללית, בפורמט "נושאים חמים" (3-7 נושאים מהחם לשקט). עברית בלבד, בלי הקדמות, לקריאה מהירה בטלפון.
+
+לכל נושא: שורת כותרת קצרה + שורת מקורות + ציטוט קצר אחד.
+*מזג כפילויות* — אם אותו סיפור מופיע בכמה מקורות, אחד אותו לנושא אחד וציין כמה מקורות דיווחו (למשל: "5 מקורות").
+ציין תמיד את שם המקור (קבוצה/ערוץ) בכל נושא.${balanceHint}
+
+${pool}`;
+  const scanPrompt = reportMode === 'general' ? generalPrompt : kellnerPrompt;
   const scanResult = await smartChat(scanPrompt, []);
   await botSend(oc, header + scanResult);
 

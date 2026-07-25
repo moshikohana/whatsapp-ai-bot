@@ -105,9 +105,10 @@ const SCOPE_OPTIONS = [
 ];
 
 const CONFIRM_OPTIONS = [
-  { id: 'run',    label: '✅ הרץ עכשיו' },
-  { id: 'edit',   label: '✏️ התחל מחדש' },
-  { id: 'cancel', label: '❌ ביטול' },
+  { id: 'run_kellner', label: '🎯 הרץ — מותאם לקלנר' },
+  { id: 'run_general', label: '📰 הרץ — חדשות כללית' },
+  { id: 'edit',        label: '✏️ התחל מחדש' },
+  { id: 'cancel',      label: '❌ ביטול' },
 ];
 
 // ── State helpers ───────────────────────────────────────────────
@@ -243,7 +244,7 @@ function buildPoll(flow) {
       const presetHead = flow.usedPresetName ? `📁 ${flow.usedPresetName}\n` : `${sourceLabel}\n${typeLabel}\n`;
 
       return {
-        question: `🔍 *אישור לפני הרצה:*\n\n${presetHead}${timeLabel}${platformLine}${itemsList}\n\nלהריץ?`,
+        question: `🔍 *אישור לפני הרצה:*\n\n${presetHead}${timeLabel}${platformLine}${itemsList}\n\n*איזה דוח?*\n🎯 מותאם לקלנר — מדגיש אזכורי קלנר/הליכוד, ביקורת לתגובה, הזדמנויות תקשורת\n📰 חדשות כללית — סיכום נושאים חמים רגיל`,
         options: CONFIRM_OPTIONS,
       };
     }
@@ -423,14 +424,16 @@ function applyVote(flow, selected) {
       const o = matchOption(CONFIRM_OPTIONS, selected);
       if (!o || o.id === 'cancel') return { cancel: true };
       if (o.id === 'edit') return { restart: true };
-      if (o.id === 'run') {
-        // Build the final execution params
+      if (o.id === 'run_kellner' || o.id === 'run_general') {
+        // Build the final execution params. The chosen button also picks the
+        // report style: 'kellner' (spokesperson brief) vs 'general' (plain news).
         const params = {
           source: flow.selections.source,
           type: flow.selections.type,
           sinceMinutes: timeOptionToMinutes(flow.selections.time),
           timeLabel: TIME_OPTIONS.find(t => t.id === flow.selections.time)?.label || '',
           scope: flow.selections.scope,
+          reportMode: o.id === 'run_general' ? 'general' : 'kellner',
           selectedItems: flow.selections.scope === 'select'
             ? flow.selections.selectedItems.map(id => flow.availableItems.find(x => x.id === id)).filter(Boolean)
             : [],
