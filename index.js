@@ -3070,8 +3070,13 @@ client.on('message_create', async (msg) => {
                 console.log(`🎀 Test match: ${allNames} in "${groupName}"`);
               } else {
                 console.log(`📷 No match in owner test photo from "${groupName}"`);
-                // Reply directly to the photo so it's clear which image wasn't recognized
-                try { await msg.reply(`🔍 לא זוהו פנים מוכרים` + BOT_MARKER); } catch (e) { /* silent */ }
+                // Quoted reply on the photo itself so it's clear WHICH image
+                // wasn't recognized. If a face was close to a daughter, say so.
+                const nm = matches.nearMiss;
+                const noMatchMsg = nm
+                  ? `🔍 לא זוהה בוודאות — אבל הכי קרוב ל-*${nm.name}* (קרבה ~${nm.closeness}%). אם זו באמת ${nm.name}, שלח עוד תמונת ייחוס שלה 💡`
+                  : `🔍 לא זוהו פנים מוכרים`;
+                try { await msg.reply(noMatchMsg + BOT_MARKER); } catch (e) { /* silent */ }
               }
             }
           }
@@ -4571,10 +4576,15 @@ client.on('message', async (msg) => {
       stats.sent++;
     } else {
       console.log(`📷 No match in "${groupName}" photo`);
-      // For ownerGroups (test groups): reply directly to the photo so it's clear which one
+      // For ownerGroups (test groups): quoted reply on the photo so it's clear
+      // WHICH one wasn't recognized, incl. a "closest to X" hint when near.
       const isTestGrp = (status.ownerGroups || []).some(g => groupName.includes(g) || g.includes(groupName));
       if (isTestGrp) {
-        try { await msg.reply(`🔍 לא זוהו פנים מוכרים` + BOT_MARKER); } catch (e) { /* silent */ }
+        const nm = allMatches.nearMiss;
+        const noMatchMsg = nm
+          ? `🔍 לא זוהה בוודאות — אבל הכי קרוב ל-*${nm.name}* (קרבה ~${nm.closeness}%). אם זו באמת ${nm.name}, שלח עוד תמונת ייחוס שלה 💡`
+          : `🔍 לא זוהו פנים מוכרים`;
+        try { await msg.reply(noMatchMsg + BOT_MARKER); } catch (e) { /* silent */ }
       }
     }
   } catch (err) {

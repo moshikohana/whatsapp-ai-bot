@@ -322,6 +322,34 @@ function _matchDetections(detections, config) {
   return Object.values(deduped).sort((a, b) => b.confidence - a.confidence);
 }
 
+// Best "near miss" across detected faces: the closest reference even though
+// it didn't pass the threshold. Lets the bot say "didn't recognize, but
+// closest was שי" so the user knows it got close (and which person to add
+// more references for). Only reported when reasonably close.
+function _computeNearMiss(detections, config) {
+  let best = null; // { name, distance, threshold }
+  for (const det of detections) {
+    for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
+      if (!descriptors.length) continue;
+      let d = Infinity;
+      for (const refDesc of descriptors) {
+        const dist = faceapi.euclideanDistance(det.descriptor, new Float32Array(refDesc));
+        if (dist < d) d = dist;
+      }
+      if (!best || d < best.distance) {
+        best = { name, distance: d, threshold: config.perPersonThresholds?.[name] ?? config.threshold };
+      }
+    }
+  }
+  if (!best) return null;
+  // Only call it a "near miss" if it's within a reasonable margin of the
+  // threshold — anything past that is genuinely a different person.
+  if (best.distance > best.threshold + 0.15) return null;
+  // Rough closeness %: how far into the threshold band it landed.
+  const closeness = Math.round(Math.max(0, (1 - best.distance / (best.threshold + 0.15)) * 100));
+  return { name: best.name, distance: Math.round(best.distance * 1000) / 1000, closeness };
+}
+
 async function findMatches(imageBuffer) {
   const config = loadConfig();
   if (!config.enabled || Object.keys(config.referenceDescriptors).length === 0) return [];
@@ -335,6 +363,7 @@ async function findMatches(imageBuffer) {
     if (detections.length === 0) { const e = []; e.detections = []; e.frameBuffer = imageBuffer; return e; }
     const m = _matchDetections(detections, config);
     m.detections = detections; m.frameBuffer = imageBuffer;
+    if (m.length === 0) m.nearMiss = _computeNearMiss(detections, config);
     return m;
   }
 
@@ -344,6 +373,7 @@ async function findMatches(imageBuffer) {
   // ~2 min (all 6 frames) into a few seconds. Only ambiguous / no-match
   // photos pay for extra frames.
   const frames = await _extractFramesFromVideo(imageBuffer, 6);
+  let bestNear = null; // track the closest near-miss across frames (no re-detect)
   for (let i = 0; i < frames.length; i++) {
     let dets;
     try { dets = await detectFaces(frames[i]); } catch (e) { continue; }
@@ -354,9 +384,13 @@ async function findMatches(imageBuffer) {
       m.detections = dets; m.frameBuffer = frames[i];
       return m;
     }
+    const nm = _computeNearMiss(dets, config);
+    if (nm && (!bestNear || nm.closeness > bestNear.closeness)) bestNear = nm;
   }
   logger.info(`🔎 findMatches (video): no match across ${frames.length} frames`);
-  const e = []; e.detections = []; e.frameBuffer = frames[0] || imageBuffer; return e;
+  const e = []; e.detections = []; e.frameBuffer = frames[0] || imageBuffer;
+  if (bestNear) e.nearMiss = bestNear;
+  return e;
 }
 
 // ─── Blur non-matching faces in image ───────────────────────────
