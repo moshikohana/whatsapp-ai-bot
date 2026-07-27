@@ -692,6 +692,7 @@ function getStatus() {
     monitoredGroups: config.monitoredGroups,
     ownerGroups: config.ownerGroups || [],
     groupWhitelist: config.groupWhitelist || {},
+    groupMinConfidence: config.groupMinConfidence || {},
     references: names.map(n => ({ name: n, count: config.referenceDescriptors[n].length })),
     totalReferences: getReferenceCount(),
     initialized,
@@ -717,6 +718,28 @@ function applyGroupWhitelist(matches, groupName, groupWhitelist) {
   const [, allowedNames] = entry;
   if (!Array.isArray(allowedNames) || !allowedNames.length) return matches;
   return matches.filter(m => allowedNames.includes(m.name));
+}
+
+/**
+ * Drop matches below a per-group minimum confidence. Baby-heavy groups
+ * (daycare/kindergarten) cluster many similar faces at distance 0.35-0.45,
+ * exactly the band a lenient global floor lets through → false positives on
+ * OTHER children. A stricter per-group floor keeps those out while leaving
+ * the controlled test group (קניות) lenient. Groups without an entry are
+ * unaffected.
+ * @param {Array} matches
+ * @param {string} groupName
+ * @param {object} groupMinConfidence - { groupName: minConfidencePercent }
+ */
+function applyGroupMinConfidence(matches, groupName, groupMinConfidence) {
+  if (!groupMinConfidence || !groupName || !matches?.length) return matches || [];
+  const entry = Object.entries(groupMinConfidence).find(([g]) =>
+    groupName.includes(g) || g.includes(groupName)
+  );
+  if (!entry) return matches;
+  const [, minConf] = entry;
+  if (typeof minConf !== 'number') return matches;
+  return matches.filter(m => m.confidence >= minConf);
 }
 
 function setPersonThreshold(name, value) {
@@ -750,5 +773,6 @@ module.exports = {
   setEnabled,
   getStatus,
   applyGroupWhitelist,
+  applyGroupMinConfidence,
   loadConfig,
 };

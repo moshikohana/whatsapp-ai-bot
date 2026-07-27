@@ -53,7 +53,7 @@ const {
   initFaceAPI, addReference, findMatches, blurNonMatchingFaces, highlightMatchingFaces,
   isBlurEnabled, setBlurEnabled, getHighlightMode, setHighlightMode,
   getMonitoredGroups, addMonitoredGroup, removeMonitoredGroup,
-  addOwnerGroup, removeOwnerGroup, applyGroupWhitelist,
+  addOwnerGroup, removeOwnerGroup, applyGroupWhitelist, applyGroupMinConfidence,
   getReferenceCount, clearReferences, setThreshold, setEnabled, getStatus: getFaceStatus,
   loadConfig: loadFaceConfig,
 } = require('./src/face-recognition');
@@ -4714,11 +4714,15 @@ client.on('message', async (msg) => {
     // Apply per-group whitelist — e.g. "גן פיסטוק-תשפו💚" allows only "שי",
     // "מעון צעדים החדשה- תינוקות" allows only "מיה". Groups without an entry
     // in groupWhitelist accept all configured references (e.g. "קניות" test).
-    const matches = applyGroupWhitelist(allMatches, groupName, status.groupWhitelist);
+    const whitelisted = applyGroupWhitelist(allMatches, groupName, status.groupWhitelist);
+    // Per-group confidence floor — kills weak false positives in baby-heavy
+    // groups (daycare/kindergarten) where other children sit in the same
+    // 0.35-0.45 distance band as the real child.
+    const matches = applyGroupMinConfidence(whitelisted, groupName, status.groupMinConfidence);
 
     if (allMatches.length > 0 && matches.length === 0) {
-      const skipped = allMatches.map(m => m.name).join(', ');
-      console.log(`🚫 "${groupName}": detected [${skipped}] but not in whitelist for this group — skipping alert`);
+      const skipped = allMatches.map(m => `${m.name} ${m.confidence}%`).join(', ');
+      console.log(`🚫 "${groupName}": [${skipped}] filtered out (whitelist / min-confidence) — skipping alert`);
     }
 
     if (matches.length > 0) {
