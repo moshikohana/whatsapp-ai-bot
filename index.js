@@ -6388,12 +6388,13 @@ async function getKallnerTwitterLatest({ max = 3 } = {}) {
     req.setTimeout(20000, () => { req.destroy(); resolve(null); });
     req.on('error', () => resolve(null));
   });
-  // twitterapi.io returns empty ~2/3 of the time — retry until non-empty.
+  // twitterapi.io returns empty ~2/3 of the time (billed per tweet → empty is
+  // free) — retry generously until non-empty.
   let tweets = [];
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 8; i++) {
     tweets = await fetchOnce();
     if (tweets && tweets.length) break;
-    await new Promise(r => setTimeout(r, 1200));
+    await new Promise(r => setTimeout(r, 800));
   }
   if (!tweets) return null;
   return tweets.map(t => {

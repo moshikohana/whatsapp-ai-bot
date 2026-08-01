@@ -28,11 +28,11 @@ function _once(path) {
 // so empty responses are FREE — only the one successful fetch costs (~$0.003).
 // Retry generously so the report reliably has data; the charged call stops
 // the loop immediately.
-async function _retry(path, isEmpty, tries = 8) {
+async function _retry(path, isEmpty, tries = 12) {
   for (let i = 0; i < tries; i++) {
     const j = await _once(path);
     if (j && !isEmpty(j)) return j;
-    await new Promise(r => setTimeout(r, 900));
+    await new Promise(r => setTimeout(r, 700));
   }
   return null;
 }
