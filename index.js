@@ -3742,29 +3742,48 @@ client.on('message_create', async (msg) => {
       }
     }
 
-    // ── Pending "prepare distribution" — assemble from pasted text+links ──
+    // ── Pending "prepare distribution" — collect text+links, then assemble ──
     {
       const pd = pendingDistribution.get(OWNER_ID);
       if (pd && pd.expiresAt > Date.now()) {
         const t = text.trim();
-        if (/^(ביטול|בטל|עזוב|לא)$/i.test(t)) {
+        // Cancel
+        if (/^(ביטול|בטל|עזוב)$/i.test(t)) {
           pendingDistribution.delete(OWNER_ID);
           await botSend(chat, '👍 ההפצה בוטלה.');
           stats.sent++; return;
         }
-        pendingDistribution.delete(OWNER_ID);
-        await botSend(chat, '⏳ מקצר קישורים ומרכיב את ההפצה... שנייה.');
-        (async () => {
-          try {
-            const full = await assembleDistribution(text);
-            const oc = await client.getChatById(OWNER_ID);
-            await oc.sendMessage(full + BOT_MARKER); // clean, copy-ready
-            await botSend(oc, '👆 *ההפצה מוכנה* — להעתקה ושליחה. (טלגרם/טיקטוק/יוטיוב מולאו אוטומטית; מקומות ריקים = לא נשלח קישור.) 🚀');
-          } catch (e) {
-            try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הרכבת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
-          }
-        })();
-        stats.sent++; return;
+        // GUARD: if this looks like another command (not distribution content),
+        // don't swallow it — drop the pending state and let it run normally.
+        // This keeps the flow from interfering with your other commands.
+        const looksLikeOtherCmd = /^(סריקה|סקירה|תפריט|מה עלה|פוסט אחרון|סרטון|וידאו|מה חדש|עדכוני בוט|גיבוי|סטטוס|התראות|מגמות|מה ניטרתי|בוקר טוב|תזכיר|תקבע|תחפש|חפש|סכם|היי בוטי|ביי בוטי|\/)/i.test(t);
+        if (looksLikeOtherCmd) {
+          pendingDistribution.delete(OWNER_ID);
+          // fall through (no return) — normal handling continues below
+        } else if (/^(הכן|תכין|סיים|סיימתי|מוכן|שלח|יאללה|בצע|כן)\s*!?$/i.test(t)) {
+          // Build & send the full distribution from everything collected
+          const raw = pd.raw || '';
+          pendingDistribution.delete(OWNER_ID);
+          await botSend(chat, '⏳ מקצר קישורים ומרכיב את ההפצה... שנייה.');
+          (async () => {
+            try {
+              const full = await assembleDistribution(raw);
+              const oc = await client.getChatById(OWNER_ID);
+              await oc.sendMessage(full + BOT_MARKER); // clean, copy-ready
+              await botSend(oc, '👆 *ההפצה מוכנה* — להעתקה ושליחה. (טלגרם/טיקטוק/יוטיוב מולאו אוטומטית; מקום ריק = לא נמצא קישור.) 🚀');
+            } catch (e) {
+              try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הרכבת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+            }
+          })();
+          stats.sent++; return;
+        } else {
+          // Accumulate this message (text and/or links) into the draft
+          pd.raw = (pd.raw ? pd.raw + '\n' : '') + text;
+          pendingDistribution.set(OWNER_ID, pd);
+          const nLinks = (pd.raw.match(/https?:\/\/[^\s]+/g) || []).length;
+          await botSend(chat, `➕ נוסף. סה״כ *${nLinks}* קישורים. הדבק עוד, או שלח *"הכן"* כדי לקבל את ההפצה המלאה.`);
+          stats.sent++; return;
+        }
       }
     }
 
@@ -5121,10 +5140,17 @@ async function route(chatId, text) {
     return '🎬 בודק את הסרטון האחרון בכל פלטפורמה (יוטיוב · טיקטוק · X · אינסטגרם)... חוזר תוך ~דקה.';
   }
 
-  // ─── "Prepare for distribution" (תכין להפצה) — step 1: ask for text+links ─
+  // ─── "Prepare for distribution" (תכין להפצה) — step 1: status + collect ─
   if (/^(תכין(\s+לי)?\s+(ל)?הפצה|הכן(\s+לי)?\s+(ל)?הפצה|תכין הפצה|בוא נכין הפצה)/i.test(text.trim())) {
-    pendingDistribution.set(OWNER_ID, { expiresAt: Date.now() + 20 * 60 * 1000 });
-    return '📤 *מכין הפצה.*\n\n🤖 אני ממלא אוטומטית: *טלגרם · טיקטוק · יוטיוב*\n\nשלח לי ב*הודעה אחת*:\n1️⃣ *הטקסט* — שורת פתיחה (מאיפה / כותרת) + הציטוט\n2️⃣ *הקישורים שנשארו* — *פייסבוק · אינסטגרם · threads · Reels* (ואם יש — קישור לראיון המלא)\n\nאזהה כל פלטפורמה לפי הקישור, אקצר ב-tinyurl, וארכיב לפורמט המלא. 🚀\n\n_(לביטול — שלח "ביטול")_';
+    // Capture anything the owner already put after the trigger (link + text)
+    const after = text.trim().replace(/^(תכין(\s+לי)?\s+(ל)?הפצה|הכן(\s+לי)?\s+(ל)?הפצה|תכין הפצה|בוא נכין הפצה)\s*[:,.\-]?\s*/i, '');
+    pendingDistribution.set(OWNER_ID, { raw: after, expiresAt: Date.now() + 20 * 60 * 1000 });
+    const nLinks = (after.match(/https?:\/\/[^\s]+/g) || []).length;
+    const hasText = after.replace(/https?:\/\/[^\s]+/g, '').trim().length > 0;
+    let got = '';
+    if (nLinks) got += `🔗 קלטתי *${nLinks}* קישורים.\n`;
+    got += hasText ? '📝 קלטתי טקסט.\n' : '📝 עדיין אין טקסט — הדבק כותרת + ציטוט.\n';
+    return `📤 *הכנת הפצה*\n\n🤖 *אלה אני מביא לבד:*\n🔵 טלגרם · ⚫ טיקטוק · ▶️ יוטיוב\n\n✍️ *אלה צריך ממך:*\n🔵 פייסבוק · 📸 אינסטגרם · 🧵 threads · 🎬 Reels\n\n${got}━━━━━━━━━━\n👉 הדבק את הקישורים החסרים (וטקסט אם צריך),\nואז שלח *"הכן"* ואשלח את ההפצה המלאה.\n_(או "הכן" עכשיו כדי להכין ממה שיש · "ביטול" לביטול)_`;
   }
 
   // ─── Manual backup ───────────────────────────────────────────────
@@ -6497,7 +6523,13 @@ async function getKallnerTelegramPostLink() {
 async function assembleDistribution(rawText) {
   const urlRe = /(https?:\/\/[^\s]+)/g;
   const urls = rawText.match(urlRe) || [];
-  const editorial = rawText.replace(urlRe, '').split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+  // Editorial = the non-URL text, minus any bare platform-label lines the
+  // owner may have typed next to a link (so they don't pollute the quote).
+  const LABEL_LINE = /^(פייסבוק|טיקטוק|אינסטגרם|טלגרם|יוטיוב|threads|reels|x|twitter|טוויטר|לראיון(\s+המלא)?(\s+ב-?14)?)\s*[:：\-]?\s*$/i;
+  const editorial = rawText.replace(urlRe, '').split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !LABEL_LINE.test(l))
+    .join('\n');
 
   const links = {};
   const ytPasted = [];
