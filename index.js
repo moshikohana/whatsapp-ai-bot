@@ -5150,7 +5150,7 @@ async function route(chatId, text) {
     let got = '';
     if (nLinks) got += `🔗 קלטתי *${nLinks}* קישורים.\n`;
     got += hasText ? '📝 קלטתי טקסט.\n' : '📝 עדיין אין טקסט — הדבק כותרת + ציטוט.\n';
-    return `📤 *הכנת הפצה*\n\n🤖 *אני מביא לבד:* 🔵 טלגרם (הקישור + *הטקסט* מפוסט הוידאו)\n✍️ *הדבק לי:* ⚫ טיקטוק · ▶️ יוטיוב (שורטס) · 🔵 פייסבוק · 📸 אינסטגרם · 🧵 threads · 🎬 Reels\n\n💡 לא חייב טקסט — אקח אותו מפוסט הוידאו בטלגרם.\n\n${got}━━━━━━━━━━\n👉 הדבק את הקישורים (כמו שהם), ואז שלח *"הכן"*.\n_(או "הכן" עכשיו · "ביטול" לביטול)_`;
+    return `📤 *הכנת הפצה*\n\n💡 שלח לי *קישור אחד* מכל פלטפורמה (טיקטוק / פייסבוק / אינסטגרם / טוויטר / יוטיוב / טלגרם) — *אחלץ ממנו את הטקסט* ואמצא לפיו את אותו סרטון בשאר הרשתות + טלגרם, ואקצר הכל ב-did.li.\n\n👉 הדבק כמה קישורים שיש לך (מדויק יותר), ואז שלח *"הכן"*.\n\n${got}_(או "הכן" עכשיו · "ביטול" לביטול)_`;
   }
 
   // ─── Manual backup ───────────────────────────────────────────────
@@ -6618,6 +6618,100 @@ function _cleanCaption(txt) {
     .join('\n').trim();
 }
 
+// Caption of a TikTok video via yt-dlp (the "title" is the full caption).
+function _tiktokCaption(url) {
+  return new Promise((resolve) => {
+    try {
+      require('child_process').execFile(YT_DLP_BIN, ['--dump-json', '--no-warnings', url],
+        { timeout: 60000, maxBuffer: 25 * 1024 * 1024 }, (err, stdout) => {
+          if (!stdout) return resolve('');
+          try { const d = JSON.parse(stdout.trim().split('\n')[0]); resolve(_cleanCaption((d.title || d.description || '').replace(/\s+/g, ' '))); }
+          catch { resolve(''); }
+        });
+    } catch { resolve(''); }
+  });
+}
+// YouTube video snippet + duration via the Data API.
+async function _youtubeInfo(videoId) {
+  const key = process.env.YOUTUBE_API_KEY; if (!key) return null;
+  try {
+    const params = new URLSearchParams({ part: 'snippet,contentDetails', id: videoId, key });
+    const data = await _httpsGetJson(`https://www.googleapis.com/youtube/v3/videos?${params.toString()}`);
+    const it = (data.items || [])[0]; if (!it) return null;
+    return { title: it.snippet.title, description: it.snippet.description || '', duration: it.contentDetails.duration || '' };
+  } catch { return null; }
+}
+function _isShortDuration(iso) { // ISO8601 PT#M#S ≤ 180s → treat as a Short
+  const m = /PT(?:(\d+)M)?(?:(\d+)S)?/.exec(iso || ''); if (!m) return false;
+  const secs = (parseInt(m[1] || 0, 10) * 60) + parseInt(m[2] || 0, 10);
+  return secs > 0 && secs <= 180;
+}
+// Find his YouTube video matching `text`; return a shorts/watch URL, or null
+// if no confident match. Uses the Data API search + word-overlap + duration.
+async function _matchYouTubeByText(text) {
+  const key = process.env.YOUTUBE_API_KEY; if (!key || !text) return null;
+  try {
+    const q = text.replace(/\n/g, ' ').substring(0, 70);
+    const params = new URLSearchParams({ part: 'snippet', q, type: 'video', maxResults: '10', relevanceLanguage: 'he', key });
+    const data = await _httpsGetJson(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+    const items = (data.items || []).filter(i => i.id && i.id.videoId).map(i => ({ videoId: i.id.videoId, title: i.snippet.title }));
+    let best = null, bs = -1;
+    for (const it of items) { const s = _overlapScore(text, it.title); if (s > bs) { bs = s; best = it; } }
+    if (!best || bs < 3) return null;                       // no confident match
+    const info = await _youtubeInfo(best.videoId);
+    const short = info && _isShortDuration(info.duration);
+    return `https://youtube.com/${short ? 'shorts/' : 'watch?v='}${best.videoId}`;
+  } catch { return null; }
+}
+// Decode HTML entities (og:content is entity-encoded, incl. hex Hebrew).
+function _decodeHtml(s) {
+  return (s || '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch { return ''; } })
+    .replace(/&#(\d+);/g, (_, n) => { try { return String.fromCodePoint(parseInt(n, 10)); } catch { return ''; } })
+    .replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ');
+}
+// Fetch a page's HTML as a link-preview crawler (so FB/IG/X serve og tags),
+// following a couple of redirects.
+function _fetchHtml(url, redirects = 2) {
+  return new Promise((resolve) => {
+    try {
+      const lib = url.startsWith('http://') ? require('http') : require('https');
+      const req = lib.get(url, { headers: { 'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)', 'Accept-Language': 'he,en' } }, (res) => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirects > 0) {
+          res.resume();
+          const next = /^https?:/i.test(res.headers.location) ? res.headers.location : new URL(res.headers.location, url).href;
+          return resolve(_fetchHtml(next, redirects - 1));
+        }
+        let d = ''; res.on('data', c => { d += c; if (d.length > 900000) req.destroy(); });
+        res.on('end', () => resolve(d));
+      });
+      req.setTimeout(15000, () => { req.destroy(); resolve(''); });
+      req.on('error', () => resolve(''));
+    } catch { resolve(''); }
+  });
+}
+// Extract og:description (the post caption) from any social URL.
+async function _ogCaption(url) {
+  const html = await _fetchHtml(url);
+  if (!html) return '';
+  let m = /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)/i.exec(html)
+    || /<meta[^>]+content=["']([^"']*)["'][^>]+property=["']og:description["']/i.exec(html);
+  let desc = _decodeHtml((m && m[1]) || '');
+  // Instagram prefixes "N likes, M comments - user on date: <caption>"
+  desc = desc.replace(/^[\d.,]+\s*likes?,[^:]{0,90}:\s*/i, '');
+  return _cleanCaption(desc.replace(/\s+/g, ' ').trim());
+}
+// Extract the caption/title from ANY sent link (all platforms carry the same
+// text) so it can drive matching the same video across the other platforms.
+async function _captionFromLink(url) {
+  const plat = _platformOfUrl(url);
+  if (plat === 'telegram' && /t\.me\/[^/?#]+\/\d+/i.test(url)) { const p = await getTelegramPostByLink(url); return p ? p.text : ''; }
+  if (plat === 'tiktok') { const c = await _tiktokCaption(url); if (c) return c; return await _ogCaption(url); }
+  if (plat === 'youtube') { const mm = url.match(/(?:v=|shorts\/|youtu\.be\/)([\w-]{6,})/); if (mm) { const info = await _youtubeInfo(mm[1]); if (info) return _cleanCaption(info.title); } return await _ogCaption(url); }
+  // facebook / instagram / x(twitter) / threads / other → og:description
+  return await _ogCaption(url);
+}
+
 // Assemble the full distribution message from the owner's pasted text+links.
 // Auto-fills the platforms the bot can reach itself (Telegram post, latest
 // TikTok, latest YouTube); the owner pastes the rest. Everything is shortened
@@ -6649,12 +6743,16 @@ async function assembleDistribution(rawText) {
     if (plat === 'youtube') ytPasted.push(short);
     else if (!links[plat]) links[plat] = short;
   }
-  // Prefer the shared post's own text as the distribution text
+  // Reference text: typed text > shared TG caption > caption extracted from
+  // ANY pasted link (TikTok/YouTube/Telegram all carry the same caption). This
+  // is what drives matching the SAME video across the other platforms.
   if (tgShare && tgShare.text && tgShare.text.length >= 10) editorial = tgShare.text;
+  if (!editorial || editorial.length < 8) {
+    for (const u of urls) { const c = await _captionFromLink(u); if (c && c.length >= 8) { editorial = c; break; } }
+  }
 
-  // Telegram: match to the text, else take the latest VIDEO post. If the owner
-  // gave no text, adopt that post's caption as the distribution text (the same
-  // text appears on every platform) — this also drives the TikTok match below.
+  // Telegram: shared post wins; else the post whose caption matches the text;
+  // else the latest video post. Adopt its caption as the text if still none.
   if (!links.telegram) {
     const tg = await getKallnerTelegramPostLink(editorial);
     if (tg) {
@@ -6662,12 +6760,17 @@ async function assembleDistribution(rawText) {
       if ((!editorial || editorial.length < 8) && tg.text) editorial = tg.text;
     }
   }
-  // TikTok + YouTube are PASTE-only. Auto-matching by text guessed and could
-  // pick the WRONG video — unacceptable for a spokesperson. The owner has
-  // these links right after posting, so he pastes the exact ones; the bot
-  // still auto-does Telegram + text + did.li shortening + formatting. (Pasted
-  // TikTok already lands in links.tiktok; YouTube Shorts in ytPasted.)
-  const ytMain = ytPasted[0] || '';
+  // TikTok: pasted wins; else the video whose caption confidently matches.
+  if (!links.tiktok && editorial) {
+    try {
+      const t = await getKallnerTikTokLatest({ max: 12 });
+      const pick = _bestByText(t, editorial, x => x.title, 3);
+      if (pick && _overlapScore(editorial, pick.title) >= 3) links.tiktok = await shortenUrl(pick.url);
+    } catch {}
+  }
+  // YouTube: pasted wins; else match by text (Shorts URL when it's short).
+  let ytMain = ytPasted[0] || '';
+  if (!ytMain && editorial) { const yl = await _matchYouTubeByText(editorial); if (yl) ytMain = await shortenUrl(yl); }
   const ytInterview = ytPasted[1] || '';
 
   const ph = '[הדבק קישור]';
