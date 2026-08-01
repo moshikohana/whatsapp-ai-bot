@@ -5141,6 +5141,15 @@ async function route(chatId, text) {
     })();
     return '🧭 מנתח סנטימנט ונרטיבים סביב קלנר (סורק את הקבוצות)... חוזר תוך ~דקה.';
   }
+  // ─── X (Twitter) intelligence — mentions, replies, engagement ────
+  if (/^(מודיעין X|מודיעין טוויטר|אזכורים בטוויטר|תגובות בטוויטר|מה אומרים עליי|מה אומרים עלי|x intel|טוויטר מודיעין)/i.test(text.trim())) {
+    (async () => {
+      try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, await require('./src/twitter-intel').buildXReport()); }
+      catch (e) { try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ מודיעין X נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
+    })();
+    return '🐦 מושך אזכורים, תגובות ומדדי מעורבות מ-X (עם retry)... חוזר תוך ~דקה.';
+  }
+
   // Rival management (for share-of-voice)
   if (/^(הוסף יריב|יריב חדש)\s+/i.test(text.trim())) {
     const name = text.trim().replace(/^(הוסף יריב|יריב חדש)\s+/i, '').trim();
@@ -5552,6 +5561,12 @@ app.get('/debug/latest-posts', async (_req, res) => {
 // ─── Latest-video-per-platform report (test the "סרטון אחרון" command) ──
 app.get('/debug/latest-videos', async (_req, res) => {
   try { res.json({ ok: true, report: await getLatestVideosReport() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ─── X intelligence (test) ──
+app.get('/debug/xintel', async (_req, res) => {
+  try { res.json({ ok: true, text: await require('./src/twitter-intel').buildXReport() }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
