@@ -225,13 +225,27 @@ async function readMessages({ chatName, limit = 30, sinceMinutes } = {}) {
 
   let msgs = messages
     .filter(m => m.message && m.message.trim().length > 0)
-    .map(m => ({
-      id: m.id,
-      timestamp: m.date,
-      body: m.message,
-      sender: m.sender?.firstName || m.sender?.title || m.sender?.username || 'משתתף',
-      fromMe: !!m.out,
-    }));
+    .map(m => {
+      // Detect media type so callers can find e.g. the latest VIDEO post.
+      let mediaType = null;
+      const med = m.media;
+      if (med) {
+        const cn = med.className || '';
+        if (cn === 'MessageMediaPhoto') mediaType = 'photo';
+        else if (cn === 'MessageMediaDocument') {
+          const mime = (med.document && med.document.mimeType) || '';
+          mediaType = /video/i.test(mime) ? 'video' : (/image/i.test(mime) ? 'photo' : 'doc');
+        }
+      }
+      return {
+        id: m.id,
+        timestamp: m.date,
+        body: m.message,
+        sender: m.sender?.firstName || m.sender?.title || m.sender?.username || 'משתתף',
+        fromMe: !!m.out,
+        mediaType,
+      };
+    });
 
   if (sinceMinutes && sinceMinutes > 0) {
     const sinceTs = Math.floor(Date.now() / 1000) - sinceMinutes * 60;

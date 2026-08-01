@@ -6533,24 +6533,31 @@ async function getKallnerTelegramPostLink(matchText = '') {
     const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 20 });
     if (r.error || !r.messages || !r.messages.length) return null;
     const msgs = r.messages;
-    let chosen = msgs[msgs.length - 1]; // default: newest (sorted oldest→newest)
 
-    const norm = s => (s || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
-    const mt = norm(matchText);
+    // 1) If we have text, prefer the post whose caption best overlaps it.
+    let chosen = null;
+    const mt = (matchText || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
     if (mt.length >= 8) {
       const mtWords = new Set(mt.split(' ').filter(w => w.length >= 3));
       let best = null, bestScore = 0;
+      const norm = s => (s || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
       for (const m of msgs) {
-        const seen = new Set();
-        let overlap = 0;
+        const seen = new Set(); let overlap = 0;
         for (const w of norm(m.body).split(' ')) {
           if (w.length >= 3 && mtWords.has(w) && !seen.has(w)) { overlap++; seen.add(w); }
         }
         if (overlap > bestScore) { bestScore = overlap; best = m; }
       }
-      if (best && bestScore >= 3) chosen = best; // confident content match
+      if (best && bestScore >= 3) chosen = best;
     }
-    return chosen && chosen.id ? `https://t.me/Kallner/${chosen.id}` : null;
+    // 2) No text match → the latest VIDEO post (the distribution is a video).
+    if (!chosen) { const vids = msgs.filter(m => m.mediaType === 'video'); if (vids.length) chosen = vids[vids.length - 1]; }
+    // 3) Fallback → newest post.
+    if (!chosen) chosen = msgs[msgs.length - 1];
+
+    return chosen && chosen.id
+      ? { link: `https://t.me/Kallner/${chosen.id}`, text: (chosen.body || '').trim() }
+      : null;
   } catch { return null; }
 }
 
@@ -6594,15 +6601,20 @@ async function getTelegramPostByLink(url) {
       if (msg) txt = msg.body || '';
     }
   } catch {}
-  txt = txt.replace(/https?:\/\/\S+/g, '')
+  return { id, channel, link, text: _cleanCaption(txt) };
+}
+
+// Strip a Telegram caption down to the quote: drop URLs, punctuation-only
+// lines, the updates-group promo, and an orphan "לראיון המלא :" label.
+function _cleanCaption(txt) {
+  return (txt || '').replace(/https?:\/\/\S+/g, '')
     .split('\n')
     .map(l => l.trim())
     .filter(l => l
-      && !/^[.\-·•_]+$/.test(l)                                   // punctuation-only lines
-      && !/מוזמנים|קבוצת העדכונים|הסגורה/.test(l)                  // updates-group promo
-      && !/^לראיון(\s+המלא)?\s*[:：]?\s*$/.test(l))                // orphan "לראיון המלא :" label
+      && !/^[.\-·•_]+$/.test(l)
+      && !/מוזמנים|קבוצת העדכונים|הסגורה/.test(l)
+      && !/^לראיון(\s+המלא)?\s*[:：]?\s*$/.test(l))
     .join('\n').trim();
-  return { id, channel, link, text: txt };
 }
 
 // Assemble the full distribution message from the owner's pasted text+links.
@@ -6639,9 +6651,17 @@ async function assembleDistribution(rawText) {
   // Prefer the shared post's own text as the distribution text
   if (tgShare && tgShare.text && tgShare.text.length >= 10) editorial = tgShare.text;
 
-  // Auto-fill from the bot's reach, matching each platform to the text so we
-  // link the SAME video everywhere (not merely the newest post).
-  if (!links.telegram) { const tg = await getKallnerTelegramPostLink(editorial); if (tg) links.telegram = await shortenUrl(tg); }
+  // Telegram: match to the text, else take the latest VIDEO post. If the owner
+  // gave no text, adopt that post's caption as the distribution text (the same
+  // text appears on every platform) — this also drives the TikTok match below.
+  if (!links.telegram) {
+    const tg = await getKallnerTelegramPostLink(editorial);
+    if (tg) {
+      links.telegram = await shortenUrl(tg.link);
+      if ((!editorial || editorial.length < 8) && tg.text) editorial = tg.text;
+    }
+  }
+  // Other auto platforms, matched to the (now-populated) text.
   if (!links.tiktok) {
     try { const t = await getKallnerTikTokLatest({ max: 10 }); const pick = _bestByText(t, editorial, x => x.title, 2); if (pick) links.tiktok = await shortenUrl(pick.url); } catch {}
   }
