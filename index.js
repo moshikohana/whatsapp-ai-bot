@@ -6039,13 +6039,38 @@ async function getKallnerTelegramSection(sinceHours = 24) {
   }
 }
 
-// Full media monitor: his own Telegram posts (reliable) + web_search for
-// news/other mentions. Shared by the 08:00 cron and the manual endpoint.
+// Kellner's official WhatsApp group ("ח"כ אריאל קלנר - קבוצת הפעלה ועדכונים")
+// — read via the WhatsApp client (the bot is a member). Another reliable
+// first-party source for his own updates.
+const KALLNER_WA_GROUP_ID = '972523273883-1610976597@g.us';
+async function getKallnerWhatsAppSection(sinceHours = 24) {
+  try {
+    const ch = await client.getChatById(KALLNER_WA_GROUP_ID).catch(() => null);
+    if (!ch) return `🟢 *וואטסאפ — הקבוצה הרשמית:* לא נמצאה (ודא שהבוט עדיין חבר בקבוצה).\n`;
+    const msgs = await safeFetchMessages(ch, 60);
+    const cutoff = Date.now() / 1000 - sinceHours * 3600;
+    const rec = (msgs || []).filter(m => m.body && m.body.trim() && m.timestamp > cutoff)
+      .sort((a, b) => b.timestamp - a.timestamp).slice(0, 8);
+    if (!rec.length) return `🟢 *וואטסאפ — ${ch.name}:* אין פוסטים ב-${sinceHours} השעות האחרונות.\n`;
+    const lines = rec.map(m => {
+      const d = new Date(m.timestamp * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      return `• *${d}* — ${(m.body || '').replace(/\s+/g, ' ').substring(0, 220)}`;
+    });
+    return `🟢 *וואטסאפ — ${ch.name} (${rec.length}):*\n${lines.join('\n')}\n`;
+  } catch (e) {
+    return `🟢 *וואטסאפ:* שגיאה בקריאה (${(e.message || '').substring(0, 50)})\n`;
+  }
+}
+
+// Full media monitor: his own Telegram + WhatsApp posts (reliable, exact
+// timestamps) + web_search for news/other mentions. Shared by the 08:00
+// cron and the manual endpoint.
 async function runMediaMonitor(now = new Date()) {
   const { smartChat: _sc } = require('./src/claude');
   const tgSection = await getKallnerTelegramSection(24);
+  const waSection = await getKallnerWhatsAppSection(24);
   const web = await _sc(buildMediaMonitorPrompt(now), [], { webSearchMaxUses: 6, timeoutMs: 180000, prefill: '🔍 *' });
-  return `${tgSection}\n${web}`;
+  return `${tgSection}${waSection}\n${web}`;
 }
 
 // ─── Daily Twitter/X + News monitoring (08:00) ───────────────────
