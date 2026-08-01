@@ -3745,48 +3745,69 @@ client.on('message_create', async (msg) => {
       }
     }
 
-    // ── Pending "prepare distribution" — collect text+links, then assemble ──
+    // ── Pending "prepare distribution" — collect → build → complete ──
     {
       const pd = pendingDistribution.get(OWNER_ID);
       if (pd && pd.expiresAt > Date.now()) {
         const t = text.trim();
-        // Cancel
-        if (/^(ביטול|בטל|עזוב)$/i.test(t)) {
+        const isExit = /^(סיום|סיימתי|יציאה|צא|מספיק|תודה|ביטול|בטל|עזוב|סגור|די)\s*[?!.]?$/i.test(t);
+        const isBuild = /^(הכן|תכין|בצע|יאללה|מוכן|שלח|הפק|עדכן|הצג)\s*!?$/i.test(t);
+        const looksLikeOtherCmd = /^(סריקה|סקירה|תפריט|מה עלה|פוסט אחרון|סרטון|וידאו|מה חדש|עדכוני בוט|גיבוי|סטטוס|התראות|מגמות|מה ניטרתי|בוקר טוב|תזכיר|תקבע|תחפש|חפש|סכם|היי בוטי|ביי בוטי|דופק|מוניטין|מודיעין|תגובה על|\/)/i.test(t);
+        const hasUrl = /https?:\/\/[^\s]+/.test(t);
+
+        // Assemble the accumulated raw, send the clean message + honest status.
+        const sendAssembled = async () => {
+          await botSend(chat, '⏳ מקצר קישורים ומרכיב את ההפצה... שנייה.');
+          try {
+            const r = await assembleDistribution(pd.raw || '');
+            const oc = await client.getChatById(OWNER_ID);
+            await oc.sendMessage(r.text + BOT_MARKER); // clean, copy-ready
+            let status = `👆 *ההפצה מוכנה* — להעתקה ושליחה.\n✅ מולא: ${r.filled.join(', ') || '—'}`;
+            status += r.empty.length ? `\n✍️ חסר: ${r.empty.join(', ')}` : '';
+            status += r.empty.length
+              ? `\n\n➕ *להשלמה:* הדבק את הקישורים החסרים ואז שלח *"עדכן"*.\n🚪 לסיום: שלח *"סיום"*.`
+              : `\n\n🚪 שלח *"סיום"* לסגירת מצב הפצה.`;
+            await botSend(oc, status);
+          } catch (e) {
+            try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הרכבת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+          }
+        };
+
+        if (isExit) {
           pendingDistribution.delete(OWNER_ID);
-          await botSend(chat, '👍 ההפצה בוטלה.');
+          await botSend(chat, '✅ יצאת ממצב הפצה.');
           stats.sent++; return;
         }
-        // GUARD: if this looks like another command (not distribution content),
-        // don't swallow it — drop the pending state and let it run normally.
-        // This keeps the flow from interfering with your other commands.
-        const looksLikeOtherCmd = /^(סריקה|סקירה|תפריט|מה עלה|פוסט אחרון|סרטון|וידאו|מה חדש|עדכוני בוט|גיבוי|סטטוס|התראות|מגמות|מה ניטרתי|בוקר טוב|תזכיר|תקבע|תחפש|חפש|סכם|היי בוטי|ביי בוטי|\/)/i.test(t);
         if (looksLikeOtherCmd) {
           pendingDistribution.delete(OWNER_ID);
-          // fall through (no return) — normal handling continues below
-        } else if (/^(הכן|תכין|סיים|סיימתי|מוכן|שלח|יאללה|בצע|כן)\s*!?$/i.test(t)) {
-          // Build & send the full distribution from everything collected
-          const raw = pd.raw || '';
-          pendingDistribution.delete(OWNER_ID);
-          await botSend(chat, '⏳ מקצר קישורים ומרכיב את ההפצה... שנייה.');
-          (async () => {
-            try {
-              const r = await assembleDistribution(raw);
-              const oc = await client.getChatById(OWNER_ID);
-              await oc.sendMessage(r.text + BOT_MARKER); // clean, copy-ready
-              const status = `👆 *ההפצה מוכנה* — להעתקה ושליחה.\n✅ מולא: ${r.filled.join(', ') || '—'}` +
-                (r.empty.length ? `\n✍️ להשלים ידנית: ${r.empty.join(', ')}` : '');
-              await botSend(oc, status);
-            } catch (e) {
-              try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הרכבת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
-            }
-          })();
+          // fall through — run the other command normally (prevents loops)
+        } else if (pd.phase === 'complete') {
+          // ── Completion phase: add missing links, rebuild on "עדכן" ──
+          if (hasUrl) {
+            pd.raw = (pd.raw ? pd.raw + '\n' : '') + text;
+            pd.expiresAt = Date.now() + 20 * 60 * 1000;
+            pendingDistribution.set(OWNER_ID, pd);
+            const n = (pd.raw.match(/https?:\/\/[^\s]+/g) || []).length;
+            await botSend(chat, `➕ נוסף (סה״כ ${n} קישורים). שלח *"עדכן"* לגרסה מעודכנת, או *"סיום"* לצאת.`);
+            stats.sent++; return;
+          }
+          if (isBuild) { pd.expiresAt = Date.now() + 20 * 60 * 1000; pendingDistribution.set(OWNER_ID, pd); await sendAssembled(); stats.sent++; return; }
+          // Ambiguous — ask explicitly (avoids loops).
+          await botSend(chat, '🤔 להשלים קישור? הדבק אותו ואז *"עדכן"*. לצאת ממצב הפצה? שלח *"סיום"*.');
           stats.sent++; return;
         } else {
-          // Accumulate this message (text and/or links) into the draft
+          // ── Collect phase (before first build) ──
+          if (isBuild) {
+            pd.phase = 'complete';
+            pd.expiresAt = Date.now() + 20 * 60 * 1000;
+            pendingDistribution.set(OWNER_ID, pd);
+            await sendAssembled();
+            stats.sent++; return;
+          }
           pd.raw = (pd.raw ? pd.raw + '\n' : '') + text;
           pendingDistribution.set(OWNER_ID, pd);
-          const nLinks = (pd.raw.match(/https?:\/\/[^\s]+/g) || []).length;
-          await botSend(chat, `➕ נוסף. סה״כ *${nLinks}* קישורים. הדבק עוד, או שלח *"הכן"* כדי לקבל את ההפצה המלאה.`);
+          const n = (pd.raw.match(/https?:\/\/[^\s]+/g) || []).length;
+          await botSend(chat, `➕ נוסף. סה״כ *${n}* קישורים. הדבק עוד, או שלח *"הכן"* לקבלת ההפצה.`);
           stats.sent++; return;
         }
       }
@@ -5210,7 +5231,7 @@ async function route(chatId, text) {
   if (/^(תכין(\s+לי)?\s+(ל)?הפצה|הכן(\s+לי)?\s+(ל)?הפצה|תכין הפצה|בוא נכין הפצה)/i.test(text.trim())) {
     // Capture anything the owner already put after the trigger (link + text)
     const after = text.trim().replace(/^(תכין(\s+לי)?\s+(ל)?הפצה|הכן(\s+לי)?\s+(ל)?הפצה|תכין הפצה|בוא נכין הפצה)\s*[:,.\-]?\s*/i, '');
-    pendingDistribution.set(OWNER_ID, { raw: after, expiresAt: Date.now() + 20 * 60 * 1000 });
+    pendingDistribution.set(OWNER_ID, { raw: after, phase: 'collect', expiresAt: Date.now() + 20 * 60 * 1000 });
     const nLinks = (after.match(/https?:\/\/[^\s]+/g) || []).length;
     const hasText = after.replace(/https?:\/\/[^\s]+/g, '').trim().length > 0;
     let got = '';

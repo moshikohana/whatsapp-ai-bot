@@ -24,11 +24,14 @@ function _once(path) {
     req.on('error', () => resolve(null));
   });
 }
-async function _retry(path, isEmpty, tries = 6) {
+// Retry only because twitterapi.io returns empty intermittently. Empty
+// responses return no tweets → negligible X credit cost; kept low to limit
+// requests. Charged calls (with data) stop the loop immediately.
+async function _retry(path, isEmpty, tries = 3) {
   for (let i = 0; i < tries; i++) {
     const j = await _once(path);
     if (j && !isEmpty(j)) return j;
-    await new Promise(r => setTimeout(r, 1200));
+    await new Promise(r => setTimeout(r, 1000));
   }
   return null;
 }
@@ -66,68 +69,21 @@ async function getHisTweets(max = 10) {
     .slice(0, max);
 }
 
-// Classify the mentions (sentiment + notable + attacks) via Claude JSON.
-async function _classifyMentions(mentions) {
-  if (!mentions.length) return null;
-  const { classifyJSON } = require('./claude');
-  const list = mentions.map((m, i) => `${i + 1}. @${m.user} (❤️${m.likes}): ${m.text.substring(0, 200)}`).join('\n');
-  const prompt =
-`לפניך תגובות/אזכורים ב-X על ח"כ אריאל קלנר (הליכוד). נתח. החזר JSON בלבד:
-{
-  "pro": <n>, "anti": <n>, "neutral": <n>,
-  "notable": [ { "idx": <מספר הפריט>, "stance": "<pro|anti|neutral>", "why": "<שורה קצרה: למה בולט/משפיע>" } ],
-  "attacks": [ { "idx": <מספר>, "summary": "<מתקפה שדורשת תגובה — שורה>" } ]
-}
-- notable: עד 5 (בולטים/משפיעים/ויראליים).
-- attacks: עד 4 מתקפות אמיתיות שדורשות שקילת תגובה. עברית.
-
-התגובות:
-${list}`;
-  return await classifyJSON(prompt, { maxTokens: 1500 });
-}
-
+// Lean report — ONE X request (mentions search), ranked by engagement, links
+// only. No his-tweets endpoint, no LLM → minimal twitterapi.io credit use.
 async function buildXReport() {
   if (!_key()) return '🐦 *מודיעין X:* חסר מפתח twitterapi.io.';
-  const [mentions, tweets] = await Promise.all([getMentions(30), getHisTweets(10)]);
-  if ((!mentions || !mentions.length) && (!tweets || !tweets.length)) {
-    return '🐦 *מודיעין X:* twitterapi.io לא החזיר נתונים כרגע (נסה שוב בעוד רגע — הסקרייפינג שלהם לא יציב).';
+  const mentions = await getMentions(25); // single advanced_search (with retry)
+  if (!mentions || !mentions.length) {
+    return '🐦 *מודיעין X:* twitterapi.io לא החזיר נתונים כרגע — נסה שוב בעוד רגע.';
   }
   const d = new Date().toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
-  let out = `🐦 *מודיעין X — קלנר* · ${d}`;
-
-  // His top-performing tweets
-  if (tweets && tweets.length) {
-    const top = [...tweets].sort((a, b) => (b.likes + b.rts * 2) - (a.likes + a.rts * 2)).slice(0, 3);
-    out += `\n\n📢 *הציוצים שלך שהכי עובדים:*\n` + top.map(t =>
-      `• ❤️${t.likes} 🔁${t.rts} 💬${t.replies} — "${t.text.substring(0, 70)}"`).join('\n');
-  }
-
-  // Mentions + sentiment
-  if (mentions && mentions.length) {
-    const cls = await _classifyMentions(mentions).catch(() => null);
-    if (cls) {
-      out += `\n\n💬 *תגובות/אזכורים (${mentions.length}):* 🟢 ${cls.pro || 0} · 🔴 ${cls.anti || 0} · ⚪ ${cls.neutral || 0}`;
-      const notable = (cls.notable || []).slice(0, 5);
-      if (notable.length) {
-        out += `\n\n🔎 *בולטים:*\n` + notable.map(n => {
-          const m = mentions[(n.idx || 0) - 1]; if (!m) return null;
-          const icon = n.stance === 'pro' ? '🟢' : n.stance === 'anti' ? '🔴' : '⚪';
-          return `${icon} @${m.user} (❤️${m.likes}) — ${n.why}\n   _"${m.text.substring(0, 80)}"_${m.url ? `\n   🔗 ${m.url}` : ''}`;
-        }).filter(Boolean).join('\n');
-      }
-      const attacks = (cls.attacks || []).slice(0, 4);
-      if (attacks.length) {
-        out += `\n\n⚠️ *דורש שקילת תגובה:*\n` + attacks.map(a => {
-          const m = mentions[(a.idx || 0) - 1];
-          return `• ${a.summary}${m ? ` (@${m.user})` : ''}`;
-        }).join('\n');
-        out += `\n\n_💡 לניסוח תגובה: "תגובה על <נושא>"_`;
-      }
-    } else {
-      out += `\n\n💬 *${mentions.length} אזכורים אחרונים:*\n` + mentions.slice(0, 6).map(m =>
-        `• @${m.user} (❤️${m.likes}): "${m.text.substring(0, 70)}"`).join('\n');
-    }
-  }
+  const ranked = [...mentions].sort((a, b) => (b.likes + b.rts * 2 + b.replies) - (a.likes + a.rts * 2 + a.replies)).slice(0, 7);
+  let out = `🐦 *מודיעין X — אזכורים בולטים על קלנר* · ${d}\n`;
+  out += `_(${mentions.length} אזכורים אחרונים · מדורגים לפי מעורבות)_\n\n`;
+  out += ranked.map(m =>
+    `• @${m.user} ❤️${m.likes} 🔁${m.rts} 💬${m.replies}\n  _"${m.text.substring(0, 90)}"_${m.url ? `\n  🔗 ${m.url}` : ''}`).join('\n\n');
+  out += `\n\n_💡 לניסוח תגובה לאחד מהם: "תגובה על <נושא>"_`;
   return out.trim();
 }
 
