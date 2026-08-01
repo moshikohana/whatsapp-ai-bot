@@ -6481,7 +6481,9 @@ async function getKallnerTelegramPostLink() {
   try {
     const tg = require('./src/telegram');
     if (!tg.isConfigured || !tg.isConfigured()) return null;
-    const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 1 });
+    // limit:1 can come back empty if the single latest message is media/service
+    // (readMessages filters empty-body); fetch a few and take the newest id.
+    const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 5 });
     if (r.error || !r.messages || !r.messages.length) return null;
     const id = r.messages[r.messages.length - 1].id; // readMessages sorts oldest→newest
     return id ? `https://t.me/Kallner/${id}` : null;
