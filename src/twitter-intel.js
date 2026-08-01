@@ -24,14 +24,15 @@ function _once(path) {
     req.on('error', () => resolve(null));
   });
 }
-// Retry only because twitterapi.io returns empty intermittently. Empty
-// responses return no tweets → negligible X credit cost; kept low to limit
-// requests. Charged calls (with data) stop the loop immediately.
-async function _retry(path, isEmpty, tries = 3) {
+// twitterapi.io returns empty ~2/3 of the time. It bills PER TWEET returned,
+// so empty responses are FREE — only the one successful fetch costs (~$0.003).
+// Retry generously so the report reliably has data; the charged call stops
+// the loop immediately.
+async function _retry(path, isEmpty, tries = 8) {
   for (let i = 0; i < tries; i++) {
     const j = await _once(path);
     if (j && !isEmpty(j)) return j;
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 900));
   }
   return null;
 }
