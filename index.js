@@ -6507,9 +6507,17 @@ function _shortenDagd(u) {
     req.on('error', () => resolve(null));
   });
 }
+// Circuit breaker: once did.li 403s this IP, stop hammering it for 30 min so
+// its WAF rate-window can expire and did.li recovers; meanwhile use da.gd.
+let _didliBlockedUntil = 0;
 async function shortenUrl(u) {
   if (!/^https?:\/\//i.test(u)) return u;
-  return (await _shortenDidli(u)) || (await _shortenDagd(u)) || u;
+  if (Date.now() >= _didliBlockedUntil) {
+    const d = await _shortenDidli(u);
+    if (d) return d;
+    _didliBlockedUntil = Date.now() + 30 * 60 * 1000; // back off did.li
+  }
+  return (await _shortenDagd(u)) || u;
 }
 
 // Classify a URL to its platform slot by domain.
