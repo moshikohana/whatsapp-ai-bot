@@ -6474,19 +6474,37 @@ ${KALLNER_UPDATES_LINK}`;
 }
 
 // ─── Distribution flow helpers ─────────────────────────────────
-// URL shortener — da.gd: free, no key, works from the server, and does a
-// DIRECT 302 redirect (no interstitial/preview page, unlike tinyurl). is.gd
-// and ulvis are Cloudflare-blocked from the server. Falls back to the
-// original URL on any failure.
+// URL shortener — did.li (the owner's own shortener). Uses its anonymous
+// backend API (AWS API Gateway behind did.li) discovered from the site's Vue
+// bundle: POST /Prod/create {url} → { code } → https://did.li/<code>. did.li
+// does a DIRECT 301 redirect (no interstitial, unlike tinyurl/da.gd) and keeps
+// the owner's branding + click tracking. Falls back to the original URL on any
+// failure so a distribution never breaks.
+const DIDLI_API = '6ejpppqpkh.execute-api.eu-west-1.amazonaws.com';
 function shortenUrl(u) {
   return new Promise((resolve) => {
     if (!/^https?:\/\//i.test(u)) return resolve(u);
-    const req = require('https').get('https://da.gd/shorten?url=' + encodeURIComponent(u), (res) => {
+    const body = JSON.stringify({ url: u });
+    const req = require('https').request({
+      hostname: DIDLI_API,
+      path: '/Prod/create',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': 'https://did.li',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, (res) => {
       let d = ''; res.on('data', c => (d += c));
-      res.on('end', () => { const t = d.trim(); resolve(/^https?:\/\/da\.gd\//i.test(t) ? t : u); });
+      res.on('end', () => {
+        try { const j = JSON.parse(d); resolve(j && j.code ? `https://did.li/${j.code}` : u); }
+        catch { resolve(u); }
+      });
     });
     req.setTimeout(15000, () => { req.destroy(); resolve(u); });
     req.on('error', () => resolve(u));
+    req.write(body);
+    req.end();
   });
 }
 
