@@ -117,15 +117,19 @@ function _norm(s) { return (s || '').replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase
 
 // ─── Report formatting ──────────────────────────────────────────
 function formatPulse(analysis, trends) {
-  if (!analysis || !analysis.kellner_mentions) {
-    return '🧭 *דופק מוניטין — קלנר*\n\n_לא נמצאו אזכורים משמעותיים של קלנר בטווח שנסרק._';
+  if (!analysis || (!analysis.kellner_mentions && !(analysis.narratives || []).length)) {
+    return '🧭 *דופק מוניטין — קלנר*\n\n_לא נמצא תוכן משמעותי בטווח שנסרק (נסה טווח רחב יותר, או ודא שהפריסט/רשימת המעקב מאוכלסים)._';
   }
   const s = analysis.sentiment || {};
   const netMap = { positive: '🟢 חיובי', negative: '🔴 שלילי', mixed: '🟡 מעורב', neutral: '⚪ ניטרלי' };
   const d = new Date().toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
   let out = `🧭 *דופק מוניטין — קלנר* · ${d}\n`;
-  out += `📊 סנטימנט (${analysis.kellner_mentions} אזכורים): 🟢 ${s.pro || 0} בעד · 🔴 ${s.anti || 0} נגד · ⚪ ${s.neutral || 0} ניטרלי\n`;
-  out += `🌡️ מגמה כללית: ${netMap[analysis.net_sentiment] || analysis.net_sentiment || '—'}\n`;
+  if (analysis.kellner_mentions) {
+    out += `📊 סנטימנט (${analysis.kellner_mentions} אזכורי קלנר): 🟢 ${s.pro || 0} בעד · 🔴 ${s.anti || 0} נגד · ⚪ ${s.neutral || 0} ניטרלי\n`;
+    out += `🌡️ מגמה כללית: ${netMap[analysis.net_sentiment] || analysis.net_sentiment || '—'}\n`;
+  } else {
+    out += `📊 _אין אזכורים ישירים של קלנר בטווח — הנה תמונת השיח הפוליטי:_\n`;
+  }
 
   // Share of voice
   const sov = Object.entries(analysis.share_of_voice || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);

@@ -6861,6 +6861,14 @@ async function assembleDistribution(rawText) {
 async function gatherPoliticalPool(sinceMinutes = 1440, maxSources = 30) {
   let sources = [];
   try { sources = await resolveDailyScanSources('both', 'both'); } catch {}
+  // daily.json is often thin — prefer the owner's richest saved preset (his
+  // full monitoring list) so the analysis actually sees Kellner discourse.
+  try {
+    const presets = require('./src/scan-presets');
+    const all = (presets.list() || []).filter(p => !p.isDynamic && Array.isArray(p.sources) && p.sources.length);
+    const biggest = all.sort((a, b) => b.sources.length - a.sources.length)[0];
+    if (biggest && biggest.sources.length > sources.length) sources = biggest.sources;
+  } catch {}
   if (!sources.length) return '';
   const cutoff = Date.now() / 1000 - sinceMinutes * 60;
   const lines = [];
