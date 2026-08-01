@@ -6697,8 +6697,12 @@ async function _ogCaption(url) {
   let m = /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)/i.exec(html)
     || /<meta[^>]+content=["']([^"']*)["'][^>]+property=["']og:description["']/i.exec(html);
   let desc = _decodeHtml((m && m[1]) || '');
-  // Instagram prefixes "N likes, M comments - user on date: <caption>"
-  desc = desc.replace(/^[\d.,]+\s*likes?,[^:]{0,90}:\s*/i, '');
+  // Drop leading bidi/space control marks (Instagram wraps Hebrew in them).
+  desc = desc.replace(/^[\s‎‏‪-‮⁦-⁩]+/, '');
+  // Instagram prefixes "N likes, M comments - user on/ב- <date>: <caption>".
+  desc = desc.replace(/^[\d.,]+\s*likes?,\s*[\d.,]+\s*comments?\b[\s\S]*?:\s*/i, '');
+  // Strip wrapping quotes/marks around the caption.
+  desc = desc.replace(/^["'“”«‎‏\s]+/, '').replace(/["'“”».‎‏\s]+$/, '');
   return _cleanCaption(desc.replace(/\s+/g, ' ').trim());
 }
 // Extract the caption/title from ANY sent link (all platforms carry the same
