@@ -1201,4 +1201,21 @@ async function classifyJSON(userMessage, { system, maxTokens = 2000, model = 'cl
   }
 }
 
-module.exports = { smartChat, thinkWithClaude, classifyJSON, registerToolHandlers, getUsageSummary };
+// ─── Plain text completion (custom system, no persona/tools) ─────
+// For drafting (e.g. the spokesperson response engine). Returns text or ''.
+async function completeText(userMessage, { system, maxTokens = 1500, model = 'claude-sonnet-4-6' } = {}) {
+  try {
+    const response = await callWithRetry(() => anthropic.messages.create({
+      model,
+      max_tokens: maxTokens,
+      system: system || 'אתה עוזר מקצועי ומדויק. ענה בעברית.',
+      messages: [{ role: 'user', content: userMessage }],
+    }), { label: 'completeText', maxRetries: 2, baseDelayMs: 1500 });
+    return (response.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  } catch (err) {
+    logger.warn?.(`completeText failed: ${(err.message || '').substring(0, 80)}`);
+    return '';
+  }
+}
+
+module.exports = { smartChat, thinkWithClaude, classifyJSON, completeText, registerToolHandlers, getUsageSummary };

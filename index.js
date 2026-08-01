@@ -2856,6 +2856,9 @@ const pendingPresetSave = new Map();
 // ── Pending "prepare distribution" state (owner sends text+links next) ──
 const pendingDistribution = new Map();
 
+// ── Pending response-engine draft (owner can "שמור תגובה" to archive it) ──
+const pendingResponseSave = new Map();
+
 // ─── Daily "add active new group to scans?" suggestion ──────────
 // Once a day, look for groups the owner is in that got a lot of traffic
 // today (> threshold) but are NOT in the daily scan list, and offer to add
@@ -5100,6 +5103,29 @@ async function route(chatId, text) {
     return _kwStats();
   }
 
+  // ─── Response engine — consistent-voice draft + journalist targeting ──
+  if (/^(תגובה על|נסח תגובה|נסח לי תגובה|טיוטת תגובה|תגובה בנושא)\s+/i.test(text.trim())) {
+    const topic = text.trim().replace(/^(תגובה על|נסח תגובה|נסח לי תגובה|טיוטת תגובה|תגובה בנושא)\s+/i, '').trim();
+    (async () => {
+      try {
+        const oc = await client.getChatById(OWNER_ID);
+        const r = await require('./src/response-engine').buildResponse(topic);
+        pendingResponseSave.set(OWNER_ID, { topic, text: r.text, expiresAt: Date.now() + 15 * 60 * 1000 });
+        await botSend(oc, r.text + '\n\n💾 _"שמור תגובה" לארכב · או ערוך ושלח לכתבים_');
+      } catch (e) {
+        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ מנוע התגובה נכשל: ' + (e.message || '').substring(0, 60)); } catch {}
+      }
+    })();
+    return '📝 מנסח טיוטת תגובה מעוגנת בעמדות של קלנר + מיקוד כתבים... שנייה.';
+  }
+  if (/^(שמור תגובה|ארכב תגובה|אשר תגובה)\s*[?!.]?$/i.test(text.trim())) {
+    const pend = pendingResponseSave.get(OWNER_ID);
+    if (!pend || pend.expiresAt < Date.now()) return '_אין טיוטת תגובה אחרונה. נסח קודם: "תגובה על <נושא>"._';
+    const saved = require('./src/response-engine').saveApproved(pend.topic, pend.text);
+    pendingResponseSave.delete(OWNER_ID);
+    return saved ? `✅ נשמר בארכיון (${saved.id}) — "${pend.topic}". יתרום לעקביות בתגובות הבאות.` : '❌ שמירה נכשלה.';
+  }
+
   // ─── Reputation pulse — sentiment + narratives + share-of-voice ──
   if (/^(דופק מוניטין|דופק|סנטימנט|מצב רוח|האזנה|reputation|מוניטין)\s*[?!.]?$/i.test(text.trim())) {
     (async () => {
@@ -5525,6 +5551,15 @@ app.get('/debug/latest-posts', async (_req, res) => {
 app.get('/debug/latest-videos', async (_req, res) => {
   try { res.json({ ok: true, report: await getLatestVideosReport() }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ─── Response engine (test Option 2) ──
+app.get('/debug/response', async (req, res) => {
+  try {
+    const topic = req.query.topic || 'בג"ץ ומערכת המשפט';
+    const r = await require('./src/response-engine').buildResponse(topic);
+    res.json({ ok: true, topic, text: r.text, positions: (r.positions || []).length, pastQuotes: (r.past || []).length });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── Pool diagnostics (why is the sentiment pool empty?) ──
