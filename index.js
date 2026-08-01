@@ -6002,16 +6002,16 @@ function buildMediaMonitorPrompt(now = new Date()) {
 // same content and we get exact timestamps. Requires the linked Telegram
 // account to be a MEMBER of the channel (join t.me/Kallner once).
 const KALLNER_TG_CHANNEL = 'אריאל קלנר';
-async function getKallnerTelegramSection(sinceDays = 14) {
+async function getKallnerTelegramSection(sinceHours = 24) {
   try {
     const tg = require('./src/telegram');
     if (!tg.isConfigured || !tg.isConfigured()) return '';
-    const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 15, sinceMinutes: sinceDays * 24 * 60 });
+    const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 15, sinceMinutes: sinceHours * 60 });
     if (r.error) {
       return `🔵 *טלגרם — הערוץ הרשמי:*\n_לא נמצא. הצטרף ל-t.me/Kallner בחשבון הטלגרם המקושר כדי לאפשר מעקב אמין._\n`;
     }
     const msgs = (r.messages || []).filter(m => m.body && m.body.trim()).sort((a, b) => b.timestamp - a.timestamp).slice(0, 8);
-    if (!msgs.length) return `🔵 *טלגרם — ${r.chatTitle}:* אין פוסטים ב-${sinceDays} הימים האחרונים.\n`;
+    if (!msgs.length) return `🔵 *טלגרם — ${r.chatTitle}:* אין פוסטים ב-${sinceHours} השעות האחרונות.\n`;
     const lines = msgs.map(m => {
       const d = new Date(m.timestamp * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
       return `• *${d}* — ${m.body.replace(/\s+/g, ' ').substring(0, 220)}`;
@@ -6026,7 +6026,7 @@ async function getKallnerTelegramSection(sinceDays = 14) {
 // news/other mentions. Shared by the 08:00 cron and the manual endpoint.
 async function runMediaMonitor(now = new Date()) {
   const { smartChat: _sc } = require('./src/claude');
-  const tgSection = await getKallnerTelegramSection(14);
+  const tgSection = await getKallnerTelegramSection(24);
   const web = await _sc(buildMediaMonitorPrompt(now), [], { webSearchMaxUses: 6, timeoutMs: 180000, prefill: '🔍 *' });
   return `${tgSection}\n${web}`;
 }
