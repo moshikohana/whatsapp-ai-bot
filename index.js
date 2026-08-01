@@ -5520,7 +5520,6 @@ app.get('/run-media-briefing', async (_req, res) => {
   // Run async so we don't block the HTTP response
   (async () => {
     try {
-      const { smartChat: _sc } = require('./src/claude');
       const oc = await client.getChatById(OWNER_ID);
       const now = new Date();
       const today = now.toLocaleDateString('he-IL');
@@ -5529,7 +5528,7 @@ app.get('/run-media-briefing', async (_req, res) => {
 
       await botSend(oc, `🧪 *בדיקה ידנית — מעקב מדיה*\n_מריץ עכשיו, יחזור עם תוצאה תוך כדקה..._`);
 
-      const result = await _sc(buildMediaMonitorPrompt(now), [], { webSearchMaxUses: 6, timeoutMs: 180000, prefill: '🔍 *' });
+      const result = await runMediaMonitor(now);
       await botSend(oc, `🔍 *מעקב מדיה (בדיקה ידנית) — ${today}*\n📅 _טווח מועדף: ${twoWeeksAgoISO} → ${todayISO}_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
     } catch (e) {
       logger.error(`/run-media-briefing failed: ${e.message?.substring(0, 100)}`);
@@ -5997,17 +5996,51 @@ function buildMediaMonitorPrompt(now = new Date()) {
 [רק אם יש אזכור שמצריך תגובה או הזדמנות תקשורתית — אחרת "אין"]`;
 }
 
+// Kellner's official Telegram channel (t.me/Kallner) — read deterministically
+// via the existing Telegram session. This is the RELIABLE source for his own
+// posts: web_search can't see fresh X/tweets, but his Telegram mirrors the
+// same content and we get exact timestamps. Requires the linked Telegram
+// account to be a MEMBER of the channel (join t.me/Kallner once).
+const KALLNER_TG_CHANNEL = 'אריאל קלנר';
+async function getKallnerTelegramSection(sinceDays = 14) {
+  try {
+    const tg = require('./src/telegram');
+    if (!tg.isConfigured || !tg.isConfigured()) return '';
+    const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 15, sinceMinutes: sinceDays * 24 * 60 });
+    if (r.error) {
+      return `🔵 *טלגרם — הערוץ הרשמי:*\n_לא נמצא. הצטרף ל-t.me/Kallner בחשבון הטלגרם המקושר כדי לאפשר מעקב אמין._\n`;
+    }
+    const msgs = (r.messages || []).filter(m => m.body && m.body.trim()).sort((a, b) => b.timestamp - a.timestamp).slice(0, 8);
+    if (!msgs.length) return `🔵 *טלגרם — ${r.chatTitle}:* אין פוסטים ב-${sinceDays} הימים האחרונים.\n`;
+    const lines = msgs.map(m => {
+      const d = new Date(m.timestamp * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      return `• *${d}* — ${m.body.replace(/\s+/g, ' ').substring(0, 220)}`;
+    });
+    return `🔵 *טלגרם — ${r.chatTitle} (${msgs.length} פוסטים אחרונים):*\n${lines.join('\n')}\n`;
+  } catch (e) {
+    return `🔵 *טלגרם:* שגיאה בקריאה (${(e.message || '').substring(0, 50)})\n`;
+  }
+}
+
+// Full media monitor: his own Telegram posts (reliable) + web_search for
+// news/other mentions. Shared by the 08:00 cron and the manual endpoint.
+async function runMediaMonitor(now = new Date()) {
+  const { smartChat: _sc } = require('./src/claude');
+  const tgSection = await getKallnerTelegramSection(14);
+  const web = await _sc(buildMediaMonitorPrompt(now), [], { webSearchMaxUses: 6, timeoutMs: 180000, prefill: '🔍 *' });
+  return `${tgSection}\n${web}`;
+}
+
 // ─── Daily Twitter/X + News monitoring (08:00) ───────────────────
 nodeCron.schedule('0 8 * * *', async () => {
   try {
-    const { smartChat: _sc } = require('./src/claude');
     const oc = await client.getChatById(OWNER_ID);
     const now = new Date();
     const today = now.toLocaleDateString('he-IL');
     const twoWeeksAgoISO = new Date(now.getTime() - 14 * 86400000).toISOString().slice(0, 10);
     const todayISO = now.toISOString().slice(0, 10);
 
-    const result = await _sc(buildMediaMonitorPrompt(now), [], { webSearchMaxUses: 6, timeoutMs: 180000, prefill: '🔍 *' });
+    const result = await runMediaMonitor(now);
     await botSend(oc, `🔍 *מעקב מדיה יומי — ${today}*\n📅 _טווח מועדף: ${twoWeeksAgoISO} → ${todayISO} (14 ימים)_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
   } catch (e) {
     console.error('Twitter monitor cron error:', e.message?.substring(0, 80));
