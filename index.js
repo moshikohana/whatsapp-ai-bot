@@ -6627,14 +6627,15 @@ async function getKallnerTelegramPostLink(matchText = '') {
     const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 20 });
     if (r.error || !r.messages || !r.messages.length) return null;
     const msgs = r.messages;
+    const mk = m => ({ link: `https://t.me/Kallner/${m.id}`, text: _cleanCaption(m.body) });
 
-    // 1) If we have text, prefer the post whose caption best overlaps it.
-    let chosen = null;
     const mt = (matchText || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
     if (mt.length >= 8) {
+      // Seeded by text — return ONLY a confident match; never guess "latest"
+      // (a wrong link is worse than an empty placeholder).
       const mtWords = new Set(mt.split(' ').filter(w => w.length >= 3));
-      let best = null, bestScore = 0;
       const norm = s => (s || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
+      let best = null, bestScore = 0;
       for (const m of msgs) {
         const seen = new Set(); let overlap = 0;
         for (const w of norm(m.body).split(' ')) {
@@ -6642,16 +6643,13 @@ async function getKallnerTelegramPostLink(matchText = '') {
         }
         if (overlap > bestScore) { bestScore = overlap; best = m; }
       }
-      if (best && bestScore >= 3) chosen = best;
+      return (best && bestScore >= 3 && best.id) ? mk(best) : null;
     }
-    // 2) No text match → the latest VIDEO post (the distribution is a video).
-    if (!chosen) { const vids = msgs.filter(m => m.mediaType === 'video'); if (vids.length) chosen = vids[vids.length - 1]; }
-    // 3) Fallback → newest post.
-    if (!chosen) chosen = msgs[msgs.length - 1];
 
-    return chosen && chosen.id
-      ? { link: `https://t.me/Kallner/${chosen.id}`, text: _cleanCaption(chosen.body) }
-      : null;
+    // No text at all → the latest VIDEO post, else the newest post.
+    const vids = msgs.filter(m => m.mediaType === 'video');
+    const chosen = vids.length ? vids[vids.length - 1] : msgs[msgs.length - 1];
+    return (chosen && chosen.id) ? mk(chosen) : null;
   } catch { return null; }
 }
 
@@ -6799,6 +6797,25 @@ async function _ogCaption(url) {
   desc = desc.replace(/^["'“”«‎‏\s]+/, '').replace(/["'“”».‎‏\s]+$/, '');
   return _cleanCaption(desc.replace(/\s+/g, ' ').trim());
 }
+// Tweet text via Twitter's public syndication endpoint (free, no key, works
+// from the server — x.com blocks og/crawlers with 404). Falls back to '' .
+function _twitterCaption(url) {
+  const m = url.match(/(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/i);
+  if (!m) return Promise.resolve('');
+  const id = m[1];
+  return new Promise((resolve) => {
+    const req = require('https').get(`https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=a&lang=he`, (res) => {
+      let d = ''; res.on('data', c => (d += c));
+      res.on('end', () => {
+        try { const j = JSON.parse(d); resolve(_cleanCaption((j.text || '').replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim())); }
+        catch { resolve(''); }
+      });
+    });
+    req.setTimeout(12000, () => { req.destroy(); resolve(''); });
+    req.on('error', () => resolve(''));
+  });
+}
+
 // Extract the caption/title from ANY sent link (all platforms carry the same
 // text) so it can drive matching the same video across the other platforms.
 async function _captionFromLink(url) {
@@ -6806,7 +6823,8 @@ async function _captionFromLink(url) {
   if (plat === 'telegram' && /t\.me\/[^/?#]+\/\d+/i.test(url)) { const p = await getTelegramPostByLink(url); return p ? p.text : ''; }
   if (plat === 'tiktok') { const c = await _tiktokCaption(url); if (c) return c; return await _ogCaption(url); }
   if (plat === 'youtube') { const mm = url.match(/(?:v=|shorts\/|youtu\.be\/)([\w-]{6,})/); if (mm) { const info = await _youtubeInfo(mm[1]); if (info) return _cleanCaption(info.title); } return await _ogCaption(url); }
-  // facebook / instagram / x(twitter) / threads / other → og:description
+  if (plat === 'x') { const c = await _twitterCaption(url); if (c) return c; return await _ogCaption(url); }
+  // facebook / instagram / threads / other → og:description
   return await _ogCaption(url);
 }
 
@@ -6849,14 +6867,20 @@ async function assembleDistribution(rawText) {
     for (const u of urls) { const c = await _captionFromLink(u); if (c && c.length >= 8) { editorial = c; break; } }
   }
 
-  // Telegram: shared post wins; else the post whose caption matches the text;
-  // else the latest video post. Adopt its caption as the text if still none.
+  // Telegram: shared post wins; else the post whose caption MATCHES the seed
+  // text. Only fall back to "latest video" when NO link was sent at all — if a
+  // seed was given but its text couldn't be read, leave a placeholder rather
+  // than guessing the wrong post.
+  const hasSeed = urls.length > 0;
   if (!links.telegram) {
-    const tg = await getKallnerTelegramPostLink(editorial);
-    if (tg) {
-      links.telegram = await shortenUrl(tg.link);
-      if ((!editorial || editorial.length < 8) && tg.text) editorial = tg.text;
+    if (editorial && editorial.length >= 8) {
+      const tg = await getKallnerTelegramPostLink(editorial); // confident match or null
+      if (tg) links.telegram = await shortenUrl(tg.link);
+    } else if (!hasSeed) {
+      const tg = await getKallnerTelegramPostLink(''); // no seed → latest video
+      if (tg) { links.telegram = await shortenUrl(tg.link); if (tg.text) editorial = tg.text; }
     }
+    // seed given but no editorial → leave placeholder (no wrong guess)
   }
   // TikTok: pasted wins; else the video whose caption confidently matches.
   if (!links.tiktok && editorial) {
