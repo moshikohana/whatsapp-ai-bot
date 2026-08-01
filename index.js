@@ -6789,6 +6789,19 @@ async function assembleDistribution(rawText) {
   if (!ytMain && editorial) { const yl = await _matchYouTubeByText(editorial); if (yl) ytMain = await shortenUrl(yl); }
   const ytInterview = ytPasted[1] || '';
 
+  // X/Twitter: pasted wins; else match his tweet by text (via twitterapi.io).
+  if (!links.x && editorial) {
+    try {
+      const tws = await getKallnerTwitterLatest({ max: 20 });
+      const cands = (tws || []).filter(t => !t.isRT && t.url);
+      const pick = _bestByText(cands, editorial, t => t.text, 3);
+      if (pick && _overlapScore(editorial, pick.text) >= 3) links.x = await shortenUrl(pick.url);
+    } catch {}
+  }
+  // Facebook: paste-only. His page's posts can't be listed without a page
+  // access token (FB blocks server access + returns no permalinks to crawlers),
+  // so there's no reliable way to auto-find the matching post.
+
   const ph = '[הדבק קישור]';
   const L = k => links[k] || ph;
   let s = `חה״כ *אריאל קלנר* (הליכוד) :\n${editorial || '[כותרת / ציטוט]'}\n\n`;
@@ -6797,6 +6810,7 @@ async function assembleDistribution(rawText) {
   s += `*אינסטגרם*\n${L('instagram')}\n\n`;
   s += `*טלגרם*\n${L('telegram')}\n\n`;
   s += `*יוטיוב*\n${ytMain || ph}\n\n`;
+  s += `*X (טוויטר)*\n${L('x')}\n\n`;
   s += `*threads*\n${L('threads')}\n\n`;
   if (links.reels) s += `*Reels*\n${links.reels}\n\n`;
   if (ytInterview) s += `לראיון המלא ב-14 🔽\n${ytInterview}\n\n`;
