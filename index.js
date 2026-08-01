@@ -5150,7 +5150,7 @@ async function route(chatId, text) {
     let got = '';
     if (nLinks) got += `🔗 קלטתי *${nLinks}* קישורים.\n`;
     got += hasText ? '📝 קלטתי טקסט.\n' : '📝 עדיין אין טקסט — הדבק כותרת + ציטוט.\n';
-    return `📤 *הכנת הפצה*\n\n💡 *הכי פשוט:* שתף לי את *קישור פוסט הטלגרם* — אקח ממנו את הטקסט ואמצא לפיו את אותו סרטון בטיקטוק/יוטיוב אוטומטית.\n\n🤖 *אני מביא לבד:* 🔵 טלגרם · ⚫ טיקטוק · ▶️ יוטיוב\n✍️ *צריך ממך:* 🔵 פייסבוק · 📸 אינסטגרם · 🧵 threads · 🎬 Reels\n\n${got}━━━━━━━━━━\n👉 הדבק קישור טלגרם (+ החסרים), ואז שלח *"הכן"*.\n_(או "הכן" עכשיו · "ביטול" לביטול)_`;
+    return `📤 *הכנת הפצה*\n\n💡 *הכי פשוט:* שתף לי את *קישור פוסט הטלגרם* — אקח ממנו את הטקסט ואמצא לפיו את הטיקטוק אוטומטית.\n\n🤖 *אני מביא לבד:* 🔵 טלגרם · ⚫ טיקטוק\n✍️ *צריך ממך:* ▶️ יוטיוב (שורטס) · 🔵 פייסבוק · 📸 אינסטגרם · 🧵 threads · 🎬 Reels\n\n${got}━━━━━━━━━━\n👉 הדבק קישור טלגרם + הקישורים החסרים, ואז שלח *"הכן"*.\n_(או "הכן" עכשיו · "ביטול" לביטול)_`;
   }
 
   // ─── Manual backup ───────────────────────────────────────────────
@@ -6627,10 +6627,10 @@ async function assembleDistribution(rawText) {
   if (!links.tiktok) {
     try { const t = await getKallnerTikTokLatest({ max: 10 }); const pick = _bestByText(t, editorial, x => x.title, 2); if (pick) links.tiktok = await shortenUrl(pick.url); } catch {}
   }
-  let ytMain = ytPasted[0];
-  if (!ytMain) {
-    try { const y = await getKallnerYouTubeLatest({ sinceDays: 90, max: 10 }); const pick = _bestByText(y, editorial, x => x.title, 2); if (pick) ytMain = await shortenUrl(`https://youtube.com/watch?v=${pick.videoId}`); } catch {}
-  }
+  // YouTube: the owner pastes it — his distribution clip is usually a Short
+  // (youtube.com/shorts/…), which the Data API can't reliably locate (it
+  // surfaces the full interview instead). A pasted link is kept as-is.
+  const ytMain = ytPasted[0] || '';
   const ytInterview = ytPasted[1] || '';
 
   const ph = '[הדבק קישור]';
