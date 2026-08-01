@@ -5527,6 +5527,15 @@ app.get('/debug/latest-videos', async (_req, res) => {
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+// ─── Pool diagnostics (why is the sentiment pool empty?) ──
+app.get('/debug/pool', async (req, res) => {
+  try {
+    const min = req.query.min ? parseInt(req.query.min, 10) : 1440;
+    const pool = await gatherPoliticalPool(min, req.query.max ? parseInt(req.query.max, 10) : 30);
+    res.json({ ok: true, minutes: min, poolChars: pool.length, lines: pool ? pool.split('\n').length : 0, sample: pool.substring(0, 600) });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // ─── Reputation pulse (test the listening layer) ──
 app.get('/debug/pulse', async (req, res) => {
   try {
