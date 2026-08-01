@@ -6430,7 +6430,7 @@ async function getLatestVideosReport() {
 // per platform, the full-interview line, and the fixed closed-updates-group
 // footer. Auto-fills the TikTok + YouTube links it already knows; the rest are
 // [הדבק קישור] placeholders he fills + shortens via did.li.
-const KALLNER_UPDATES_LINK = 'https://did.li/kalner';
+const KALLNER_UPDATES_LINK = 'https://did.li/kallner';
 async function buildDistributionTemplate() {
   let ttUrl = '', ytUrl = '';
   try { const t = await getKallnerTikTokLatest({ max: 1 }); if (t && t[0]) ttUrl = t[0].url; } catch {}
@@ -6474,38 +6474,42 @@ ${KALLNER_UPDATES_LINK}`;
 }
 
 // ─── Distribution flow helpers ─────────────────────────────────
-// URL shortener — did.li (the owner's own shortener). Uses its anonymous
-// backend API (AWS API Gateway behind did.li) discovered from the site's Vue
-// bundle: POST /Prod/create {url} → { code } → https://did.li/<code>. did.li
-// does a DIRECT 301 redirect (no interstitial, unlike tinyurl/da.gd) and keeps
-// the owner's branding + click tracking. Falls back to the original URL on any
-// failure so a distribution never breaks.
+// URL shortener with a fallback chain so links are ALWAYS shortened:
+//   1) did.li — the owner's own shortener (direct 301, branding + tracking).
+//      Anonymous backend discovered from did.li's Vue bundle: POST the AWS API
+//      Gateway /Prod/create {url} → {code} → https://did.li/<code>.
+//   2) da.gd — works from the server if did.li's WAF blocks this IP (heavy use
+//      can get the datacenter IP 403'd); direct 302, no interstitial.
+//   3) raw URL (last resort) so a distribution never breaks.
 const DIDLI_API = '6ejpppqpkh.execute-api.eu-west-1.amazonaws.com';
-function shortenUrl(u) {
+function _shortenDidli(u) {
   return new Promise((resolve) => {
-    if (!/^https?:\/\//i.test(u)) return resolve(u);
     const body = JSON.stringify({ url: u });
     const req = require('https').request({
-      hostname: DIDLI_API,
-      path: '/Prod/create',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Origin': 'https://did.li',
-        'Content-Length': Buffer.byteLength(body),
-      },
+      hostname: DIDLI_API, path: '/Prod/create', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': 'https://did.li', 'Content-Length': Buffer.byteLength(body) },
     }, (res) => {
       let d = ''; res.on('data', c => (d += c));
-      res.on('end', () => {
-        try { const j = JSON.parse(d); resolve(j && j.code ? `https://did.li/${j.code}` : u); }
-        catch { resolve(u); }
-      });
+      res.on('end', () => { try { const j = JSON.parse(d); resolve(res.statusCode < 300 && j && j.code ? `https://did.li/${j.code}` : null); } catch { resolve(null); } });
     });
-    req.setTimeout(15000, () => { req.destroy(); resolve(u); });
-    req.on('error', () => resolve(u));
-    req.write(body);
-    req.end();
+    req.setTimeout(12000, () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+    req.write(body); req.end();
   });
+}
+function _shortenDagd(u) {
+  return new Promise((resolve) => {
+    const req = require('https').get('https://da.gd/shorten?url=' + encodeURIComponent(u), (res) => {
+      let d = ''; res.on('data', c => (d += c));
+      res.on('end', () => { const t = d.trim(); resolve(/^https?:\/\/da\.gd\//i.test(t) ? t : null); });
+    });
+    req.setTimeout(12000, () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+async function shortenUrl(u) {
+  if (!/^https?:\/\//i.test(u)) return u;
+  return (await _shortenDidli(u)) || (await _shortenDagd(u)) || u;
 }
 
 // Classify a URL to its platform slot by domain.
