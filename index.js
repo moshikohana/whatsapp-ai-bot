@@ -6945,6 +6945,22 @@ nodeCron.schedule('0 8 * * *', async () => {
   }
 }, { timezone: 'Asia/Jerusalem' });
 
+// ─── Daily reputation pulse (07:30) — the listening layer ────────
+nodeCron.schedule('30 7 * * *', async () => {
+  try {
+    if (botStatus !== 'connected') return;
+    const oc = await client.getChatById(OWNER_ID);
+    const r = await runReputationPulse(1440);
+    await botSend(oc, r.text);
+    // Proactive escalation: if negative narratives are rising/new, flag hard.
+    const t = r.trends || {};
+    const hot = [...(t.rising || []).filter(n => n.stance === 'anti'), ...(t.new || [])];
+    if (hot.length) {
+      await botSend(oc, `🚨 *התראת נרטיב:* ${hot.length} נרטיב(ים) שלילי(ים) צוברים תאוצה — ${hot.map(n => `"${n.title}"`).join(' · ')}\n_כדאי לשקול תגובה יזומה._`);
+    }
+  } catch (e) { console.error('Reputation pulse cron error:', e.message?.substring(0, 80)); }
+}, { timezone: 'Asia/Jerusalem' });
+
 // ─── Morning briefing cron (07:00) ───────────────────────────────
 nodeCron.schedule('0 7 * * *', async () => {
   try {
