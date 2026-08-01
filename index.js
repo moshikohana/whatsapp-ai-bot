@@ -5061,6 +5061,20 @@ async function route(chatId, text) {
     }
   }
 
+  // ─── "What's the latest post on each platform?" (מה עלה) ─────────
+  if (/^(מה עלה|מה עלה לאחרונה|הפוסט האחרון|פוסט אחרון|מה פורסם|מה יצא|עדכון פלטפורמות|מה עלה כבר)/i.test(text.trim())) {
+    (async () => {
+      try {
+        const report = await getLatestPostsReport();
+        const oc = await client.getChatById(OWNER_ID);
+        await botSend(oc, report);
+      } catch (e) {
+        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ בדיקת פלטפורמות נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+      }
+    })();
+    return '📊 בודק את הפוסט האחרון בכל פלטפורמה (טלגרם · וואטסאפ · אינסטגרם · יוטיוב)... חוזר תוך ~דקה.';
+  }
+
   // ─── Manual backup ───────────────────────────────────────────────
   if (/^(גיבוי|גבה עכשיו|backup now|run backup)/i.test(text.trim())) {
     try {
@@ -5392,6 +5406,12 @@ app.get('/debug/group-suggest', async (req, res) => {
     const top = await runGroupSuggestionCheck({ dryRun: true, threshold });
     res.json({ ok: true, dryRun: true, threshold, dailyList: _readDailyGroupNames(), candidates: top });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ─── Latest-post-per-platform report (test the "מה עלה" command) ──
+app.get('/debug/latest-posts', async (_req, res) => {
+  try { res.json({ ok: true, report: await getLatestPostsReport() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── Join a WhatsApp group by invite code (owner-authorized, one-shot) ──
@@ -6060,6 +6080,55 @@ async function getKallnerWhatsAppSection(sinceHours = 24) {
   } catch (e) {
     return `🟢 *וואטסאפ:* שגיאה בקריאה (${(e.message || '').substring(0, 50)})\n`;
   }
+}
+
+// On-demand "what's the latest post on each platform?" — answers the
+// recurring "מה עלה כבר ומה לא" question. Telegram + WhatsApp are read
+// deterministically (his own channels, exact timestamps); Instagram +
+// YouTube (he has no own YT channel — latest interview/appearance) are
+// best-effort via web_search.
+async function getLatestPostsReport() {
+  const fmt = ts => new Date(ts * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const parts = ['📊 *מה עלה לאחרונה — אריאל קלנר*'];
+
+  // Telegram (t.me/Kallner) — deterministic
+  try {
+    const tg = require('./src/telegram');
+    if (!tg.isConfigured || !tg.isConfigured()) parts.push('🔵 *טלגרם:* לא מחובר');
+    else {
+      const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 5 });
+      if (r.error) parts.push('🔵 *טלגרם:* לא נמצא הערוץ (הצטרף ל-t.me/Kallner)');
+      else {
+        const m = (r.messages || []).filter(x => x.body && x.body.trim()).sort((a, b) => b.timestamp - a.timestamp)[0];
+        parts.push(m ? `🔵 *טלגרם* · ${fmt(m.timestamp)}\n${m.body.replace(/\s+/g, ' ').substring(0, 200)}` : '🔵 *טלגרם:* אין פוסטים');
+      }
+    }
+  } catch { parts.push('🔵 *טלגרם:* שגיאה בקריאה'); }
+
+  // WhatsApp official group — deterministic
+  try {
+    const ch = await client.getChatById(KALLNER_WA_GROUP_ID).catch(() => null);
+    if (!ch) parts.push('🟢 *וואטסאפ:* הבוט לא חבר בקבוצה');
+    else {
+      const msgs = await safeFetchMessages(ch, 30);
+      const m = (msgs || []).filter(x => x.body && x.body.trim()).sort((a, b) => b.timestamp - a.timestamp)[0];
+      parts.push(m ? `🟢 *וואטסאפ* · ${fmt(m.timestamp)}\n${m.body.replace(/\s+/g, ' ').substring(0, 200)}` : '🟢 *וואטסאפ:* אין פוסטים');
+    }
+  } catch { parts.push('🟢 *וואטסאפ:* שגיאה בקריאה'); }
+
+  // Instagram (@ariel.kallner) + YouTube (interviews) — best-effort web_search
+  try {
+    const { smartChat: _sc } = require('./src/claude');
+    const igYt = `בצע web_search והחזר קצר ומדויק בלבד (בלי הקדמות), שני פריטים על ח"כ אריאל קלנר:
+
+📸 *אינסטגרם* (@ariel.kallner): הפוסט/רילס העדכני ביותר שאתה מוצא — תאריך (אם זמין) · תיאור בשורה · קישור. אם אי אפשר לאמת פוסט אחרון: "לא אומת פוסט אחרון · instagram.com/ariel.kallner".
+
+▶️ *יוטיוב* (אין לו ערוץ משלו — חפש ראיון/הופעה אחרונה שלו): הסרטון העדכני ביותר — כותרת · ערוץ · תאריך · קישור.`;
+    const r = await _sc(igYt, [], { webSearchMaxUses: 4, timeoutMs: 90000 });
+    parts.push(r);
+  } catch { parts.push('📸▶️ *אינסטגרם/יוטיוב:* החיפוש נכשל'); }
+
+  return parts.join('\n\n');
 }
 
 // Full media monitor: his own Telegram + WhatsApp posts (reliable, exact
