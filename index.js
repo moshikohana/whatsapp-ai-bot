@@ -6118,10 +6118,40 @@ async function getKallnerYouTubeLatest({ sinceDays = 45, max = 3 } = {}) {
     .map(i => ({ title: i.snippet.title, channel: i.snippet.channelTitle, date: i.snippet.publishedAt, videoId: i.id.videoId }));
 }
 
+// Latest TikTok videos of @ariel.kallner via yt-dlp (trusted standalone
+// binary at /usr/local/bin/yt-dlp). Works from the server IP; returns
+// [{title,date(YYYYMMDD),url}] newest-first, or null if yt-dlp missing/fails.
+const YT_DLP_BIN = '/usr/local/bin/yt-dlp';
+const KALLNER_TIKTOK_URL = 'https://www.tiktok.com/@ariel.kallner';
+function getKallnerTikTokLatest({ max = 3 } = {}) {
+  return new Promise((resolve) => {
+    try {
+      require('child_process').execFile(
+        YT_DLP_BIN,
+        ['--playlist-end', String(max), '--dump-json', '--no-warnings', KALLNER_TIKTOK_URL],
+        { timeout: 90000, maxBuffer: 20 * 1024 * 1024 },
+        (err, stdout) => {
+          if (!stdout) return resolve(null);
+          const vids = [];
+          for (const line of stdout.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              const d = JSON.parse(line);
+              vids.push({ title: (d.title || '').replace(/\s+/g, ' '), date: d.upload_date || null, url: d.webpage_url || KALLNER_TIKTOK_URL });
+            } catch {}
+          }
+          vids.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+          resolve(vids.slice(0, max));
+        }
+      );
+    } catch { resolve(null); }
+  });
+}
+
 // On-demand "what's the latest post on each platform?" — answers the
 // recurring "מה עלה כבר ומה לא" question. Telegram + WhatsApp read
 // deterministically (his own channels, exact timestamps); YouTube via the
-// Data API (reliable); Instagram best-effort via web_search (IG blocks).
+// Data API + TikTok via yt-dlp (reliable); Instagram best-effort web_search.
 async function getLatestPostsReport() {
   const fmt = ts => new Date(ts * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   const parts = ['📊 *מה עלה לאחרונה — אריאל קלנר*'];
@@ -6163,6 +6193,18 @@ async function getLatestPostsReport() {
       parts.push(`▶️ *יוטיוב* · ${d}\n${v.title} (${v.channel})\n🔗 youtube.com/watch?v=${v.videoId}`);
     }
   } catch (e) { parts.push(`▶️ *יוטיוב:* שגיאת API (${(e.message || '').substring(0, 60)})`); }
+
+  // TikTok (@ariel.kallner) — reliable via yt-dlp
+  try {
+    const tks = await getKallnerTikTokLatest({ max: 3 });
+    if (tks === null) parts.push('⚫ *טיקטוק:* לא זמין (yt-dlp נכשל)');
+    else if (!tks.length) parts.push('⚫ *טיקטוק:* לא נמצאו סרטונים');
+    else {
+      const t = tks[0];
+      const d = t.date && t.date.length === 8 ? `${t.date.slice(6, 8)}/${t.date.slice(4, 6)}/${t.date.slice(0, 4)}` : '?';
+      parts.push(`⚫ *טיקטוק* · ${d}\n${t.title.substring(0, 120)}\n🔗 ${t.url}`);
+    }
+  } catch (e) { parts.push(`⚫ *טיקטוק:* שגיאה (${(e.message || '').substring(0, 50)})`); }
 
   // Instagram (@ariel.kallner) — best-effort web_search (IG blocks scraping;
   // reliable source deferred to a paid API later).
