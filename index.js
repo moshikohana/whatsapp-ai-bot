@@ -5089,6 +5089,23 @@ async function route(chatId, text) {
     return '🎬 בודק את הסרטון האחרון בכל פלטפורמה (יוטיוב · טיקטוק · X · אינסטגרם)... חוזר תוך ~דקה.';
   }
 
+  // ─── "Prepare for distribution" template (תכין להפצה) ────────────
+  if (/^(תכין להפצה|הכן להפצה|תכין הפצה|הפצה)\b/i.test(text.trim())) {
+    (async () => {
+      try {
+        const tmpl = await buildDistributionTemplate();
+        const oc = await client.getChatById(OWNER_ID);
+        // Send the template as a CLEAN message (invisible marker only, no
+        // visible bot signature) so it's ready to copy, edit and forward.
+        await oc.sendMessage(tmpl + BOT_MARKER);
+        await botSend(oc, '👆 *תבנית הפצה מוכנה.* מלא את הכותרת/הציטוט, השלם את הקישורים החסרים וקצר ב-did.li. (טיקטוק+יוטיוב מולאו אוטומטית מהסרטון האחרון — קצר גם אותם.)');
+      } catch (e) {
+        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הכנת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+      }
+    })();
+    return '📤 מכין תבנית הפצה (מושך קישורי טיקטוק+יוטיוב אחרונים)... שנייה.';
+  }
+
   // ─── Manual backup ───────────────────────────────────────────────
   if (/^(גיבוי|גבה עכשיו|backup now|run backup)/i.test(text.trim())) {
     try {
@@ -5431,6 +5448,12 @@ app.get('/debug/latest-posts', async (_req, res) => {
 // ─── Latest-video-per-platform report (test the "סרטון אחרון" command) ──
 app.get('/debug/latest-videos', async (_req, res) => {
   try { res.json({ ok: true, report: await getLatestVideosReport() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ─── Distribution template (test the "תכין להפצה" command) ──
+app.get('/debug/distribution', async (_req, res) => {
+  try { res.json({ ok: true, template: await buildDistributionTemplate() }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -6347,6 +6370,54 @@ async function getLatestVideosReport() {
   } catch { parts.push('📸 *אינסטגרם:* חיפוש נכשל'); }
 
   return parts.join('\n\n');
+}
+
+// "תכין להפצה" — builds Moshiko's distribution message in his exact format:
+// header, editorial placeholders (source line + hook + pull-quote), one line
+// per platform, the full-interview line, and the fixed closed-updates-group
+// footer. Auto-fills the TikTok + YouTube links it already knows; the rest are
+// [הדבק קישור] placeholders he fills + shortens via did.li.
+const KALLNER_UPDATES_LINK = 'https://did.li/kalner';
+async function buildDistributionTemplate() {
+  let ttUrl = '', ytUrl = '';
+  try { const t = await getKallnerTikTokLatest({ max: 1 }); if (t && t[0]) ttUrl = t[0].url; } catch {}
+  try { const y = await getKallnerYouTubeLatest({ sinceDays: 60, max: 1 }); if (y && y[0]) ytUrl = `https://youtube.com/watch?v=${y[0].videoId}`; } catch {}
+  const ph = '[הדבק קישור]';
+  return `חה״כ *אריאל קלנר* (הליכוד) :
+[מאיפה — לדוגמה: בערוץ 14 אצל בועז גולן]
+[כותרת / משפט פתיחה]
+
+״ *[ציטוט מודגש]*
+[המשך הציטוט] ״
+
+*פייסבוק*
+${ph}
+
+*טיקטוק*
+${ttUrl || ph}
+
+*אינסטגרם*
+${ph}
+
+*טלגרם*
+${ph}
+
+*יוטיוב*
+${ytUrl || ph}
+
+*threads*
+${ph}
+
+*Reels*
+${ph}
+
+לראיון המלא ב-14 🔽
+${ytUrl || ph}
+
+
+🟢*מוזמנים* להצטרף
+לקבוצת העדכונים *הסגורה* ⬇️
+${KALLNER_UPDATES_LINK}`;
 }
 
 // Full media monitor: his own Telegram + WhatsApp posts (reliable, exact
