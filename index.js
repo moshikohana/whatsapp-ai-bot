@@ -6474,14 +6474,16 @@ ${KALLNER_UPDATES_LINK}`;
 }
 
 // ─── Distribution flow helpers ─────────────────────────────────
-// tinyurl shortener — free, no key, works from the server (is.gd is
-// Cloudflare-blocked here). Falls back to the original URL on any failure.
+// URL shortener — da.gd: free, no key, works from the server, and does a
+// DIRECT 302 redirect (no interstitial/preview page, unlike tinyurl). is.gd
+// and ulvis are Cloudflare-blocked from the server. Falls back to the
+// original URL on any failure.
 function shortenUrl(u) {
   return new Promise((resolve) => {
     if (!/^https?:\/\//i.test(u)) return resolve(u);
-    const req = require('https').get('https://tinyurl.com/api-create.php?url=' + encodeURIComponent(u), (res) => {
+    const req = require('https').get('https://da.gd/shorten?url=' + encodeURIComponent(u), (res) => {
       let d = ''; res.on('data', c => (d += c));
-      res.on('end', () => { const t = d.trim(); resolve(/^https?:\/\/tinyurl\.com\//i.test(t) ? t : u); });
+      res.on('end', () => { const t = d.trim(); resolve(/^https?:\/\/da\.gd\//i.test(t) ? t : u); });
     });
     req.setTimeout(15000, () => { req.destroy(); resolve(u); });
     req.on('error', () => resolve(u));
@@ -6502,17 +6504,35 @@ function _platformOfUrl(u) {
   return 'other';
 }
 
-// Direct link to the latest post in Kellner's Telegram channel (bot member).
-async function getKallnerTelegramPostLink() {
+// Direct link to a post in Kellner's Telegram channel (bot member). When
+// `matchText` is given (the distribution's quote), pick the recent post whose
+// body best overlaps it — so the link points to the SPECIFIC video being
+// distributed, not merely the newest channel post. Falls back to newest.
+async function getKallnerTelegramPostLink(matchText = '') {
   try {
     const tg = require('./src/telegram');
     if (!tg.isConfigured || !tg.isConfigured()) return null;
-    // limit:1 can come back empty if the single latest message is media/service
-    // (readMessages filters empty-body); fetch a few and take the newest id.
-    const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 5 });
+    const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 20 });
     if (r.error || !r.messages || !r.messages.length) return null;
-    const id = r.messages[r.messages.length - 1].id; // readMessages sorts oldest→newest
-    return id ? `https://t.me/Kallner/${id}` : null;
+    const msgs = r.messages;
+    let chosen = msgs[msgs.length - 1]; // default: newest (sorted oldest→newest)
+
+    const norm = s => (s || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
+    const mt = norm(matchText);
+    if (mt.length >= 8) {
+      const mtWords = new Set(mt.split(' ').filter(w => w.length >= 3));
+      let best = null, bestScore = 0;
+      for (const m of msgs) {
+        const seen = new Set();
+        let overlap = 0;
+        for (const w of norm(m.body).split(' ')) {
+          if (w.length >= 3 && mtWords.has(w) && !seen.has(w)) { overlap++; seen.add(w); }
+        }
+        if (overlap > bestScore) { bestScore = overlap; best = m; }
+      }
+      if (best && bestScore >= 3) chosen = best; // confident content match
+    }
+    return chosen && chosen.id ? `https://t.me/Kallner/${chosen.id}` : null;
   } catch { return null; }
 }
 
@@ -6540,8 +6560,9 @@ async function assembleDistribution(rawText) {
     else if (!links[plat]) links[plat] = short;
   }
 
-  // Auto-fill only what the owner didn't paste
-  if (!links.telegram) { const tg = await getKallnerTelegramPostLink(); if (tg) links.telegram = await shortenUrl(tg); }
+  // Auto-fill only what the owner didn't paste. Telegram is matched to the
+  // editorial text so it links the specific video being distributed.
+  if (!links.telegram) { const tg = await getKallnerTelegramPostLink(editorial); if (tg) links.telegram = await shortenUrl(tg); }
   if (!links.tiktok) { try { const t = await getKallnerTikTokLatest({ max: 1 }); if (t && t[0]) links.tiktok = await shortenUrl(t[0].url); } catch {} }
   let ytMain = ytPasted[0];
   if (!ytMain) { try { const y = await getKallnerYouTubeLatest({ sinceDays: 60, max: 1 }); if (y && y[0]) ytMain = await shortenUrl(`https://youtube.com/watch?v=${y[0].videoId}`); } catch {} }
