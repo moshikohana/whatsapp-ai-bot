@@ -5150,7 +5150,7 @@ async function route(chatId, text) {
     let got = '';
     if (nLinks) got += `🔗 קלטתי *${nLinks}* קישורים.\n`;
     got += hasText ? '📝 קלטתי טקסט.\n' : '📝 עדיין אין טקסט — הדבק כותרת + ציטוט.\n';
-    return `📤 *הכנת הפצה*\n\n🤖 *אלה אני מביא לבד:*\n🔵 טלגרם · ⚫ טיקטוק · ▶️ יוטיוב\n\n✍️ *אלה צריך ממך:*\n🔵 פייסבוק · 📸 אינסטגרם · 🧵 threads · 🎬 Reels\n\n${got}━━━━━━━━━━\n👉 הדבק את הקישורים החסרים (וטקסט אם צריך),\nואז שלח *"הכן"* ואשלח את ההפצה המלאה.\n_(או "הכן" עכשיו כדי להכין ממה שיש · "ביטול" לביטול)_`;
+    return `📤 *הכנת הפצה*\n\n💡 *הכי פשוט:* שתף לי את *קישור פוסט הטלגרם* — אקח ממנו את הטקסט ואמצא לפיו את אותו סרטון בטיקטוק/יוטיוב אוטומטית.\n\n🤖 *אני מביא לבד:* 🔵 טלגרם · ⚫ טיקטוק · ▶️ יוטיוב\n✍️ *צריך ממך:* 🔵 פייסבוק · 📸 אינסטגרם · 🧵 threads · 🎬 Reels\n\n${got}━━━━━━━━━━\n👉 הדבק קישור טלגרם (+ החסרים), ואז שלח *"הכן"*.\n_(או "הכן" עכשיו · "ביטול" לביטול)_`;
   }
 
   // ─── Manual backup ───────────────────────────────────────────────
@@ -6536,6 +6536,51 @@ async function getKallnerTelegramPostLink(matchText = '') {
   } catch { return null; }
 }
 
+// Word-overlap score between a reference text and a candidate string — used
+// to find the SAME content across platforms (by the shared post's text).
+function _overlapScore(text, candidate) {
+  const norm = s => (s || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
+  const tw = new Set(norm(text).split(' ').filter(w => w.length >= 3));
+  if (!tw.size) return 0;
+  const seen = new Set(); let o = 0;
+  for (const w of norm(candidate).split(' ')) if (w.length >= 3 && tw.has(w) && !seen.has(w)) { o++; seen.add(w); }
+  return o;
+}
+// Pick the item best matching `text`; fall back to items[0] (newest) if no
+// candidate reaches minScore distinctive-word overlaps.
+function _bestByText(items, text, getText, minScore = 2) {
+  if (!items || !items.length) return null;
+  if (!text) return items[0];
+  let best = items[0], bestScore = -1;
+  for (const it of items) { const s = _overlapScore(text, getText(it)); if (s > bestScore) { bestScore = s; best = it; } }
+  return bestScore >= minScore ? best : items[0];
+}
+
+// Given a shared Telegram post link (t.me/<channel>/<id>), return that exact
+// post's text (the caption, cleaned of URLs + the updates-group promo) and a
+// canonical link. Lets the owner just share the post instead of typing the
+// text. Text extraction works for recent posts (video posts with a caption);
+// even if the text can't be read, the exact link is still returned.
+async function getTelegramPostByLink(url) {
+  const m = url.match(/t\.me\/([^/?#]+)\/(\d+)/i);
+  if (!m) return null;
+  const channel = m[1];
+  const id = parseInt(m[2], 10);
+  const link = `https://t.me/${channel}/${id}`;
+  let txt = '';
+  try {
+    const tg = require('./src/telegram');
+    if (tg.isConfigured && tg.isConfigured() && /kallner/i.test(channel)) {
+      const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 100 });
+      const msg = (r.messages || []).find(x => x.id === id);
+      if (msg) txt = msg.body || '';
+    }
+  } catch {}
+  txt = txt.replace(/https?:\/\/\S+/g, '')
+    .split('\n').filter(l => !/מוזמנים|קבוצת העדכונים|הסגורה/.test(l)).join('\n').trim();
+  return { id, channel, link, text: txt };
+}
+
 // Assemble the full distribution message from the owner's pasted text+links.
 // Auto-fills the platforms the bot can reach itself (Telegram post, latest
 // TikTok, latest YouTube); the owner pastes the rest. Everything is shortened
@@ -6546,26 +6591,40 @@ async function assembleDistribution(rawText) {
   // Editorial = the non-URL text, minus any bare platform-label lines the
   // owner may have typed next to a link (so they don't pollute the quote).
   const LABEL_LINE = /^(פייסבוק|טיקטוק|אינסטגרם|טלגרם|יוטיוב|threads|reels|x|twitter|טוויטר|לראיון(\s+המלא)?(\s+ב-?14)?)\s*[:：\-]?\s*$/i;
-  const editorial = rawText.replace(urlRe, '').split('\n')
+  let editorial = rawText.replace(urlRe, '').split('\n')
     .map(l => l.trim())
     .filter(l => l && !LABEL_LINE.test(l))
     .join('\n');
 
   const links = {};
   const ytPasted = [];
+  let tgShare = null;
   for (const u of urls) {
     const plat = _platformOfUrl(u);
+    // A shared Telegram post: take its text (as the distribution text) + its
+    // exact link. Everything else can then be matched to that text.
+    if (plat === 'telegram' && /t\.me\/[^/?#]+\/\d+/i.test(u) && !tgShare) {
+      tgShare = await getTelegramPostByLink(u);
+      if (tgShare) links.telegram = await shortenUrl(tgShare.link);
+      continue;
+    }
     const short = await shortenUrl(u);
     if (plat === 'youtube') ytPasted.push(short);
     else if (!links[plat]) links[plat] = short;
   }
+  // Prefer the shared post's own text as the distribution text
+  if (tgShare && tgShare.text && tgShare.text.length >= 10) editorial = tgShare.text;
 
-  // Auto-fill only what the owner didn't paste. Telegram is matched to the
-  // editorial text so it links the specific video being distributed.
+  // Auto-fill from the bot's reach, matching each platform to the text so we
+  // link the SAME video everywhere (not merely the newest post).
   if (!links.telegram) { const tg = await getKallnerTelegramPostLink(editorial); if (tg) links.telegram = await shortenUrl(tg); }
-  if (!links.tiktok) { try { const t = await getKallnerTikTokLatest({ max: 1 }); if (t && t[0]) links.tiktok = await shortenUrl(t[0].url); } catch {} }
+  if (!links.tiktok) {
+    try { const t = await getKallnerTikTokLatest({ max: 10 }); const pick = _bestByText(t, editorial, x => x.title, 2); if (pick) links.tiktok = await shortenUrl(pick.url); } catch {}
+  }
   let ytMain = ytPasted[0];
-  if (!ytMain) { try { const y = await getKallnerYouTubeLatest({ sinceDays: 60, max: 1 }); if (y && y[0]) ytMain = await shortenUrl(`https://youtube.com/watch?v=${y[0].videoId}`); } catch {} }
+  if (!ytMain) {
+    try { const y = await getKallnerYouTubeLatest({ sinceDays: 90, max: 10 }); const pick = _bestByText(y, editorial, x => x.title, 2); if (pick) ytMain = await shortenUrl(`https://youtube.com/watch?v=${pick.videoId}`); } catch {}
+  }
   const ytInterview = ytPasted[1] || '';
 
   const ph = '[הדבק קישור]';
