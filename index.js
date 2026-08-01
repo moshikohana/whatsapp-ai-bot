@@ -3770,10 +3770,12 @@ client.on('message_create', async (msg) => {
           await botSend(chat, '⏳ מקצר קישורים ומרכיב את ההפצה... שנייה.');
           (async () => {
             try {
-              const full = await assembleDistribution(raw);
+              const r = await assembleDistribution(raw);
               const oc = await client.getChatById(OWNER_ID);
-              await oc.sendMessage(full + BOT_MARKER); // clean, copy-ready
-              await botSend(oc, '👆 *ההפצה מוכנה* — להעתקה ושליחה. (טלגרם/טיקטוק/יוטיוב מולאו אוטומטית; מקום ריק = לא נמצא קישור.) 🚀');
+              await oc.sendMessage(r.text + BOT_MARKER); // clean, copy-ready
+              const status = `👆 *ההפצה מוכנה* — להעתקה ושליחה.\n✅ מולא: ${r.filled.join(', ') || '—'}` +
+                (r.empty.length ? `\n✍️ להשלים ידנית: ${r.empty.join(', ')}` : '');
+              await botSend(oc, status);
             } catch (e) {
               try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הרכבת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
             }
@@ -5588,7 +5590,8 @@ app.get('/debug/distribution', async (req, res) => {
   try {
     const sample = req.query.text
       || 'בערוץ 14 אצל בועז גולן\nיאיר גולן הוא האיום האמיתי\n\nhttps://www.facebook.com/arielkalner/videos/123456\nhttps://www.instagram.com/reel/ABC123def/';
-    res.json({ ok: true, template: await assembleDistribution(sample) });
+    const r = await assembleDistribution(sample);
+    res.json({ ok: true, template: r.text, filled: r.filled, empty: r.empty });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -6744,12 +6747,22 @@ async function _matchYouTubeByText(text) {
   const key = process.env.YOUTUBE_API_KEY; if (!key || !text) return null;
   try {
     const q = text.replace(/\n/g, ' ').substring(0, 70);
-    const params = new URLSearchParams({ part: 'snippet', q, type: 'video', maxResults: '10', relevanceLanguage: 'he', key });
+    const params = new URLSearchParams({ part: 'snippet', q, type: 'video', maxResults: '15', relevanceLanguage: 'he', key });
     const data = await _httpsGetJson(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
-    const items = (data.items || []).filter(i => i.id && i.id.videoId).map(i => ({ videoId: i.id.videoId, title: i.snippet.title }));
+    const items = (data.items || []).filter(i => i.id && i.id.videoId).map(i => ({
+      videoId: i.id.videoId,
+      title: i.snippet.title || '',
+      desc: i.snippet.description || '',
+      mine: /ariel\s*kall?ner|אריאל\s*קלנר/i.test(i.snippet.channelTitle || ''),
+    }));
     let best = null, bs = -1;
-    for (const it of items) { const s = _overlapScore(text, it.title); if (s > bs) { bs = s; best = it; } }
-    if (!best || bs < 3) return null;                       // no confident match
+    for (const it of items) {
+      const raw = _overlapScore(text, `${it.title} ${it.desc}`); // title + description
+      if (raw < 3) continue;                       // confidence gate on real overlap
+      const s = raw + (it.mine ? 2 : 0);           // prefer his own channel as tiebreak
+      if (s > bs) { bs = s; best = it; }
+    }
+    if (!best) return null;
     const info = await _youtubeInfo(best.videoId);
     const short = info && _isShortDuration(info.duration);
     return `https://youtube.com/${short ? 'shorts/' : 'watch?v='}${best.videoId}`;
@@ -6924,7 +6937,15 @@ async function assembleDistribution(rawText) {
   if (links.reels) s += `*Reels*\n${links.reels}\n\n`;
   if (ytInterview) s += `לראיון המלא ב-14 🔽\n${ytInterview}\n\n`;
   s += `\n🟢*מוזמנים* להצטרף\nלקבוצת העדכונים *הסגורה* ⬇️\n${KALLNER_UPDATES_LINK}`;
-  return s;
+
+  // Report which platforms actually got a link vs left empty (honest status).
+  const platMap = [
+    ['פייסבוק', links.facebook], ['טיקטוק', links.tiktok], ['אינסטגרם', links.instagram],
+    ['טלגרם', links.telegram], ['יוטיוב', ytMain], ['X', links.x], ['threads', links.threads],
+  ];
+  const filled = platMap.filter(([, v]) => v).map(([k]) => k);
+  const empty = platMap.filter(([, v]) => !v).map(([k]) => k);
+  return { text: s, filled, empty };
 }
 
 // Gather a text pool of recent messages from the monitored political sources
