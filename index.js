@@ -5394,6 +5394,23 @@ app.get('/debug/group-suggest', async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+// ─── Join a WhatsApp group by invite code (owner-authorized, one-shot) ──
+// GET /debug/join-group?code=<inviteCode>  (code = the part after chat.whatsapp.com/)
+// The bot is a linked device of the owner's account, so accepting the invite
+// joins the account to the group. Returns the joined group's id + name.
+app.get('/debug/join-group', async (req, res) => {
+  try {
+    const code = (req.query.code || '').trim();
+    if (!code) return res.status(400).json({ ok: false, error: 'missing ?code=' });
+    const joined = await client.acceptInvite(code);
+    const gid = typeof joined === 'string' ? joined : (joined?._serialized || joined?.id?._serialized || null);
+    let name = null;
+    try { const ch = await client.getChatById(gid); name = ch?.name || null; } catch {}
+    logger.info(`✅ Joined WhatsApp group via invite: ${name || gid}`);
+    res.json({ ok: true, joined: gid, name });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // ─── Debug endpoint — single-shot diagnostic for Railway/cloud deploys ──
 // Visit this URL after deploy to see EVERYTHING needed to diagnose issues.
 // Returns: bot state, env vars (presence only — values masked), volume mount
