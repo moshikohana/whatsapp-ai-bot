@@ -5100,6 +5100,35 @@ async function route(chatId, text) {
     return _kwStats();
   }
 
+  // ─── Reputation pulse — sentiment + narratives + share-of-voice ──
+  if (/^(דופק מוניטין|דופק|סנטימנט|מצב רוח|האזנה|reputation|מוניטין)\s*[?!.]?$/i.test(text.trim())) {
+    (async () => {
+      try {
+        const oc = await client.getChatById(OWNER_ID);
+        const r = await runReputationPulse(1440);
+        await botSend(oc, r.text);
+      } catch (e) {
+        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ דופק מוניטין נכשל: ' + (e.message || '').substring(0, 60)); } catch {}
+      }
+    })();
+    return '🧭 מנתח סנטימנט ונרטיבים סביב קלנר (סורק את הקבוצות)... חוזר תוך ~דקה.';
+  }
+  // Rival management (for share-of-voice)
+  if (/^(הוסף יריב|יריב חדש)\s+/i.test(text.trim())) {
+    const name = text.trim().replace(/^(הוסף יריב|יריב חדש)\s+/i, '').trim();
+    const list = require('./src/sentiment').addRival(name);
+    return `✅ נוסף יריב למעקב: *${name}*\n🎯 רשימה: ${list.join(', ') || 'ריקה'}`;
+  }
+  if (/^(הסר יריב|הורד יריב)\s+/i.test(text.trim())) {
+    const name = text.trim().replace(/^(הסר יריב|הורד יריב)\s+/i, '').trim();
+    const list = require('./src/sentiment').removeRival(name);
+    return `🗑️ הוסר: *${name}*\n🎯 רשימה: ${list.join(', ') || 'ריקה'}`;
+  }
+  if (/^(רשימת יריבים|יריבים)\s*[?!.]?$/i.test(text.trim())) {
+    const list = require('./src/sentiment').loadRivals();
+    return `🎯 *יריבים למעקב (Share of Voice):*\n${list.length ? list.map(r => '• ' + r).join('\n') : '_ריקה — הוסף עם "הוסף יריב <שם>"_'}`;
+  }
+
   // ─── Keyword alert trends (today vs yesterday) ───────────────────
   if (/^(מגמות|trends|מגמות היום|מה בולט היום|שינויים)/i.test(text.trim())) {
     const { getTrends: _kwTrends, formatTrendsMessage: _fmtTrends } = require('./src/keyword-alerts');
@@ -5496,6 +5525,15 @@ app.get('/debug/latest-posts', async (_req, res) => {
 app.get('/debug/latest-videos', async (_req, res) => {
   try { res.json({ ok: true, report: await getLatestVideosReport() }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ─── Reputation pulse (test the listening layer) ──
+app.get('/debug/pulse', async (req, res) => {
+  try {
+    const since = req.query.min ? parseInt(req.query.min, 10) : 1440;
+    const r = await runReputationPulse(since);
+    res.json({ ok: true, text: r.text, analysis: r.analysis || null });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── Distribution assembly (test the "תכין להפצה" flow) ──
@@ -6816,6 +6854,51 @@ async function assembleDistribution(rawText) {
   if (ytInterview) s += `לראיון המלא ב-14 🔽\n${ytInterview}\n\n`;
   s += `\n🟢*מוזמנים* להצטרף\nלקבוצת העדכונים *הסגורה* ⬇️\n${KALLNER_UPDATES_LINK}`;
   return s;
+}
+
+// Gather a text pool of recent messages from the monitored political sources
+// (daily.json groups/channels + Telegram), for the listening/sentiment layer.
+async function gatherPoliticalPool(sinceMinutes = 1440, maxSources = 30) {
+  let sources = [];
+  try { sources = await resolveDailyScanSources('both', 'both'); } catch {}
+  if (!sources.length) return '';
+  const cutoff = Date.now() / 1000 - sinceMinutes * 60;
+  const lines = [];
+  for (const src of sources.slice(0, maxSources)) {
+    try {
+      if (src.source === 'wa') {
+        const chatId = (src.id || '').replace(/^wa:/, '');
+        let ch;
+        if (src.type === 'channel' || chatId.endsWith('@newsletter')) ch = { id: { _serialized: chatId }, name: src.raw, isChannel: true };
+        else { ch = await client.getChatById(chatId).catch(() => null); if (!ch) continue; }
+        const msgs = await safeFetchMessages(ch, 120);
+        for (const m of (msgs || []).filter(m => m.body && m.timestamp > cutoff && m.body.trim().length > 15)) {
+          lines.push(`[${ch.name || src.raw}] ${(m.body || '').replace(/\s+/g, ' ').substring(0, 250)}`);
+        }
+      } else if (src.source === 'tg') {
+        const tg = require('./src/telegram');
+        const r = await tg.readMessages({ chatName: src.raw, limit: 80, sinceMinutes });
+        for (const m of ((r && r.messages) || []).filter(x => x.body && x.body.trim().length > 15)) {
+          lines.push(`[${(r && r.chatTitle) || src.raw}] ${(m.body || '').replace(/\s+/g, ' ').substring(0, 250)}`);
+        }
+      }
+    } catch {}
+  }
+  let pool = lines.join('\n');
+  if (pool.length > 40000) pool = pool.substring(0, 40000); // cap LLM context
+  return pool;
+}
+
+// Run the listening layer on demand: gather → analyze → trend → record → format.
+async function runReputationPulse(sinceMinutes = 1440) {
+  const sent = require('./src/sentiment');
+  const pool = await gatherPoliticalPool(sinceMinutes);
+  if (!pool || pool.length < 50) return { text: '🧭 אין מספיק תוכן בטווח לניתוח (נסה אחרי סריקה, או ודא ש-data/daily.json מאוכלס).' };
+  const analysis = await sent.analyzeMentions(pool);
+  if (!analysis) return { text: '⚠️ הניתוח נכשל — נסה שוב בעוד רגע.' };
+  const trends = sent.getTrends(analysis);   // compare to previous BEFORE recording
+  sent.recordSnapshot(analysis);
+  return { text: sent.formatPulse(analysis, trends), analysis, trends };
 }
 
 // Full media monitor: his own Telegram + WhatsApp posts (reliable, exact
