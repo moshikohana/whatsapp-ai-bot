@@ -6577,7 +6577,13 @@ async function getTelegramPostByLink(url) {
     }
   } catch {}
   txt = txt.replace(/https?:\/\/\S+/g, '')
-    .split('\n').filter(l => !/מוזמנים|קבוצת העדכונים|הסגורה/.test(l)).join('\n').trim();
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l
+      && !/^[.\-·•_]+$/.test(l)                                   // punctuation-only lines
+      && !/מוזמנים|קבוצת העדכונים|הסגורה/.test(l)                  // updates-group promo
+      && !/^לראיון(\s+המלא)?\s*[:：]?\s*$/.test(l))                // orphan "לראיון המלא :" label
+    .join('\n').trim();
   return { id, channel, link, text: txt };
 }
 
