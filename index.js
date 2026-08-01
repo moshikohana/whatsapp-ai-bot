@@ -6556,7 +6556,7 @@ async function getKallnerTelegramPostLink(matchText = '') {
     if (!chosen) chosen = msgs[msgs.length - 1];
 
     return chosen && chosen.id
-      ? { link: `https://t.me/Kallner/${chosen.id}`, text: (chosen.body || '').trim() }
+      ? { link: `https://t.me/Kallner/${chosen.id}`, text: _cleanCaption(chosen.body) }
       : null;
   } catch { return null; }
 }
@@ -6612,7 +6612,8 @@ function _cleanCaption(txt) {
     .map(l => l.trim())
     .filter(l => l
       && !/^[.\-·•_]+$/.test(l)
-      && !/מוזמנים|קבוצת העדכונים|הסגורה/.test(l)
+      // updates-group promo only — NOT "מוזמנים להאזין" (legit content)
+      && !/מוזמנים\s+להצטרף|לקבוצת העדכונים|קבוצת העדכונים|הקבוצה הסגורה/.test(l)
       && !/^לראיון(\s+המלא)?\s*[:：]?\s*$/.test(l))
     .join('\n').trim();
 }
