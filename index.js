@@ -5525,37 +5525,12 @@ app.get('/run-media-briefing', async (_req, res) => {
       const now = new Date();
       const today = now.toLocaleDateString('he-IL');
       const todayISO = now.toISOString().slice(0, 10);
-      const yesterdayISO = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
-      const twoDaysAgoISO = new Date(now.getTime() - 2 * 86400000).toISOString().slice(0, 10);
-      const todayHe = now.toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
-      const yesterdayHe = new Date(now.getTime() - 86400000).toLocaleDateString('he-IL', { day: 'numeric', month: 'long' });
+      const twoWeeksAgoISO = new Date(now.getTime() - 14 * 86400000).toISOString().slice(0, 10);
 
       await botSend(oc, `🧪 *בדיקה ידנית — מעקב מדיה*\n_מריץ עכשיו, יחזור עם תוצאה תוך כדקה..._`);
 
-      const twitterPrompt = `חפש אזכורים *טריים בלבד* של ח"כ אריאל קלנר מ-${twoDaysAgoISO} (לפני יומיים) עד ${todayISO} (היום).
-
-⏰ *חוקי תאריכים — קריטי!*
-- היום: ${todayHe} (${todayISO})
-- אתמול: ${yesterdayHe} (${yesterdayISO})
-- לפני יומיים: ${twoDaysAgoISO}
-- **אסור** לכלול ציוץ/כתבה לפני ${twoDaysAgoISO}.
-- אסור fallback לתוצאות ישנות. אם אין — אמור זאת.
-
-🔍 *חיפושים (web_search):*
-1. \`"אריאל קלנר" after:${twoDaysAgoISO}\`
-2. \`"ArielKallner" OR "קלנר" site:x.com after:${twoDaysAgoISO}\`
-3. \`"אריאל קלנר" (site:ynet.co.il OR site:maariv.co.il OR site:walla.co.il) after:${twoDaysAgoISO}\`
-
-📋 *פורמט:*
-🐦 *אזכורי X (${twoDaysAgoISO} — ${todayISO}):*
-[שם · תאריך · 1-2 שורות · קישור] — או "אין"
-📰 *חדשות (${twoDaysAgoISO} — ${todayISO}):*
-[כותרת · מקור · תאריך · קישור] — או "אין"
-⚡ *פעולה מוצעת:*
-[רק אם יש משהו טרי דחוף — אחרת "לא נדרשת"]`;
-
-      const result = await _sc(twitterPrompt, [], { webSearchMaxUses: 5, timeoutMs: 180000, prefill: '🔍 *' });
-      await botSend(oc, `🔍 *מעקב מדיה (בדיקה ידנית) — ${today}*\n📅 _טווח: ${twoDaysAgoISO} → ${todayISO}_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
+      const result = await _sc(buildMediaMonitorPrompt(now), [], { webSearchMaxUses: 6, timeoutMs: 180000, prefill: '🔍 *' });
+      await botSend(oc, `🔍 *מעקב מדיה (בדיקה ידנית) — ${today}*\n📅 _טווח מועדף: ${twoWeeksAgoISO} → ${todayISO}_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
     } catch (e) {
       logger.error(`/run-media-briefing failed: ${e.message?.substring(0, 100)}`);
       try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, `❌ בדיקה ידנית של מעקב מדיה נכשלה: ${e.message?.substring(0, 80)}`); } catch (_) {}
@@ -5983,6 +5958,45 @@ nodeCron.schedule('0 19 * * 6', async () => {
   }
 }, { timezone: 'Asia/Jerusalem' });
 
+// ─── Media-monitor prompt (shared by the 08:00 cron + manual endpoint) ──
+// Earlier version demanded a 2-DAY window and told the model to discard
+// anything it couldn't prove was ≤2 days old → for a backbench MK whose
+// coverage is intermittent, web_search returns real but older items and the
+// model reported "אין אזכורים" every day. Now: prefer the last ~14 days,
+// rank newest-first with explicit dates, and if nothing is that fresh, show
+// the most recent items found (up to ~a month) clearly marked — never a bare
+// "none" when coverage exists. Also adds the @ArielKallner handle and drops
+// the fragile after: operator that returned months-old results anyway.
+function buildMediaMonitorPrompt(now = new Date()) {
+  const todayISO = now.toISOString().slice(0, 10);
+  const twoWeeksAgoISO = new Date(now.getTime() - 14 * 86400000).toISOString().slice(0, 10);
+  const todayHe = now.toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
+  return `חפש אזכורים ופרסומים אחרונים של ח"כ אריאל קלנר (הליכוד) — גם *מאת* קלנר (ציוצים/פוסטים) וגם *עליו* (כתבות/חדשות). המטרה: תמונה עדכנית של מה שמתפרסם.
+
+📅 היום: ${todayHe} (${todayISO}).
+טווח מועדף: 14 הימים האחרונים (${twoWeeksAgoISO} → ${todayISO}).
+- דרג מהחדש לישן, וציין לכל פריט את *תאריך הפרסום*.
+- אם אין כלום מ-14 הימים — הצג את האזכורים העדכניים ביותר שכן מצאת (עד ~חודש אחורה) וסמן במפורש "(ישן יותר)". *אל תחזיר "אין" כשקיים תוכן* — תמיד הראה מה הכי עדכני שקיים.
+- אל תמציא תאריכים. אם תאריך לא ודאי — כתוב "תאריך משוער".
+
+🔍 חיפושים (web_search — בצע כמה, בעברית):
+1. "אריאל קלנר"
+2. אריאל קלנר קלנר ציוץ X (site:x.com OR site:twitter.com) — כולל החשבון @ArielKallner
+3. "אריאל קלנר" חדשות (ynet, maariv, walla, ערוץ 7, כיכר השבת, סרוגים, כנסת)
+4. אריאל קלנר ועדה / חקיקה / הצעת חוק כנסת
+
+📋 פורמט:
+
+🐦 *רשתות (X / פייסבוק):*
+[מצייץ · תאריך · שורה · קישור] — או "לא נמצאו אזכורים ברשתות לאחרונה"
+
+📰 *חדשות / כתבות:*
+[כותרת · מקור · תאריך · קישור]
+
+⚡ *דורש תשומת לב / פעולה:*
+[רק אם יש אזכור שמצריך תגובה או הזדמנות תקשורתית — אחרת "אין"]`;
+}
+
 // ─── Daily Twitter/X + News monitoring (08:00) ───────────────────
 nodeCron.schedule('0 8 * * *', async () => {
   try {
@@ -5990,44 +6004,11 @@ nodeCron.schedule('0 8 * * *', async () => {
     const oc = await client.getChatById(OWNER_ID);
     const now = new Date();
     const today = now.toLocaleDateString('he-IL');
-    const todayISO = now.toISOString().slice(0, 10);                                    // 2026-04-29
-    const yesterdayISO = new Date(now.getTime() - 86400000).toISOString().slice(0, 10); // 2026-04-28
-    const twoDaysAgoISO = new Date(now.getTime() - 2 * 86400000).toISOString().slice(0, 10); // 2026-04-27
-    const todayHe = now.toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
-    const yesterdayHe = new Date(now.getTime() - 86400000).toLocaleDateString('he-IL', { day: 'numeric', month: 'long' });
+    const twoWeeksAgoISO = new Date(now.getTime() - 14 * 86400000).toISOString().slice(0, 10);
+    const todayISO = now.toISOString().slice(0, 10);
 
-    const twitterPrompt = `חפש אזכורים *טריים בלבד* של ח"כ אריאל קלנר מ-${twoDaysAgoISO} (לפני יומיים) עד ${todayISO} (היום).
-
-⏰ *חוקי תאריכים — קריטי לעקוב אחריהם!*
-- היום: ${todayHe} (${todayISO})
-- אתמול: ${yesterdayHe} (${yesterdayISO})
-- לפני יומיים: ${twoDaysAgoISO}
-- **אסור** לכלול בתשובה ציוץ/כתבה שתאריך הפרסום שלה לפני ${twoDaysAgoISO}.
-- אם הבדיקה שלך מעלה משהו ישן (שבוע, חודש, שלושה חודשים) — **השמט אותו לחלוטין מהתשובה.**
-- אסור "ליפול חזרה" לתוצאות ישנות אם אין חדשות. במקרה כזה כתוב במפורש שאין.
-
-🔍 *חיפושים שצריך לבצע (השתמש ב-web_search):*
-1. \`"אריאל קלנר" after:${twoDaysAgoISO}\`
-2. \`"ArielKallner" OR "קלנר" site:x.com after:${twoDaysAgoISO}\`
-3. \`"אריאל קלנר" (site:ynet.co.il OR site:maariv.co.il OR site:walla.co.il) after:${twoDaysAgoISO}\`
-
-📋 *פורמט התשובה הנדרש:*
-
-🐦 *אזכורי X/טוויטר (${twoDaysAgoISO} — ${todayISO}):*
-[לכל ציוץ: שם המצייץ · תאריך מדויק · 1-2 שורות תוכן · קישור]
-אם אין ציוצים בטווח — "אין אזכורים חדשים ב-X ביומיים האחרונים"
-
-📰 *אזכורים בחדשות (${twoDaysAgoISO} — ${todayISO}):*
-[לכל כתבה: כותרת · מקור · תאריך מדויק · קישור]
-אם אין כתבות בטווח — "אין אזכורים בחדשות ביומיים האחרונים"
-
-⚡ *פעולה מוצעת:*
-[רק אם יש אזכור טרי שדורש תגובה — אחרת "לא נדרשת פעולה דחופה"]
-
-⚠️ *תזכורת אחרונה:* אם אין אזכורים מ-${twoDaysAgoISO} ואילך — אמור זאת **בכנות**. אל תכלול אזכורים ישנים יותר אפילו אם נמצאו בחיפוש.`;
-
-    const result = await _sc(twitterPrompt, [], { webSearchMaxUses: 5, timeoutMs: 180000, prefill: '🔍 *' });
-    await botSend(oc, `🔍 *מעקב מדיה יומי — ${today}*\n📅 _טווח: ${twoDaysAgoISO} → ${todayISO} (יומיים אחרונים)_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
+    const result = await _sc(buildMediaMonitorPrompt(now), [], { webSearchMaxUses: 6, timeoutMs: 180000, prefill: '🔍 *' });
+    await botSend(oc, `🔍 *מעקב מדיה יומי — ${today}*\n📅 _טווח מועדף: ${twoWeeksAgoISO} → ${todayISO} (14 ימים)_\n━━━━━━━━━━━━━━━━━━━━\n\n${result}`);
   } catch (e) {
     console.error('Twitter monitor cron error:', e.message?.substring(0, 80));
   }
