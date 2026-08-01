@@ -6804,13 +6804,16 @@ function _twitterCaption(url) {
   if (!m) return Promise.resolve('');
   const id = m[1];
   return new Promise((resolve) => {
-    const req = require('https').get(`https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=a&lang=he`, (res) => {
-      let d = ''; res.on('data', c => (d += c));
-      res.on('end', () => {
-        try { const j = JSON.parse(d); resolve(_cleanCaption((j.text || '').replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim())); }
-        catch { resolve(''); }
+    const req = require('https').get(
+      `https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=a&lang=he`,
+      { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36' } },
+      (res) => {
+        let d = ''; res.on('data', c => (d += c));
+        res.on('end', () => {
+          try { const j = JSON.parse(d); resolve(_cleanCaption((j.text || '').replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim())); }
+          catch { resolve(''); }
+        });
       });
-    });
     req.setTimeout(12000, () => { req.destroy(); resolve(''); });
     req.on('error', () => resolve(''));
   });
