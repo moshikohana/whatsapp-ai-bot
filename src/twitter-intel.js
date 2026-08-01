@@ -70,21 +70,46 @@ async function getHisTweets(max = 10) {
     .slice(0, max);
 }
 
-// Lean report — ONE X request (mentions search), ranked by engagement, links
-// only. No his-tweets endpoint, no LLM → minimal twitterapi.io credit use.
+function _fmtNum(n) {
+  n = n || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return String(n);
+}
+function _fmtDate(iso) {
+  try { return new Date(iso).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+  catch { return ''; }
+}
+
+// Full report — his recent POSTS (with engagement) + top mentions/replies.
+// Two X requests (his tweets + mentions search), retried; no LLM.
 async function buildXReport() {
   if (!_key()) return '🐦 *מודיעין X:* חסר מפתח twitterapi.io.';
-  const mentions = await getMentions(25); // single advanced_search (with retry)
-  if (!mentions || !mentions.length) {
+  const [tweets, mentions] = await Promise.all([getHisTweets(8), getMentions(25)]);
+  if ((!tweets || !tweets.length) && (!mentions || !mentions.length)) {
     return '🐦 *מודיעין X:* twitterapi.io לא החזיר נתונים כרגע — נסה שוב בעוד רגע.';
   }
   const d = new Date().toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
-  const ranked = [...mentions].sort((a, b) => (b.likes + b.rts * 2 + b.replies) - (a.likes + a.rts * 2 + a.replies)).slice(0, 7);
-  let out = `🐦 *מודיעין X — אזכורים בולטים על קלנר* · ${d}\n`;
-  out += `_(${mentions.length} אזכורים אחרונים · מדורגים לפי מעורבות)_\n\n`;
-  out += ranked.map(m =>
-    `• @${m.user} ❤️${m.likes} 🔁${m.rts} 💬${m.replies}\n  _"${m.text.substring(0, 90)}"_${m.url ? `\n  🔗 ${m.url}` : ''}`).join('\n\n');
-  out += `\n\n_💡 לניסוח תגובה לאחד מהם: "תגובה על <נושא>"_`;
+  let out = `🐦 *מודיעין X — קלנר* · ${d}`;
+
+  // ── His own posts + engagement ──
+  if (tweets && tweets.length) {
+    const totalLikes = tweets.reduce((a, t) => a + t.likes, 0);
+    const totalReplies = tweets.reduce((a, t) => a + t.replies, 0);
+    out += `\n\n📢 *הפוסטים האחרונים שלך* (${tweets.length}) — סה״כ ❤️${_fmtNum(totalLikes)} · 💬${_fmtNum(totalReplies)} תגובות:\n`;
+    out += tweets.slice(0, 5).map(t =>
+      `• ${_fmtDate(t.date)} — ❤️${_fmtNum(t.likes)} 🔁${_fmtNum(t.rts)} 💬${_fmtNum(t.replies)}${t.views ? ` 👁${_fmtNum(t.views)}` : ''}\n  "${t.text.substring(0, 70)}"${t.url ? `\n  🔗 ${t.url}` : ''}`
+    ).join('\n');
+  }
+
+  // ── Mentions / replies about him (ranked by engagement) ──
+  if (mentions && mentions.length) {
+    const ranked = [...mentions].sort((a, b) => (b.likes + b.rts * 2 + b.replies) - (a.likes + a.rts * 2 + a.replies)).slice(0, 6);
+    out += `\n\n💬 *אזכורים/תגובות עליך* (${mentions.length} אחרונים · לפי מעורבות):\n`;
+    out += ranked.map(m =>
+      `• @${m.user} ❤️${_fmtNum(m.likes)} 🔁${_fmtNum(m.rts)} 💬${_fmtNum(m.replies)}\n  _"${m.text.substring(0, 85)}"_${m.url ? `\n  🔗 ${m.url}` : ''}`).join('\n');
+    out += `\n\n_💡 לניסוח תגובה: "תגובה על <נושא>"_`;
+  }
   return out.trim();
 }
 
