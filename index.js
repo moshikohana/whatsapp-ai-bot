@@ -6151,10 +6151,46 @@ function getKallnerTikTokLatest({ max = 3 } = {}) {
   });
 }
 
+// Latest X/Twitter activity of @ArielKallner via twitterapi.io (paid, cheap,
+// key in TWITTERAPI_KEY). Unlike the others this includes RTs/replies — the
+// X-exclusive activity a spokesperson needs. Returns [{text,date,url,isRT}]
+// newest-first, or null if no key / error.
+const KALLNER_X_USER = 'ArielKallner';
+function getKallnerTwitterLatest({ max = 3 } = {}) {
+  return new Promise((resolve) => {
+    const key = process.env.TWITTERAPI_KEY;
+    if (!key) return resolve(null);
+    const req = require('https').get({
+      hostname: 'api.twitterapi.io',
+      path: `/twitter/user/last_tweets?userName=${encodeURIComponent(KALLNER_X_USER)}`,
+      headers: { 'X-API-Key': key },
+    }, (res) => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        try {
+          const d = JSON.parse(data);
+          const tweets = (d.data && d.data.tweets) || [];
+          resolve(tweets.map(t => ({
+            text: (t.text || '').replace(/\s+/g, ' '),
+            date: t.createdAt || null,
+            url: t.url || t.twitterUrl || '',
+            isRT: /^RT @/.test(t.text || ''),
+            isReply: !!(t.isReply || t.inReplyToId),
+          })).slice(0, max));
+        } catch { resolve(null); }
+      });
+    });
+    req.setTimeout(30000, () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+
 // On-demand "what's the latest post on each platform?" — answers the
 // recurring "מה עלה כבר ומה לא" question. Telegram + WhatsApp read
-// deterministically (his own channels, exact timestamps); YouTube via the
-// Data API + TikTok via yt-dlp (reliable); Instagram best-effort web_search.
+// deterministically (his own channels, exact timestamps); X via twitterapi.io
+// (incl. RTs/replies); YouTube via Data API + TikTok via yt-dlp; Instagram
+// best-effort web_search.
 async function getLatestPostsReport() {
   const fmt = ts => new Date(ts * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   const parts = ['📊 *מה עלה לאחרונה — אריאל קלנר*'];
@@ -6183,6 +6219,19 @@ async function getLatestPostsReport() {
       parts.push(m ? `🟢 *וואטסאפ* · ${fmt(m.timestamp)}\n${m.body.replace(/\s+/g, ' ').substring(0, 200)}` : '🟢 *וואטסאפ:* אין פוסטים');
     }
   } catch { parts.push('🟢 *וואטסאפ:* שגיאה בקריאה'); }
+
+  // X/Twitter — via twitterapi.io (includes RTs/replies — X-exclusive activity)
+  try {
+    const tws = await getKallnerTwitterLatest({ max: 3 });
+    if (tws === null) parts.push('🐦 *X:* לא זמין (מפתח/שגיאה)');
+    else if (!tws.length) parts.push('🐦 *X:* אין ציוצים');
+    else {
+      const t = tws[0];
+      const dt = t.date ? new Date(t.date).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
+      const tag = t.isRT ? ' (ריטוויט)' : t.isReply ? ' (תגובה)' : '';
+      parts.push(`🐦 *X* · ${dt}${tag}\n${t.text.substring(0, 180)}\n🔗 ${t.url}`);
+    }
+  } catch (e) { parts.push(`🐦 *X:* שגיאה (${(e.message || '').substring(0, 50)})`); }
 
   // YouTube — reliable via Data API (search by date). He has no own channel,
   // so this is his latest interview/appearance.
