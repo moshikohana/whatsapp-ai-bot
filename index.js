@@ -2853,6 +2853,9 @@ ${pool}`;
 // ── Pending preset-save confirmations (5-min TTL) ──────────────
 const pendingPresetSave = new Map();
 
+// ── Pending "prepare distribution" state (owner sends text+links next) ──
+const pendingDistribution = new Map();
+
 // ─── Daily "add active new group to scans?" suggestion ──────────
 // Once a day, look for groups the owner is in that got a lot of traffic
 // today (> threshold) but are NOT in the daily scan list, and offer to add
@@ -3736,6 +3739,32 @@ client.on('message_create', async (msg) => {
         }
         // Looks like a different request — drop the pending state, fall through.
         pendingGroupSuggest.delete(OWNER_ID);
+      }
+    }
+
+    // ── Pending "prepare distribution" — assemble from pasted text+links ──
+    {
+      const pd = pendingDistribution.get(OWNER_ID);
+      if (pd && pd.expiresAt > Date.now()) {
+        const t = text.trim();
+        if (/^(ביטול|בטל|עזוב|לא)$/i.test(t)) {
+          pendingDistribution.delete(OWNER_ID);
+          await botSend(chat, '👍 ההפצה בוטלה.');
+          stats.sent++; return;
+        }
+        pendingDistribution.delete(OWNER_ID);
+        await botSend(chat, '⏳ מקצר קישורים ומרכיב את ההפצה... שנייה.');
+        (async () => {
+          try {
+            const full = await assembleDistribution(text);
+            const oc = await client.getChatById(OWNER_ID);
+            await oc.sendMessage(full + BOT_MARKER); // clean, copy-ready
+            await botSend(oc, '👆 *ההפצה מוכנה* — להעתקה ושליחה. (טלגרם/טיקטוק/יוטיוב מולאו אוטומטית; מקומות ריקים = לא נשלח קישור.) 🚀');
+          } catch (e) {
+            try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הרכבת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+          }
+        })();
+        stats.sent++; return;
       }
     }
 
@@ -5092,21 +5121,10 @@ async function route(chatId, text) {
     return '🎬 בודק את הסרטון האחרון בכל פלטפורמה (יוטיוב · טיקטוק · X · אינסטגרם)... חוזר תוך ~דקה.';
   }
 
-  // ─── "Prepare for distribution" template (תכין להפצה) ────────────
-  if (/^(תכין להפצה|הכן להפצה|תכין הפצה|הפצה)\b/i.test(text.trim())) {
-    (async () => {
-      try {
-        const tmpl = await buildDistributionTemplate();
-        const oc = await client.getChatById(OWNER_ID);
-        // Send the template as a CLEAN message (invisible marker only, no
-        // visible bot signature) so it's ready to copy, edit and forward.
-        await oc.sendMessage(tmpl + BOT_MARKER);
-        await botSend(oc, '👆 *תבנית הפצה מוכנה.* מלא את הכותרת/הציטוט, השלם את הקישורים החסרים וקצר ב-did.li. (טיקטוק+יוטיוב מולאו אוטומטית מהסרטון האחרון — קצר גם אותם.)');
-      } catch (e) {
-        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הכנת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
-      }
-    })();
-    return '📤 מכין תבנית הפצה (מושך קישורי טיקטוק+יוטיוב אחרונים)... שנייה.';
+  // ─── "Prepare for distribution" (תכין להפצה) — step 1: ask for text+links ─
+  if (/^(תכין(\s+לי)?\s+(ל)?הפצה|הכן(\s+לי)?\s+(ל)?הפצה|תכין הפצה|בוא נכין הפצה)/i.test(text.trim())) {
+    pendingDistribution.set(OWNER_ID, { expiresAt: Date.now() + 20 * 60 * 1000 });
+    return '📤 *מכין הפצה.*\n\n🤖 אני ממלא אוטומטית: *טלגרם · טיקטוק · יוטיוב*\n\nשלח לי ב*הודעה אחת*:\n1️⃣ *הטקסט* — שורת פתיחה (מאיפה / כותרת) + הציטוט\n2️⃣ *הקישורים שנשארו* — *פייסבוק · אינסטגרם · threads · Reels* (ואם יש — קישור לראיון המלא)\n\nאזהה כל פלטפורמה לפי הקישור, אקצר ב-tinyurl, וארכיב לפורמט המלא. 🚀\n\n_(לביטול — שלח "ביטול")_';
   }
 
   // ─── Manual backup ───────────────────────────────────────────────
@@ -5454,10 +5472,16 @@ app.get('/debug/latest-videos', async (_req, res) => {
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// ─── Distribution template (test the "תכין להפצה" command) ──
-app.get('/debug/distribution', async (_req, res) => {
-  try { res.json({ ok: true, template: await buildDistributionTemplate() }); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+// ─── Distribution assembly (test the "תכין להפצה" flow) ──
+// ?text=... simulates the owner's pasted text+links; default uses a sample
+// with FB + IG-reel links so you can see auto-fill (TG/TikTok/YouTube) +
+// tinyurl shortening + platform detection.
+app.get('/debug/distribution', async (req, res) => {
+  try {
+    const sample = req.query.text
+      || 'בערוץ 14 אצל בועז גולן\nיאיר גולן הוא האיום האמיתי\n\nhttps://www.facebook.com/arielkalner/videos/123456\nhttps://www.instagram.com/reel/ABC123def/';
+    res.json({ ok: true, template: await assembleDistribution(sample) });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── Join a WhatsApp group by invite code (owner-authorized, one-shot) ──
@@ -6421,6 +6445,87 @@ ${ytUrl || ph}
 🟢*מוזמנים* להצטרף
 לקבוצת העדכונים *הסגורה* ⬇️
 ${KALLNER_UPDATES_LINK}`;
+}
+
+// ─── Distribution flow helpers ─────────────────────────────────
+// tinyurl shortener — free, no key, works from the server (is.gd is
+// Cloudflare-blocked here). Falls back to the original URL on any failure.
+function shortenUrl(u) {
+  return new Promise((resolve) => {
+    if (!/^https?:\/\//i.test(u)) return resolve(u);
+    const req = require('https').get('https://tinyurl.com/api-create.php?url=' + encodeURIComponent(u), (res) => {
+      let d = ''; res.on('data', c => (d += c));
+      res.on('end', () => { const t = d.trim(); resolve(/^https?:\/\/tinyurl\.com\//i.test(t) ? t : u); });
+    });
+    req.setTimeout(15000, () => { req.destroy(); resolve(u); });
+    req.on('error', () => resolve(u));
+  });
+}
+
+// Classify a URL to its platform slot by domain.
+function _platformOfUrl(u) {
+  const s = u.toLowerCase();
+  if (/facebook\.com|fb\.watch|fb\.com/.test(s)) return 'facebook';
+  if (/tiktok\.com/.test(s)) return 'tiktok';
+  if (/instagram\.com\/reel/.test(s)) return 'reels';
+  if (/instagram\.com/.test(s)) return 'instagram';
+  if (/t\.me\//.test(s)) return 'telegram';
+  if (/youtube\.com|youtu\.be/.test(s)) return 'youtube';
+  if (/threads\.(net|com)/.test(s)) return 'threads';
+  if (/x\.com|twitter\.com/.test(s)) return 'x';
+  return 'other';
+}
+
+// Direct link to the latest post in Kellner's Telegram channel (bot member).
+async function getKallnerTelegramPostLink() {
+  try {
+    const tg = require('./src/telegram');
+    if (!tg.isConfigured || !tg.isConfigured()) return null;
+    const r = await tg.readMessages({ chatName: KALLNER_TG_CHANNEL, limit: 1 });
+    if (r.error || !r.messages || !r.messages.length) return null;
+    const id = r.messages[r.messages.length - 1].id; // readMessages sorts oldest→newest
+    return id ? `https://t.me/Kallner/${id}` : null;
+  } catch { return null; }
+}
+
+// Assemble the full distribution message from the owner's pasted text+links.
+// Auto-fills the platforms the bot can reach itself (Telegram post, latest
+// TikTok, latest YouTube); the owner pastes the rest. Everything is shortened
+// via tinyurl; pasted links override the auto ones.
+async function assembleDistribution(rawText) {
+  const urlRe = /(https?:\/\/[^\s]+)/g;
+  const urls = rawText.match(urlRe) || [];
+  const editorial = rawText.replace(urlRe, '').split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+
+  const links = {};
+  const ytPasted = [];
+  for (const u of urls) {
+    const plat = _platformOfUrl(u);
+    const short = await shortenUrl(u);
+    if (plat === 'youtube') ytPasted.push(short);
+    else if (!links[plat]) links[plat] = short;
+  }
+
+  // Auto-fill only what the owner didn't paste
+  if (!links.telegram) { const tg = await getKallnerTelegramPostLink(); if (tg) links.telegram = await shortenUrl(tg); }
+  if (!links.tiktok) { try { const t = await getKallnerTikTokLatest({ max: 1 }); if (t && t[0]) links.tiktok = await shortenUrl(t[0].url); } catch {} }
+  let ytMain = ytPasted[0];
+  if (!ytMain) { try { const y = await getKallnerYouTubeLatest({ sinceDays: 60, max: 1 }); if (y && y[0]) ytMain = await shortenUrl(`https://youtube.com/watch?v=${y[0].videoId}`); } catch {} }
+  const ytInterview = ytPasted[1] || '';
+
+  const ph = '[הדבק קישור]';
+  const L = k => links[k] || ph;
+  let s = `חה״כ *אריאל קלנר* (הליכוד) :\n${editorial || '[כותרת / ציטוט]'}\n\n`;
+  s += `*פייסבוק*\n${L('facebook')}\n\n`;
+  s += `*טיקטוק*\n${L('tiktok')}\n\n`;
+  s += `*אינסטגרם*\n${L('instagram')}\n\n`;
+  s += `*טלגרם*\n${L('telegram')}\n\n`;
+  s += `*יוטיוב*\n${ytMain || ph}\n\n`;
+  s += `*threads*\n${L('threads')}\n\n`;
+  if (links.reels) s += `*Reels*\n${links.reels}\n\n`;
+  if (ytInterview) s += `לראיון המלא ב-14 🔽\n${ytInterview}\n\n`;
+  s += `\n🟢*מוזמנים* להצטרף\nלקבוצת העדכונים *הסגורה* ⬇️\n${KALLNER_UPDATES_LINK}`;
+  return s;
 }
 
 // Full media monitor: his own Telegram + WhatsApp posts (reliable, exact
