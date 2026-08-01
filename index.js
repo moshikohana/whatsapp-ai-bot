@@ -5150,7 +5150,7 @@ async function route(chatId, text) {
     let got = '';
     if (nLinks) got += `🔗 קלטתי *${nLinks}* קישורים.\n`;
     got += hasText ? '📝 קלטתי טקסט.\n' : '📝 עדיין אין טקסט — הדבק כותרת + ציטוט.\n';
-    return `📤 *הכנת הפצה*\n\n💡 *הכי פשוט:* שתף לי את *קישור פוסט הטלגרם* — אקח ממנו את הטקסט ואמצא לפיו את הטיקטוק אוטומטית.\n\n🤖 *אני מביא לבד:* 🔵 טלגרם · ⚫ טיקטוק\n✍️ *צריך ממך:* ▶️ יוטיוב (שורטס) · 🔵 פייסבוק · 📸 אינסטגרם · 🧵 threads · 🎬 Reels\n\n${got}━━━━━━━━━━\n👉 הדבק קישור טלגרם + הקישורים החסרים, ואז שלח *"הכן"*.\n_(או "הכן" עכשיו · "ביטול" לביטול)_`;
+    return `📤 *הכנת הפצה*\n\n🤖 *אני מביא לבד:* 🔵 טלגרם (הקישור + *הטקסט* מפוסט הוידאו)\n✍️ *הדבק לי:* ⚫ טיקטוק · ▶️ יוטיוב (שורטס) · 🔵 פייסבוק · 📸 אינסטגרם · 🧵 threads · 🎬 Reels\n\n💡 לא חייב טקסט — אקח אותו מפוסט הוידאו בטלגרם.\n\n${got}━━━━━━━━━━\n👉 הדבק את הקישורים (כמו שהם), ואז שלח *"הכן"*.\n_(או "הכן" עכשיו · "ביטול" לביטול)_`;
   }
 
   // ─── Manual backup ───────────────────────────────────────────────
@@ -6662,13 +6662,11 @@ async function assembleDistribution(rawText) {
       if ((!editorial || editorial.length < 8) && tg.text) editorial = tg.text;
     }
   }
-  // Other auto platforms, matched to the (now-populated) text.
-  if (!links.tiktok) {
-    try { const t = await getKallnerTikTokLatest({ max: 10 }); const pick = _bestByText(t, editorial, x => x.title, 2); if (pick) links.tiktok = await shortenUrl(pick.url); } catch {}
-  }
-  // YouTube: the owner pastes it — his distribution clip is usually a Short
-  // (youtube.com/shorts/…), which the Data API can't reliably locate (it
-  // surfaces the full interview instead). A pasted link is kept as-is.
+  // TikTok + YouTube are PASTE-only. Auto-matching by text guessed and could
+  // pick the WRONG video — unacceptable for a spokesperson. The owner has
+  // these links right after posting, so he pastes the exact ones; the bot
+  // still auto-does Telegram + text + did.li shortening + formatting. (Pasted
+  // TikTok already lands in links.tiktok; YouTube Shorts in ytPasted.)
   const ytMain = ytPasted[0] || '';
   const ytInterview = ytPasted[1] || '';
 
