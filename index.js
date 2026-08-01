@@ -5072,7 +5072,21 @@ async function route(chatId, text) {
         try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ בדיקת פלטפורמות נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
       }
     })();
-    return '📊 בודק את הפוסט האחרון בכל פלטפורמה (טלגרם · וואטסאפ · אינסטגרם · יוטיוב)... חוזר תוך ~דקה.';
+    return '📊 בודק את הפוסט האחרון בכל פלטפורמה (טלגרם · וואטסאפ · X · יוטיוב · טיקטוק · אינסטגרם)... חוזר תוך ~דקה.';
+  }
+
+  // ─── "What's the latest VIDEO on each platform?" (סרטון אחרון) ────
+  if (/^(סרטון אחרון|מה הסרטון האחרון|הסרטון האחרון|וידאו אחרון|הוידאו האחרון|סרטונים אחרונים|איזה סרטון עלה)/i.test(text.trim())) {
+    (async () => {
+      try {
+        const report = await getLatestVideosReport();
+        const oc = await client.getChatById(OWNER_ID);
+        await botSend(oc, report);
+      } catch (e) {
+        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ בדיקת סרטונים נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+      }
+    })();
+    return '🎬 בודק את הסרטון האחרון בכל פלטפורמה (יוטיוב · טיקטוק · X · אינסטגרם)... חוזר תוך ~דקה.';
   }
 
   // ─── Manual backup ───────────────────────────────────────────────
@@ -5411,6 +5425,12 @@ app.get('/debug/group-suggest', async (req, res) => {
 // ─── Latest-post-per-platform report (test the "מה עלה" command) ──
 app.get('/debug/latest-posts', async (_req, res) => {
   try { res.json({ ok: true, report: await getLatestPostsReport() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ─── Latest-video-per-platform report (test the "סרטון אחרון" command) ──
+app.get('/debug/latest-videos', async (_req, res) => {
+  try { res.json({ ok: true, report: await getLatestVideosReport() }); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -6171,13 +6191,20 @@ function getKallnerTwitterLatest({ max = 3 } = {}) {
         try {
           const d = JSON.parse(data);
           const tweets = (d.data && d.data.tweets) || [];
-          resolve(tweets.map(t => ({
-            text: (t.text || '').replace(/\s+/g, ' '),
-            date: t.createdAt || null,
-            url: t.url || t.twitterUrl || '',
-            isRT: /^RT @/.test(t.text || ''),
-            isReply: !!(t.isReply || t.inReplyToId),
-          })).slice(0, max));
+          resolve(tweets.map(t => {
+            const media = (t.extendedEntities && t.extendedEntities.media)
+              || (t.entities && t.entities.media) || [];
+            const types = Array.isArray(media) ? media.map(m => m.type) : [];
+            return {
+              text: (t.text || '').replace(/\s+/g, ' '),
+              date: t.createdAt || null,
+              url: t.url || t.twitterUrl || '',
+              isRT: /^RT @/.test(t.text || ''),
+              isReply: !!(t.isReply || t.inReplyToId),
+              hasVideo: types.includes('video'),
+              hasPhoto: types.includes('photo'),
+            };
+          }).slice(0, max));
         } catch { resolve(null); }
       });
     });
@@ -6220,16 +6247,19 @@ async function getLatestPostsReport() {
     }
   } catch { parts.push('🟢 *וואטסאפ:* שגיאה בקריאה'); }
 
-  // X/Twitter — via twitterapi.io (includes RTs/replies — X-exclusive activity)
+  // X/Twitter — via twitterapi.io. Show the latest 3 incl. RTs/replies/video
+  // (the X-exclusive activity a spokesperson tracks, not just the top post).
   try {
     const tws = await getKallnerTwitterLatest({ max: 3 });
     if (tws === null) parts.push('🐦 *X:* לא זמין (מפתח/שגיאה)');
     else if (!tws.length) parts.push('🐦 *X:* אין ציוצים');
     else {
-      const t = tws[0];
-      const dt = t.date ? new Date(t.date).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
-      const tag = t.isRT ? ' (ריטוויט)' : t.isReply ? ' (תגובה)' : '';
-      parts.push(`🐦 *X* · ${dt}${tag}\n${t.text.substring(0, 180)}\n🔗 ${t.url}`);
+      const line = t => {
+        const dt = t.date ? new Date(t.date).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
+        const tag = t.isRT ? ' 🔁ריטוויט' : t.isReply ? ' 💬תגובה' : t.hasVideo ? ' 🎥וידאו' : t.hasPhoto ? ' 🖼️' : '';
+        return `· ${dt}${tag} — ${t.text.substring(0, 110)}\n  🔗 ${t.url}`;
+      };
+      parts.push('🐦 *X — 3 אחרונים:*\n' + tws.map(line).join('\n'));
     }
   } catch (e) { parts.push(`🐦 *X:* שגיאה (${(e.message || '').substring(0, 50)})`); }
 
@@ -6265,6 +6295,56 @@ async function getLatestPostsReport() {
     const igPrompt = `בצע web_search והחזר קצר בלבד (בלי הקדמות): 📸 *אינסטגרם* (@ariel.kallner) — הפוסט/רילס העדכני ביותר של ח"כ אריאל קלנר שאתה מוצא: תאריך (אם זמין) · תיאור בשורה · קישור. אם אי אפשר לאמת פוסט אחרון: "לא אומת פוסט אחרון · instagram.com/ariel.kallner".`;
     parts.push(await _sc(igPrompt, [], { webSearchMaxUses: 3, timeoutMs: 60000 }));
   } catch { parts.push('📸 *אינסטגרם:* החיפוש נכשל'); }
+
+  return parts.join('\n\n');
+}
+
+// "What's the latest VIDEO on each platform?" — so the spokesperson can
+// confirm a clip went up everywhere. YouTube + TikTok are natively video;
+// X filters to the latest video tweet; Instagram reels best-effort.
+async function getLatestVideosReport() {
+  const parts = ['🎬 *הסרטון האחרון בכל פלטפורמה — אריאל קלנר*'];
+  const fmtYmd = s => (s && s.length === 8) ? `${s.slice(6, 8)}/${s.slice(4, 6)}/${s.slice(0, 4)}` : (s || '?');
+
+  // YouTube (Data API) — interviews/appearances
+  try {
+    const vids = await getKallnerYouTubeLatest({ sinceDays: 60, max: 1 });
+    if (vids === null) parts.push('▶️ *יוטיוב:* לא מוגדר מפתח');
+    else if (!vids.length) parts.push('▶️ *יוטיוב:* אין סרטונים (60 יום)');
+    else {
+      const v = vids[0];
+      const d = new Date(v.date).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      parts.push(`▶️ *יוטיוב* · ${d}\n${v.title}\n🔗 youtube.com/watch?v=${v.videoId}`);
+    }
+  } catch { parts.push('▶️ *יוטיוב:* שגיאה'); }
+
+  // TikTok (yt-dlp)
+  try {
+    const tks = await getKallnerTikTokLatest({ max: 1 });
+    if (!tks || !tks.length) parts.push('⚫ *טיקטוק:* לא זמין');
+    else { const t = tks[0]; parts.push(`⚫ *טיקטוק* · ${fmtYmd(t.date)}\n${t.title.substring(0, 120)}\n🔗 ${t.url}`); }
+  } catch { parts.push('⚫ *טיקטוק:* שגיאה'); }
+
+  // X — latest tweet that carries a video (skip RTs)
+  try {
+    const tws = await getKallnerTwitterLatest({ max: 15 });
+    if (tws === null) parts.push('🐦 *X:* לא זמין');
+    else {
+      const v = tws.find(t => t.hasVideo && !t.isRT);
+      if (!v) parts.push('🐦 *X:* אין סרטון ב-15 הציוצים האחרונים');
+      else {
+        const d = new Date(v.date).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        parts.push(`🐦 *X* · ${d}\n${v.text.substring(0, 120)}\n🔗 ${v.url}`);
+      }
+    }
+  } catch { parts.push('🐦 *X:* שגיאה'); }
+
+  // Instagram Reels — best-effort
+  try {
+    const { smartChat: _sc } = require('./src/claude');
+    const p = `בצע web_search והחזר קצר בלבד (בלי הקדמות): 📸 *אינסטגרם רילס* (@ariel.kallner) — הרילס/סרטון העדכני ביותר של ח"כ אריאל קלנר שאתה מוצא: תאריך (אם זמין) · תיאור שורה · קישור. אם אי אפשר לאמת: "לא אומת · instagram.com/ariel.kallner/reels".`;
+    parts.push(await _sc(p, [], { webSearchMaxUses: 3, timeoutMs: 60000 }));
+  } catch { parts.push('📸 *אינסטגרם:* חיפוש נכשל'); }
 
   return parts.join('\n\n');
 }
