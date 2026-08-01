@@ -6082,11 +6082,46 @@ async function getKallnerWhatsAppSection(sinceHours = 24) {
   }
 }
 
+// Tiny HTTPS JSON GET (avoids depending on global fetch availability).
+function _httpsGetJson(url) {
+  return new Promise((resolve, reject) => {
+    require('https').get(url, (res) => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(data);
+          if (res.statusCode >= 400) return reject(new Error(`HTTP ${res.statusCode}: ${(j.error && j.error.message) || data.substring(0, 100)}`));
+          resolve(j);
+        } catch { reject(new Error(`bad JSON (HTTP ${res.statusCode})`)); }
+      });
+    }).on('error', reject);
+  });
+}
+
+// Latest YouTube videos featuring Kellner, via the YouTube Data API v3
+// (free key in YOUTUBE_API_KEY). He has no own channel, so we search all
+// videos by name ordered by date — reliable, with exact publish dates,
+// unlike web_search. Returns [] if none, or null if no key configured.
+async function getKallnerYouTubeLatest({ sinceDays = 45, max = 3 } = {}) {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) return null;
+  const params = new URLSearchParams({
+    part: 'snippet', q: 'אריאל קלנר', type: 'video', order: 'date',
+    maxResults: String(max), relevanceLanguage: 'he',
+    publishedAfter: new Date(Date.now() - sinceDays * 86400000).toISOString(),
+    key,
+  });
+  const data = await _httpsGetJson(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+  return (data.items || [])
+    .filter(i => i.id && i.id.videoId)
+    .map(i => ({ title: i.snippet.title, channel: i.snippet.channelTitle, date: i.snippet.publishedAt, videoId: i.id.videoId }));
+}
+
 // On-demand "what's the latest post on each platform?" — answers the
-// recurring "מה עלה כבר ומה לא" question. Telegram + WhatsApp are read
-// deterministically (his own channels, exact timestamps); Instagram +
-// YouTube (he has no own YT channel — latest interview/appearance) are
-// best-effort via web_search.
+// recurring "מה עלה כבר ומה לא" question. Telegram + WhatsApp read
+// deterministically (his own channels, exact timestamps); YouTube via the
+// Data API (reliable); Instagram best-effort via web_search (IG blocks).
 async function getLatestPostsReport() {
   const fmt = ts => new Date(ts * 1000).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   const parts = ['📊 *מה עלה לאחרונה — אריאל קלנר*'];
@@ -6116,17 +6151,26 @@ async function getLatestPostsReport() {
     }
   } catch { parts.push('🟢 *וואטסאפ:* שגיאה בקריאה'); }
 
-  // Instagram (@ariel.kallner) + YouTube (interviews) — best-effort web_search
+  // YouTube — reliable via Data API (search by date). He has no own channel,
+  // so this is his latest interview/appearance.
+  try {
+    const vids = await getKallnerYouTubeLatest({ sinceDays: 45, max: 3 });
+    if (vids === null) parts.push('▶️ *יוטיוב:* לא מוגדר מפתח (הוסף YOUTUBE_API_KEY)');
+    else if (!vids.length) parts.push('▶️ *יוטיוב:* אין הופעות חדשות ב-45 הימים האחרונים');
+    else {
+      const v = vids[0];
+      const d = new Date(v.date).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      parts.push(`▶️ *יוטיוב* · ${d}\n${v.title} (${v.channel})\n🔗 youtube.com/watch?v=${v.videoId}`);
+    }
+  } catch (e) { parts.push(`▶️ *יוטיוב:* שגיאת API (${(e.message || '').substring(0, 60)})`); }
+
+  // Instagram (@ariel.kallner) — best-effort web_search (IG blocks scraping;
+  // reliable source deferred to a paid API later).
   try {
     const { smartChat: _sc } = require('./src/claude');
-    const igYt = `בצע web_search והחזר קצר ומדויק בלבד (בלי הקדמות), שני פריטים על ח"כ אריאל קלנר:
-
-📸 *אינסטגרם* (@ariel.kallner): הפוסט/רילס העדכני ביותר שאתה מוצא — תאריך (אם זמין) · תיאור בשורה · קישור. אם אי אפשר לאמת פוסט אחרון: "לא אומת פוסט אחרון · instagram.com/ariel.kallner".
-
-▶️ *יוטיוב* (אין לו ערוץ משלו — חפש ראיון/הופעה אחרונה שלו): הסרטון העדכני ביותר — כותרת · ערוץ · תאריך · קישור.`;
-    const r = await _sc(igYt, [], { webSearchMaxUses: 4, timeoutMs: 90000 });
-    parts.push(r);
-  } catch { parts.push('📸▶️ *אינסטגרם/יוטיוב:* החיפוש נכשל'); }
+    const igPrompt = `בצע web_search והחזר קצר בלבד (בלי הקדמות): 📸 *אינסטגרם* (@ariel.kallner) — הפוסט/רילס העדכני ביותר של ח"כ אריאל קלנר שאתה מוצא: תאריך (אם זמין) · תיאור בשורה · קישור. אם אי אפשר לאמת פוסט אחרון: "לא אומת פוסט אחרון · instagram.com/ariel.kallner".`;
+    parts.push(await _sc(igPrompt, [], { webSearchMaxUses: 3, timeoutMs: 60000 }));
+  } catch { parts.push('📸 *אינסטגרם:* החיפוש נכשל'); }
 
   return parts.join('\n\n');
 }
