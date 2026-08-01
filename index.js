@@ -6113,9 +6113,12 @@ async function getKallnerYouTubeLatest({ sinceDays = 45, max = 3 } = {}) {
     key,
   });
   const data = await _httpsGetJson(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+  // YouTube returns HTML-encoded titles (&quot; &amp; &#39; …) — decode for display.
+  const decode = s => (s || '')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
   return (data.items || [])
     .filter(i => i.id && i.id.videoId)
-    .map(i => ({ title: i.snippet.title, channel: i.snippet.channelTitle, date: i.snippet.publishedAt, videoId: i.id.videoId }));
+    .map(i => ({ title: decode(i.snippet.title), channel: decode(i.snippet.channelTitle), date: i.snippet.publishedAt, videoId: i.id.videoId }));
 }
 
 // Latest TikTok videos of @ariel.kallner via yt-dlp (trusted standalone
