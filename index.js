@@ -6352,41 +6352,42 @@ function getKallnerTikTokLatest({ max = 3 } = {}) {
 // X-exclusive activity a spokesperson needs. Returns [{text,date,url,isRT}]
 // newest-first, or null if no key / error.
 const KALLNER_X_USER = 'ArielKallner';
-function getKallnerTwitterLatest({ max = 3 } = {}) {
-  return new Promise((resolve) => {
-    const key = process.env.TWITTERAPI_KEY;
-    if (!key) return resolve(null);
+async function getKallnerTwitterLatest({ max = 3 } = {}) {
+  const key = process.env.TWITTERAPI_KEY;
+  if (!key) return null;
+  const fetchOnce = () => new Promise((resolve) => {
     const req = require('https').get({
       hostname: 'api.twitterapi.io',
       path: `/twitter/user/last_tweets?userName=${encodeURIComponent(KALLNER_X_USER)}`,
       headers: { 'X-API-Key': key },
     }, (res) => {
-      let data = '';
-      res.on('data', c => (data += c));
-      res.on('end', () => {
-        try {
-          const d = JSON.parse(data);
-          const tweets = (d.data && d.data.tweets) || [];
-          resolve(tweets.map(t => {
-            const media = (t.extendedEntities && t.extendedEntities.media)
-              || (t.entities && t.entities.media) || [];
-            const types = Array.isArray(media) ? media.map(m => m.type) : [];
-            return {
-              text: (t.text || '').replace(/\s+/g, ' '),
-              date: t.createdAt || null,
-              url: t.url || t.twitterUrl || '',
-              isRT: /^RT @/.test(t.text || ''),
-              isReply: !!(t.isReply || t.inReplyToId),
-              hasVideo: types.includes('video'),
-              hasPhoto: types.includes('photo'),
-            };
-          }).slice(0, max));
-        } catch { resolve(null); }
-      });
+      let data = ''; res.on('data', c => (data += c));
+      res.on('end', () => { try { resolve(((JSON.parse(data).data) || {}).tweets || []); } catch { resolve(null); } });
     });
-    req.setTimeout(30000, () => { req.destroy(); resolve(null); });
+    req.setTimeout(20000, () => { req.destroy(); resolve(null); });
     req.on('error', () => resolve(null));
   });
+  // twitterapi.io returns empty ~2/3 of the time — retry until non-empty.
+  let tweets = [];
+  for (let i = 0; i < 5; i++) {
+    tweets = await fetchOnce();
+    if (tweets && tweets.length) break;
+    await new Promise(r => setTimeout(r, 1200));
+  }
+  if (!tweets) return null;
+  return tweets.map(t => {
+    const media = (t.extendedEntities && t.extendedEntities.media) || (t.entities && t.entities.media) || [];
+    const types = Array.isArray(media) ? media.map(m => m.type) : [];
+    return {
+      text: (t.text || '').replace(/\s+/g, ' '),
+      date: t.createdAt || null,
+      url: t.url || t.twitterUrl || '',
+      isRT: /^RT @/.test(t.text || ''),
+      isReply: !!(t.isReply || t.inReplyToId),
+      hasVideo: types.includes('video'),
+      hasPhoto: types.includes('photo'),
+    };
+  }).slice(0, max);
 }
 
 // On-demand "what's the latest post on each platform?" — answers the
