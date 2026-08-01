@@ -5025,7 +5025,10 @@ async function route(chatId, text) {
   if (/^\/(תזכורת|remind)\s+/i.test(text)) return handleReminder(chatId, text.replace(/^\/(תזכורת|remind)\s+/i, ''));
 
   // ─── "מה חדש בבוט" natural language detection ───────────────────
-  if (/מה (חדש|יש חדש|נשתנה|הוסף)|עדכונ(ים|י בוט)|changelog|פיצ'רים חדשים|מה בוצע/i.test(text.trim())) {
+  // Anchored to the START of the message + specific phrases only. Previously
+  // the bare "עדכונים" matched ANYWHERE, so a distribution message containing
+  // "קבוצת העדכונים" wrongly triggered the changelog dump.
+  if (/^(מה חדש|מה יש חדש|מה נשתנה|מה השתנה בבוט|מה הוסף לבוט|עדכוני בוט|changelog|פיצ'רים חדשים|מה בוצע בבוט)\b/i.test(text.trim())) {
     const { formatChangelog } = require('./src/changelog');
     return formatChangelog(3);
   }
