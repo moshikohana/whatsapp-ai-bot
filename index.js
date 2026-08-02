@@ -6651,14 +6651,28 @@ function _shortenDagd(u) {
 // Circuit breaker: once did.li 403s this IP, stop hammering it for 30 min so
 // its WAF rate-window can expire and did.li recovers; meanwhile use da.gd.
 let _didliBlockedUntil = 0;
+// Memoize raw URL → short URL. Rebuilding a distribution ("עדכן") re-runs the
+// whole assembly, so without this every rebuild re-shortens links that were
+// already shortened — wasteful, and it burns through did.li's rate window and
+// trips the WAF. Cache means each unique link hits a shortener at most once.
+const _shortenCache = new Map();
 async function shortenUrl(u) {
   if (!/^https?:\/\//i.test(u)) return u;
+  if (/^https?:\/\/(did\.li|da\.gd)\//i.test(u)) return u; // already a short link
+  const hit = _shortenCache.get(u);
+  if (hit) return hit;
+  let out = null;
   if (Date.now() >= _didliBlockedUntil) {
-    const d = await _shortenDidli(u);
-    if (d) return d;
-    _didliBlockedUntil = Date.now() + 30 * 60 * 1000; // back off did.li
+    out = await _shortenDidli(u);
+    if (!out) _didliBlockedUntil = Date.now() + 30 * 60 * 1000; // back off did.li
   }
-  return (await _shortenDagd(u)) || u;
+  if (!out) out = await _shortenDagd(u);
+  if (out) {
+    if (_shortenCache.size > 500) _shortenCache.clear(); // bound memory
+    _shortenCache.set(u, out);
+    return out;
+  }
+  return u; // both shorteners failed — don't cache, allow a later retry
 }
 
 // Classify a URL to its platform slot by domain.
