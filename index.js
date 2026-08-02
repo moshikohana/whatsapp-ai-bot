@@ -5138,12 +5138,11 @@ async function route(chatId, text) {
     const topic = text.trim().replace(/^(תגובה על|נסח תגובה|נסח לי תגובה|טיוטת תגובה|תגובה בנושא)\s+/i, '').trim();
     (async () => {
       try {
-        const oc = await client.getChatById(OWNER_ID);
         const r = await require('./src/response-engine').buildResponse(topic);
         pendingResponseSave.set(OWNER_ID, { topic, text: r.text, expiresAt: Date.now() + 15 * 60 * 1000 });
-        await botSend(oc, r.text + '\n\n💾 _"שמור תגובה" לארכב · או ערוך ושלח לכתבים_');
+        await botSend(chat, r.text + '\n\n💾 _"שמור תגובה" לארכב · או ערוך ושלח לכתבים_');
       } catch (e) {
-        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ מנוע התגובה נכשל: ' + (e.message || '').substring(0, 60)); } catch {}
+        try { await botSend(chat, '❌ מנוע התגובה נכשל: ' + (e.message || '').substring(0, 60)); } catch {}
       }
     })();
     return '📝 מנסח טיוטת תגובה מעוגנת בעמדות של קלנר + מיקוד כתבים... שנייה.';
@@ -5160,11 +5159,10 @@ async function route(chatId, text) {
   if (/^(דופק מוניטין|דופק|סנטימנט|מצב רוח|האזנה|reputation|מוניטין)\s*[?!.]?$/i.test(text.trim())) {
     (async () => {
       try {
-        const oc = await client.getChatById(OWNER_ID);
         const r = await runReputationPulse(1440);
-        await botSend(oc, r.text);
+        await botSend(chat, r.text);
       } catch (e) {
-        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ דופק מוניטין נכשל: ' + (e.message || '').substring(0, 60)); } catch {}
+        try { await botSend(chat, '❌ דופק מוניטין נכשל: ' + (e.message || '').substring(0, 60)); } catch {}
       }
     })();
     return '🧭 מנתח סנטימנט ונרטיבים סביב קלנר (סורק את הקבוצות)... חוזר תוך ~דקה.';
@@ -5172,8 +5170,8 @@ async function route(chatId, text) {
   // ─── X (Twitter) intelligence — mentions, replies, engagement ────
   if (/^(מודיעין X|מודיעין טוויטר|אזכורים בטוויטר|תגובות בטוויטר|מה אומרים עליי|מה אומרים עלי|x intel|טוויטר מודיעין)/i.test(text.trim())) {
     (async () => {
-      try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, await require('./src/twitter-intel').buildXReport()); }
-      catch (e) { try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ מודיעין X נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
+      try { await botSend(chat, await require('./src/twitter-intel').buildXReport()); }
+      catch (e) { try { await botSend(chat, '❌ מודיעין X נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
     })();
     return '🐦 מושך אזכורים, תגובות ומדדי מעורבות מ-X (עם retry)... חוזר תוך ~דקה.';
   }
@@ -5181,8 +5179,8 @@ async function route(chatId, text) {
   // ─── Cross-platform performance / virality dashboard ────────────
   if (/^(ביצועי רשתות|ביצועים|הכי ויראלי|הכי וירלי|השוואת רשתות|מה עובד|דשבורד|virality|performance)\s*[?!.]?$/i.test(text.trim())) {
     (async () => {
-      try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, await require('./src/social-perf').buildPerformanceReport()); }
-      catch (e) { try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ ביצועי רשתות נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
+      try { await botSend(chat, await require('./src/social-perf').buildPerformanceReport()); }
+      catch (e) { try { await botSend(chat, '❌ ביצועי רשתות נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
     })();
     return '📊 מנתח ביצועים בכל הרשתות (X · טיקטוק · טלגרם · יוטיוב) — הכי ויראלי + השוואה... חוזר תוך ~דקה.';
   }
@@ -5220,10 +5218,9 @@ async function route(chatId, text) {
     (async () => {
       try {
         const report = await getLatestPostsReport();
-        const oc = await client.getChatById(OWNER_ID);
-        await botSend(oc, report);
+        await botSend(chat, report);
       } catch (e) {
-        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ בדיקת פלטפורמות נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+        try { await botSend(chat, '❌ בדיקת פלטפורמות נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
       }
     })();
     return '📊 בודק את הפוסט האחרון בכל פלטפורמה (טלגרם · וואטסאפ · X · יוטיוב · טיקטוק · אינסטגרם)... חוזר תוך ~דקה.';
@@ -5234,10 +5231,9 @@ async function route(chatId, text) {
     (async () => {
       try {
         const report = await getLatestVideosReport();
-        const oc = await client.getChatById(OWNER_ID);
-        await botSend(oc, report);
+        await botSend(chat, report);
       } catch (e) {
-        try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ בדיקת סרטונים נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+        try { await botSend(chat, '❌ בדיקת סרטונים נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
       }
     })();
     return '🎬 בודק את הסרטון האחרון בכל פלטפורמה (יוטיוב · טיקטוק · X · אינסטגרם)... חוזר תוך ~דקה.';
