@@ -3756,20 +3756,27 @@ client.on('message_create', async (msg) => {
         const hasUrl = /https?:\/\/[^\s]+/.test(t);
 
         // Assemble the accumulated raw, send the clean message + honest status.
+        // NOTE: reuse the already-resolved `chat` object for every send. Re-resolving
+        // via client.getChatById(OWNER_ID) can hang for minutes ("Runtime.callFunctionOn
+        // timed out") when the WhatsApp page is busy — the collect acks (which use `chat`)
+        // deliver fine, so `chat` is the reliable handle. A timeout guard on the assembly
+        // ensures the owner always gets a reply instead of silence.
         const sendAssembled = async () => {
           await botSend(chat, '⏳ מקצר קישורים ומרכיב את ההפצה... שנייה.');
           try {
-            const r = await assembleDistribution(pd.raw || '');
-            const oc = await client.getChatById(OWNER_ID);
-            await oc.sendMessage(r.text + BOT_MARKER); // clean, copy-ready
+            const r = await Promise.race([
+              assembleDistribution(pd.raw || ''),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('הרכבה ארכה יותר מדי (timeout)')), 90000)),
+            ]);
+            await chat.sendMessage(r.text + BOT_MARKER); // clean, copy-ready
             let status = `👆 *ההפצה מוכנה* — להעתקה ושליחה.\n✅ מולא: ${r.filled.join(', ') || '—'}`;
             status += r.empty.length ? `\n✍️ חסר: ${r.empty.join(', ')}` : '';
             status += r.empty.length
               ? `\n\n➕ *להשלמה:* הדבק את הקישורים החסרים ואז שלח *"עדכן"*.\n🚪 לסיום: שלח *"סיום"*.`
               : `\n\n🚪 שלח *"סיום"* לסגירת מצב הפצה.`;
-            await botSend(oc, status);
+            await botSend(chat, status);
           } catch (e) {
-            try { const oc = await client.getChatById(OWNER_ID); await botSend(oc, '❌ הרכבת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+            try { await botSend(chat, '❌ הרכבת ההפצה נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
           }
         };
 
