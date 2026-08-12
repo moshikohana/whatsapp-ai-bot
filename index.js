@@ -1614,6 +1614,7 @@ client.on('qr', async (qr) => {
   qrCount += 1;
   lastQRTime = new Date().toISOString();
   botStatus = 'qr';
+  if (!_qrSince) _qrSince = Date.now();
   io.emit('status', 'qr');
   io.emit('qr', currentQR);
 });
@@ -1624,6 +1625,7 @@ client.on('authenticated', () => { console.log('\n🔐 אומת!'); botStatus = 
 client.on('ready', () => {
   botStatus = 'connected';
   currentQR = null;
+  _qrSince = null; _rescanAlertLast = 0;
   const info = client.info;
   logger.info(`✅ בוטי מחובר! | ${info.pushname} (+${info.wid.user})`);
 
@@ -1907,6 +1909,30 @@ const _notifyStateFile = path.join(__dirname, 'data', 'bot-down-notify.json');
 function _loadNotifyState() { try { return JSON.parse(fs.readFileSync(_notifyStateFile, 'utf8')); } catch { return { lastSent: 0 }; } }
 function _saveNotifyState(s) { try { fs.writeFileSync(_notifyStateFile, JSON.stringify(s)); } catch {} }
 let _reconnectAttempts = 0;
+let _qrSince = null;          // when we entered a QR-needed state (logout/expired session)
+let _rescanAlertLast = 0;     // last time we re-emailed "still needs QR"
+
+// The owner can't open http://localhost:3000 remotely. Resolve the live public
+// URL (cloudflared quick-tunnel) so a down-alert links somewhere he can actually
+// open from his phone. Prefers PUBLIC_URL env; else the latest trycloudflare URL
+// from the tunnel logs; else localhost.
+function getPublicUrl() {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL;
+  const files = [
+    '/root/.pm2/logs/cf-tunnel-main-out.log', '/root/.pm2/logs/cf-tunnel-main-error.log',
+    '/root/.pm2/logs/cf-tunnel-out.log', '/root/.pm2/logs/cf-tunnel-error.log',
+  ];
+  let url = null;
+  for (const f of files) {
+    try {
+      const buf = fs.readFileSync(f, 'utf8');
+      const tail = buf.length > 80000 ? buf.slice(-80000) : buf;
+      const m = tail.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/gi);
+      if (m && m.length) url = m[m.length - 1];
+    } catch {}
+  }
+  return url || `http://localhost:${process.env.PORT || 3000}`;
+}
 
 async function notifyOwnerBotDown(kind, details) {
   const now = Date.now();
@@ -1919,6 +1945,7 @@ async function notifyOwnerBotDown(kind, details) {
   try {
     const { sendEmail } = require('./src/gmail');
     const hostName = os.hostname();
+    const pub = getPublicUrl();
     const whenIL = new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
     const subject = `🚨 בוטי נותק מוואטסאפ — ${kind}`;
     const body = [
@@ -1933,11 +1960,11 @@ async function notifyOwnerBotDown(kind, details) {
       ``,
       `━━━━━━━━━━━━━━━━━━━━`,
       `<b>מה לעשות:</b>`,
-      `1. פתח <a href="http://localhost:3000">http://localhost:3000</a>`,
-      `2. אם רואים QR — סרוק בוואטסאפ (מכשירים מקושרים)`,
+      `1. פתח מהטלפון: <a href="${pub}">${pub}</a>`,
+      `2. אם רואים QR — סרוק אותו בוואטסאפ (הגדרות ← מכשירים מקושרים ← קשר מכשיר)`,
       `3. אם לא רואים כלום — הפעל מחדש את הבוט`,
       ``,
-      `הבוט מנסה להתחבר אוטומטית כרגע (עד 5 ניסיונות).`,
+      `הבוט מנסה להתחבר אוטומטית כרגע (עד 5 ניסיונות). אם זה LOGOUT — חובה סריקת QR מחדש.`,
     ].join('\n');
     await sendEmail(OWNER_EMAIL, subject, body);
     _saveNotifyState({ lastSent: now, kind, details: String(details||'').substring(0,200) });
@@ -5986,6 +6013,24 @@ setInterval(() => {
     setTimeout(() => process.exit(1), 1000);
   }
 }, 60 * 1000);
+
+// Periodic re-alert while the bot is stuck needing a QR re-scan. A WhatsApp
+// LOGOUT (device unlinked server-side) can't be auto-recovered — it needs a
+// human to scan a QR. Without this, one missed email (e.g. at 3am) = hours of
+// silent downtime. Re-email every 30 min for as long as a QR is up, with the
+// live public URL so the owner can scan from his phone.
+setInterval(() => {
+  try {
+    if (botStatus === 'connected') { _qrSince = null; _rescanAlertLast = 0; return; }
+    if (!_qrSince) return;                                  // only once a QR is actually displayed
+    if (Date.now() - _qrSince < 3 * 60 * 1000) return;      // let a fresh pairing settle
+    if (Date.now() - _rescanAlertLast < 30 * 60 * 1000) return;
+    _rescanAlertLast = Date.now();
+    _saveNotifyState({ lastSent: 0 });                      // bypass the 5-min flap limit; we self-throttle to 30 min
+    const mins = Math.round((Date.now() - _qrSince) / 60000);
+    notifyOwnerBotDown('needs-qr-rescan', `הבוט ממתין לסריקת QR כבר ${mins} דקות — פתח את הקישור וסרוק כדי להחזירו לפעולה.`).catch(() => {});
+  } catch {}
+}, 5 * 60 * 1000);
 
 setInterval(async () => {
   if (botStatus !== 'connected') return;
