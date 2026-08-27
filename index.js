@@ -5064,9 +5064,13 @@ async function handleDocument(msg, caption, fileName, chatId) {
     // Extract text based on file type
     if (ext === 'pdf' || mime.includes('pdf')) {
       try {
-        const pdfParse = require('pdf-parse');
-        const parsed = await pdfParse(buf);
+        // pdf-parse v2 API: a PDFParse class, not a callable (the old
+        // `require('pdf-parse')(buf)` throws "pdfParse is not a function").
+        const { PDFParse } = require('pdf-parse');
+        const parser = new PDFParse({ data: buf });
+        const parsed = await parser.getText();
         docText = (parsed.text || '').trim();
+        try { await parser.destroy(); } catch {}
       } catch (e) {
         logger.warn('pdf-parse failed: ' + (e.message || '').substring(0, 80));
         docText = '';
@@ -5127,7 +5131,24 @@ async function handleDocument(msg, caption, fileName, chatId) {
       : `[📄 קובץ: ${fileName}]\n\n${docText}\n\n---\nקיבלתי קובץ. תסכם אותו בקצרה ותשאל אם רוצים משהו ספציפי.`;
 
     const history = getHistory(chatId);
-    const reply = await smartChat(prompt, history);
+    let reply;
+    try {
+      reply = await smartChat(prompt, history);
+    } catch (e) {
+      // The LLM summary failed (e.g. Anthropic credits depleted). We already
+      // have the extracted text — hand it to the user instead of a bare error.
+      const isCredit = /credit balance|too low/i.test(e.message || '');
+      const clean = docText.trim();
+      if (clean && !/^\[קובץ/.test(clean)) {
+        const head = clean.substring(0, 3500);
+        const more = clean.length > 3500 ? '\n\n…(קוצר)' : '';
+        const note = isCredit
+          ? '\n\n_ℹ️ סיכום AI לא זמין כרגע (נגמרו קרדיטים ב-Anthropic) — הנה הטקסט שחולץ:_'
+          : '\n\n_ℹ️ סיכום AI נכשל — הנה הטקסט שחולץ:_';
+        return `📄 *${fileName}*${note}\n\n${head}${more}`;
+      }
+      throw e; // nothing extracted — let the outer handler report it
+    }
 
     history.push({ role: 'user', content: `[📄 קובץ: ${fileName}] ${caption || ''}`.trim() });
     history.push({ role: 'assistant', content: reply });
