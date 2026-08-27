@@ -977,25 +977,32 @@ registerToolHandlers({
               const _now = new Date();
               const _todayISO = _now.toISOString().slice(0, 10);
               const _2dAgoISO = new Date(_now.getTime() - 2 * 86400000).toISOString().slice(0, 10);
-              let briefing = `📡 *סקירת תקשורת בוקר — ${_now.toLocaleDateString('he-IL')}*\n📅 _טווח: ${_2dAgoISO} → ${_todayISO} (יומיים)_\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+              let briefing = `📡 *סקירת תקשורת בוקר — ${_now.toLocaleDateString('he-IL')}*\n📅 _עדכני להיום ${_todayISO} — הטרי ביותר קודם_\n━━━━━━━━━━━━━━━━━━━━\n\n`;
               const queries = getBriefingSearchQueries(params.topics || []);
               const {smartChat:sc} = require('./src/claude');
 
-              // News search via Claude with web_search — DATE-FILTERED
-              const newsPrompt = `חפש חדשות *מ-${_2dAgoISO} עד ${_todayISO} בלבד* (יומיים אחרונים) הרלוונטיות לח"כ אריאל קלנר (ליכוד) ולנושאים שלו: ${queries.slice(0,3).join(', ')}.
-השתמש ב-web_search עם הפילטר \`after:${_2dAgoISO}\` בכל חיפוש.
-**אסור** לכלול כתבה ישנה יותר מ-${_2dAgoISO}. אם אין חדשות בטווח — כתוב "אין חדשות חדשות בטווח".
-סכם ב-3-5 נקודות קצרות. לכל נקודה: כותרת · מקור · תאריך מדויק (DD/MM) · קישור.`;
+              const _todayHe = _now.toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
+              // News search via Claude with web_search. NOTE: the Google `after:`
+              // operator is NOT reliably honored by web_search and made it return
+              // months-old pages anyway. Instead: state today's date, ask newest-first,
+              // and require verifying each result's real publication date.
+              const newsPrompt = `📅 היום: ${_todayHe} (${_todayISO}). חפש חדשות עדכניות על ח"כ אריאל קלנר (ליכוד) ונושאיו: ${queries.slice(0,3).join(', ')}.
+⚠️ web_search מחזיר לעיתים כתבות ישנות — בדוק את *תאריך הפרסום* של כל תוצאה לפני שתכלול אותה.
+- העדף את 3-5 הימים האחרונים, דרג מהחדש לישן.
+- אם אין כלום כה טרי — הצג את הפריטים העדכניים ביותר שמצאת (עד ~14 יום) וסמן "(ישן יותר)". אל תציג תאריך ישן כאילו הוא היום.
+- אם באמת אין כלום עדכני — "אין חדשות חדשות".
+סכם ב-3-5 נקודות. לכל נקודה: כותרת · מקור · תאריך מדויק (DD/MM) · קישור.`;
               const newsSummary = await sc(newsPrompt, [], { webSearchMaxUses: 4, timeoutMs: 150000, prefill: '📰 *' });
-              briefing += `📰 *חדשות (${_2dAgoISO} → ${_todayISO}):*\n${newsSummary}\n\n`;
+              briefing += `📰 *חדשות (עדכני להיום ${_todayISO}):*\n${newsSummary}\n\n`;
 
-              // Social media search — DATE-FILTERED
-              const socialPrompt = `חפש אזכורים של "אריאל קלנר" ב-X (twitter) ובפייסבוק *מ-${_2dAgoISO} ואילך בלבד*.
-השתמש ב-web_search עם פילטרים: \`"אריאל קלנר" after:${_2dAgoISO}\` , \`"ArielKallner" site:x.com after:${_2dAgoISO}\`.
-**אסור** לכלול ציוץ/פוסט ישן יותר מ-${_2dAgoISO}. אם אין — כתוב "אין אזכורים חדשים ברשתות".
-לכל אזכור: שם המצייץ · תאריך מדויק · 1 שורה.`;
+              // Social media search — recency by verified dates, not the after: operator.
+              const socialPrompt = `📅 היום: ${_todayHe} (${_todayISO}). חפש אזכורים עדכניים של "אריאל קלנר" / "@ArielKallner" ב-X (twitter) ובפייסבוק.
+⚠️ web_search מחזיר לעיתים פוסטים ישנים — בדוק את *תאריך* כל אזכור.
+- העדף את 3-5 הימים האחרונים, חדש-לישן; סמן פריט ישן מ-14 יום כ"(ישן יותר)".
+- אם אין אזכורים טריים — "אין אזכורים חדשים ברשתות". אל תמציא תאריכים.
+לכל אזכור: שם המצייץ · תאריך מדויק · שורה אחת.`;
               const socialSummary = await sc(socialPrompt, [], { webSearchMaxUses: 4, timeoutMs: 150000 });
-              briefing += `🐦 *רשתות (${_2dAgoISO} → ${_todayISO}):*\n${socialSummary}\n\n`;
+              briefing += `🐦 *רשתות (עדכני להיום ${_todayISO}):*\n${socialSummary}\n\n`;
 
               // WhatsApp groups if specified (channels supported too)
               if (params.groups?.length) {
@@ -2081,7 +2088,9 @@ async function triggerWarRoom(trigger) {
     const previews = trigger.alerts.slice(0, 5).map((a, i) =>
       `${i + 1}. [${a.group}] "${a.preview.substring(0, 200)}"`).join('\n');
 
+    const _wrTodayHe = new Date().toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
     const warRoomPrompt = `<crisis_brief>
+📅 היום: ${_wrTodayHe}. הקבוצות מדווחות על הסיפור *עכשיו* — כלומר הוא אקטואלי היום.
 זוהה מצב חירום: ${trigger.count} התראות קריטיות מ-${trigger.groups.length} קבוצות תוך ${trigger.spanMinutes} דק'.
 מילות מפתח: ${dominantKeywords}
 קבוצות פעילות: ${dominantGroups}
@@ -2098,7 +2107,8 @@ ${previews}
 </task>
 
 <rules>
-- אם החיפוש לא העלה תוכן רלוונטי — השתמש רק בקטעי ההודעות מהקבוצות.
+- ⚠️ web_search עלול להחזיר כתבות ישנות. בדוק את *תאריך הפרסום* של כל תוצאה. אם התוצאה ישנה (יותר מ-30 יום) אך הקבוצות מדווחות עכשיו — ציין במפורש "המקור הישן: [תאריך] · הקבוצות מדווחות היום" ואל תציג תאריך ישן כאילו הוא עכשיו.
+- אם החיפוש לא העלה תוכן רלוונטי/עדכני — השתמש רק בקטעי ההודעות מהקבוצות (הן המקור האקטואלי).
 - אסור להמציא עובדות.
 - הציטוט: 2-3 משפטים בלבד.
 </rules>
