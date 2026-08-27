@@ -854,6 +854,12 @@ async function callWithRetry(fn, opts = {}) {
 let lastCallTime = 0;
 const MIN_INTERVAL = 3000; // 3s between API calls
 
+// Credit-depletion alert hook. index.js registers a callback so it can email
+// the owner the moment Anthropic starts refusing calls for "credit balance too
+// low" — otherwise the bot silently loses all its AI features until noticed.
+let _creditAlert = null;
+function onCreditError(cb) { _creditAlert = cb; }
+
 async function callClaude(params, retries = 2) {
   // Enforce minimum interval between calls
   const now = Date.now();
@@ -899,6 +905,10 @@ async function callClaude(params, retries = 2) {
         continue;
       }
       console.error(`❌ API error (${err.status || 'unknown'}): ${err.message}`);
+      // Credit depletion → alert the owner (index.js hook, rate-limited there).
+      if (err.status === 400 && /credit balance|too low/i.test(err.message || '')) {
+        try { _creditAlert?.(err.message); } catch {}
+      }
       // Log request details on 400 errors for debugging
       if (err.status === 400) {
         const msgSummary = params.messages?.map(m => {
@@ -1218,4 +1228,4 @@ async function completeText(userMessage, { system, maxTokens = 1500, model = 'cl
   }
 }
 
-module.exports = { smartChat, thinkWithClaude, classifyJSON, completeText, registerToolHandlers, getUsageSummary };
+module.exports = { smartChat, thinkWithClaude, classifyJSON, completeText, registerToolHandlers, getUsageSummary, onCreditError };

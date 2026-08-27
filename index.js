@@ -123,12 +123,11 @@ function _cacheGroupMsg(msg) {
   const id = msg.id?._serialized || '';
   if (!_msgCache[cid]) _msgCache[cid] = [];
   if (id && _msgCache[cid].some(m => m.id === id)) return; // deduplicate
-  _msgCache[cid].push({
-    id,
-    ts: msg.timestamp || Math.floor(Date.now() / 1000),
-    sender: (msg._data?.notifyName || msg._data?.pushName || '').substring(0, 30),
-    body: (msg.body || '').substring(0, 500),
-  });
+  const _mTs = msg.timestamp || Math.floor(Date.now() / 1000);
+  const _mSender = (msg._data?.notifyName || msg._data?.pushName || '').substring(0, 30);
+  _msgCache[cid].push({ id, ts: _mTs, sender: _mSender, body: (msg.body || '').substring(0, 500) });
+  // Long-horizon rollup (counts only, 30-day retention) for deep group analytics.
+  try { require('./src/group-stats').record(cid, _jidNames.get(cid) || '', _mTs, _mSender); } catch {}
   if (_msgCache[cid].length > 250) {
     _msgCache[cid].sort((a, b) => a.ts - b.ts);
     _msgCache[cid] = _msgCache[cid].slice(-250);
@@ -1980,6 +1979,42 @@ async function notifyOwnerBotDown(kind, details) {
     logger.warn(`📧 Bot-down email FAILED: ${e.message?.substring(0,120)}`);
   }
 }
+
+// ─── Credit-depletion alert ──────────────────────────────────────────
+// Fires when Anthropic starts refusing calls for "credit balance too low".
+// Persisted 6h rate-limit (the condition persists, so no point spamming) so a
+// restart-loop can't flood the inbox. Registered as claude.js's onCreditError.
+const _creditNotifyFile = path.join(__dirname, 'data', 'credit-alert.json');
+function notifyOwnerCreditLow(detail) {
+  const now = Date.now();
+  let last = 0;
+  try { last = JSON.parse(fs.readFileSync(_creditNotifyFile, 'utf8')).lastSent || 0; } catch {}
+  if (now - last < 6 * 3600 * 1000) return; // at most once per 6h
+  try { fs.writeFileSync(_creditNotifyFile, JSON.stringify({ lastSent: now })); } catch {}
+  (async () => {
+    try {
+      const { sendEmail } = require('./src/gmail');
+      const whenIL = new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+      const body = [
+        `<b>💳 נגמרו הקרדיטים ב-Anthropic</b>`,
+        ``,
+        `הבוט לא מצליח להשתמש ב-Claude — כל היכולות החכמות מושבתות עד טעינת קרדיטים:`,
+        `ניתוח סריקה · ניסוח תגובות · דופק מוניטין · war-room · קריאת PDF סרוק · נושא-קבוצה · תיאור תמונות.`,
+        ``,
+        `<b>שעה:</b> ${whenIL}`,
+        `<b>שגיאה:</b> ${String(detail || '').replace(/[<>]/g, '').substring(0, 150)}`,
+        ``,
+        `<b>לתיקון:</b> <a href="https://console.anthropic.com/settings/billing">console.anthropic.com → Plans & Billing</a> → הוסף קרדיטים.`,
+        `💡 מומלץ להפעיל שם <b>Auto-reload</b> כדי שזה לא יקרה שוב.`,
+        ``,
+        `_החלקים הדטרמיניסטיים (התראות מילות מפתח, ניטור רשתות, הפצה, תמלול) ממשיכים לעבוד._`,
+      ].join('\n');
+      await sendEmail(OWNER_EMAIL, '💳 בוטי — נגמרו קרדיטים ב-Anthropic', body);
+      logger.info(`📧 Credit-low email sent to ${OWNER_EMAIL}`);
+    } catch (e) { logger.warn(`📧 Credit-low email FAILED: ${e.message?.substring(0, 120)}`); }
+  })();
+}
+try { require('./src/claude').onCreditError(notifyOwnerCreditLow); } catch (e) { logger.warn('onCreditError hook: ' + e.message); }
 
 // ─── Auto-reconnect: try to revive the client in-process before exiting ──
 async function attemptReconnect(reason) {
@@ -5163,60 +5198,71 @@ async function handleDocument(msg, caption, fileName, chatId) {
   }
 }
 
-// ─── Targeted per-group analytics (from the rolling 48h _msgCache) ──────
-// "נתח קבוצה <שם>" → top posters, busiest hours, and the dominant topic over
-// the window we actually retain. WhatsApp Web can't serve arbitrary history —
-// the cache holds ~48h / up to 250 msgs per group — so we report the REAL
-// window covered rather than pretend to do "the last 2 weeks".
-async function analyzeGroupActivity(groupQuery) {
-  if (!groupQuery || groupQuery.trim().length < 2) return 'ציין שם קבוצה. לדוגמה: *נתח קבוצה מלוכדים*';
+// ─── Targeted per-group analytics ──────────────────────────────────────
+// "נתח קבוצה <שם> [שבועיים/שבוע/חודש]" → top posters, busiest hours, volume
+// over a DEEP window (up to 30 days, from the counts-only group-stats rollup),
+// plus the dominant topic over the recent window (needs bodies, so ~48h from
+// _msgCache). Falls back to the 48h cache for posters/hours until the rollup
+// has accumulated enough history.
+async function analyzeGroupActivity(groupQuery, sinceDays = 7) {
+  if (!groupQuery || groupQuery.trim().length < 2) return 'ציין שם קבוצה. לדוגמה: *נתח קבוצה מלוכדים שבועיים*';
   let chats;
   try { chats = await getAllChatsAndChannels(); } catch { chats = await client.getChats().catch(() => []); }
   const ch = findChatByName(chats, groupQuery.trim());
   if (!ch) return `📊 לא מצאתי קבוצה בשם "${groupQuery.trim()}". בדוק את השם המדויק.`;
   const cid = ch.id?._serialized || '';
   const name = ch.name || groupQuery.trim();
-  const msgs = (_msgCache[cid] || []).filter(m => m && m.ts && m.body);
-  if (msgs.length < 3) {
-    return `📊 *${name}* — אין מספיק הודעות שמורות לניתוח (${msgs.length}).\n_הזיכרון מכסה ~48ש' אחרונות. נסה קבוצה פעילה יותר, או המתן שייצבר מידע._`;
-  }
-  const sorted = [...msgs].sort((a, b) => a.ts - b.ts);
-  const spanHours = Math.max(1, Math.round((sorted[sorted.length - 1].ts - sorted[0].ts) / 3600));
-  const spanTxt = spanHours >= 24 ? `${(spanHours / 24).toFixed(1)} ימים` : `${spanHours} שעות`;
 
-  // Top posters
-  const byPoster = {};
-  for (const m of msgs) { const s = ((m.sender || '').trim()) || '—'; byPoster[s] = (byPoster[s] || 0) + 1; }
-  const topPosters = Object.entries(byPoster).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const recent = (_msgCache[cid] || []).filter(m => m && m.ts && m.body);
+  const gs = require('./src/group-stats').getStats(cid, sinceDays);
 
-  // Busiest hours (Israel time)
-  const byHour = {};
-  for (const m of msgs) {
-    const h = new Date(m.ts * 1000).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem', hour: '2-digit', hour12: false }).trim();
-    byHour[h] = (byHour[h] || 0) + 1;
+  // Choose the data source for volume/posters/hours: prefer the deep rollup
+  // when it has meaningful history, else the fresh 48h cache.
+  let bySender, byHour, total, windowTxt, deep;
+  if (gs && gs.total >= 10) {
+    bySender = gs.sender; byHour = gs.hour; total = gs.total; deep = true;
+    windowTxt = `${sinceDays} ימים אחרונים · ${total} הודעות (${gs.days} ימים פעילים)`;
+  } else {
+    if (recent.length < 3) {
+      return `📊 *${name}* — עדיין אין מספיק נתונים לניתוח.\n_הרולאפ העמוק (עד 30 יום) מתחיל להיאסף מרגע ההתקנה; בינתיים יש ${recent.length} הודעות מ-48ש' האחרונות. נסה שוב בעוד יום-יומיים או בחר קבוצה פעילה יותר._`;
+    }
+    bySender = {}; byHour = {}; total = recent.length; deep = false;
+    for (const m of recent) {
+      const s = ((m.sender || '').trim()) || '—'; bySender[s] = (bySender[s] || 0) + 1;
+      const h = new Date(m.ts * 1000).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem', hour: '2-digit', hour12: false }).trim();
+      byHour[h] = (byHour[h] || 0) + 1;
+    }
+    const span = recent.length > 1 ? Math.max(1, Math.round((recent[recent.length - 1].ts - recent[0].ts) / 3600)) : 1;
+    windowTxt = `${span >= 24 ? (span / 24).toFixed(1) + ' ימים' : span + ' שעות'} אחרונות · ${total} הודעות`;
   }
+
+  const topPosters = Object.entries(bySender).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const topHours = Object.entries(byHour).sort((a, b) => b[1] - a[1]).slice(0, 3);
 
-  // Dominant topic — LLM over a recent sample of message bodies
+  // Dominant topic — LLM over a recent sample of bodies (bodies only exist for ~48h).
   let topicLine = '';
   try {
-    const corpus = msgs.slice(-140).map(m => `• ${m.body}`).join('\n').substring(0, 6500);
-    const j = await require('./src/claude').classifyJSON(corpus, {
-      system: 'אתה מנתח שיח בקבוצות וואטסאפ פוליטיות. קבל אוסף הודעות והחזר JSON בלבד: {"main_topic":"...","subtopics":["...","..."],"summary":"משפט אחד"}. תמציתי, בעברית.',
-      maxTokens: 500,
-    });
-    if (j && j.main_topic) {
-      topicLine = `\n\n🔥 *הנושא הכי מדובר:* ${j.main_topic}`;
-      if (Array.isArray(j.subtopics) && j.subtopics.length) topicLine += `\n📌 גם: ${j.subtopics.slice(0, 3).join(' · ')}`;
-      if (j.summary) topicLine += `\n📝 ${j.summary}`;
+    if (recent.length >= 3) {
+      const corpus = recent.slice(-140).map(m => `• ${m.body}`).join('\n').substring(0, 6500);
+      const j = await require('./src/claude').classifyJSON(corpus, {
+        system: 'אתה מנתח שיח בקבוצות וואטסאפ פוליטיות. קבל אוסף הודעות והחזר JSON בלבד: {"main_topic":"...","subtopics":["...","..."],"summary":"משפט אחד"}. תמציתי, בעברית.',
+        maxTokens: 500,
+      });
+      if (j && j.main_topic) {
+        topicLine = `\n\n🔥 *הנושא הכי מדובר* (48ש' אחרונות)*:* ${j.main_topic}`;
+        if (Array.isArray(j.subtopics) && j.subtopics.length) topicLine += `\n📌 גם: ${j.subtopics.slice(0, 3).join(' · ')}`;
+        if (j.summary) topicLine += `\n📝 ${j.summary}`;
+      }
     }
   } catch {}
 
-  let out = `📊 *ניתוח קבוצה — ${name}*\n_חלון זמין: ${spanTxt} אחרונות · ${msgs.length} הודעות_\n${'━'.repeat(20)}`;
+  let out = `📊 *ניתוח קבוצה — ${name}*\n_${windowTxt}_\n${'━'.repeat(20)}`;
   out += `\n\n🏆 *מי פרסם הכי הרבה:*\n` + topPosters.map(([s, n], i) => `${i + 1}. ${s} — ${n} הודעות`).join('\n');
   out += `\n\n⏰ *שעות השיא:* ` + topHours.map(([h, n]) => `${h}:00 (${n})`).join(' · ');
   out += topicLine;
-  out += `\n\n_ℹ️ WhatsApp Web שומר היסטוריה מוגבלת — הניתוח מכסה את החלון שנאסף (~48ש')._`;
+  out += deep
+    ? `\n\n_ℹ️ נתוני נפח/פוסטים/שעות מבוססים על רולאפ מצטבר (עד 30 יום). הנושא מבוסס על 48ש' האחרונות._`
+    : `\n\n_ℹ️ הרולאפ העמוק עדיין נאסף — כרגע הניתוח על 48ש' האחרונות. בעוד כמה ימים תוכל לבקש "שבועיים"._`;
   return out;
 }
 
@@ -5349,15 +5395,23 @@ async function route(chatId, text) {
 
   // ─── Targeted group analytics (מי פרסם / נושא מרכזי / שעות שיא) ──
   if (/^(נתח קבוצה|נתח את קבוצת|נתח את הקבוצה|ניתוח קבוצה|אנליטיקה)\s+/i.test(text.trim())) {
-    const gq = text.trim()
+    const raw = text.trim();
+    let sinceDays = 7;
+    if (/חודש/.test(raw)) sinceDays = 30;
+    else if (/שבועיים/.test(raw)) sinceDays = 14;
+    else if (/שבוע/.test(raw)) sinceDays = 7;
+    else if (/אתמול/.test(raw)) sinceDays = 2;
+    else if (/היום/.test(raw)) sinceDays = 1;
+    else { const md = raw.match(/(\d{1,2})\s*ימים/); if (md) sinceDays = Math.min(30, Math.max(1, +md[1])); }
+    const gq = raw
       .replace(/^(נתח קבוצה|נתח את קבוצת|נתח את הקבוצה|ניתוח קבוצה|אנליטיקה)\s+/i, '')
-      .replace(/\s*(ב?שבוע(?:יים)?\s*(האחרונ(?:ים|ה))?|בימים האחרונים|היום|אתמול|לאחרונה)\s*/g, ' ')
+      .replace(/\s*(ב?חודש(\s+האחרון)?|ב?שבוע(?:יים)?\s*(האחרונ(?:ים|ה))?|ב?\d{1,2}\s*ימים(\s+האחרונים)?|בימים האחרונים|היום|אתמול|לאחרונה)\s*/g, ' ')
       .replace(/\s+/g, ' ').trim();
     (async () => {
-      try { await botSend(chat, await analyzeGroupActivity(gq)); }
+      try { await botSend(chat, await analyzeGroupActivity(gq, sinceDays)); }
       catch (e) { try { await botSend(chat, '❌ ניתוח הקבוצה נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
     })();
-    return `📊 מנתח את "${gq}" — מי פרסם הכי הרבה, שעות שיא, והנושא המרכזי... שנייה.`;
+    return `📊 מנתח את "${gq}" (${sinceDays} ימים) — מי פרסם, שעות שיא, נושא מרכזי... שנייה.`;
   }
 
   // Rival management (for share-of-voice)
