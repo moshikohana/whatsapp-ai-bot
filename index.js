@@ -5026,6 +5026,30 @@ async function handleImage(msg, caption, chatId) {
   }
 }
 
+// Read a PDF via Claude's NATIVE PDF support (a `document` content block) —
+// handles SCANNED / image-only PDFs (e.g. Knesset docs) that pdf-parse can't,
+// since Claude reads them visually. No beta header needed. Returns '' on failure.
+async function readPdfViaClaude(buf, caption, fileName) {
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const ask = caption
+    ? caption
+    : 'קיבלתי מסמך PDF. סכם בעברית את עיקרי הדברים בנקודות, ואם רלוונטי לח"כ אריאל קלנר / דוברות — ציין זאת. בסוף שאל אם רוצים משהו ספציפי.';
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 2000,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') } },
+        { type: 'text', text: `[📄 ${fileName}]\n\n${ask}` },
+      ],
+    }],
+  });
+  const textBlock = response.content.find(b => b.type === 'text');
+  return textBlock ? textBlock.text.trim() : '';
+}
+
 // ─── Document Handler ────────────────────────────────────────────
 async function handleDocument(msg, caption, fileName, chatId) {
   try {
@@ -5042,9 +5066,32 @@ async function handleDocument(msg, caption, fileName, chatId) {
       try {
         const pdfParse = require('pdf-parse');
         const parsed = await pdfParse(buf);
-        docText = parsed.text;
-      } catch {
-        docText = '[קובץ PDF — לא הצלחתי לחלץ טקסט. נסה לשלוח כתמונה]';
+        docText = (parsed.text || '').trim();
+      } catch (e) {
+        logger.warn('pdf-parse failed: ' + (e.message || '').substring(0, 80));
+        docText = '';
+      }
+      // Scanned / image-only PDF → pdf-parse yields little or no text. Send the
+      // PDF straight to Claude (native PDF vision) instead of giving up, then
+      // return that answer directly (skip the text-summary path below).
+      if (docText.replace(/\s/g, '').length < 80) {
+        const sizeMB = buf.length / (1024 * 1024);
+        if (sizeMB > 30) return `📄 ה-PDF גדול מדי (${sizeMB.toFixed(1)}MB · מקס' ~30MB). שלח קובץ קטן יותר או צילום מסך של הדף.`;
+        try {
+          const viaClaude = await readPdfViaClaude(buf, caption, fileName);
+          if (viaClaude) {
+            const history = getHistory(chatId);
+            history.push({ role: 'user', content: `[📄 קובץ: ${fileName}] ${caption || ''}`.trim() });
+            history.push({ role: 'assistant', content: viaClaude });
+            if (history.length > 10) history.splice(0, 2);
+            saveConversations(conversations);
+            updateContext(`[📄 קובץ: ${fileName}]`, viaClaude);
+            return viaClaude;
+          }
+        } catch (e) {
+          logger.warn('readPdfViaClaude failed: ' + (e.message || '').substring(0, 100));
+        }
+        return '❌ לא הצלחתי לקרוא את ה-PDF (גם לא כמסמך סרוק). נסה לשלוח *צילום מסך* של הדף 📸';
       }
     } else if (['txt', 'csv', 'json', 'xml', 'html', 'md', 'log', 'js', 'py', 'ts'].includes(ext)) {
       docText = buf.toString('utf-8');
@@ -5093,6 +5140,63 @@ async function handleDocument(msg, caption, fileName, chatId) {
     logger.error('שגיאת קובץ:', err.message || err.toString());
     return '❌ שגיאה בעיבוד הקובץ: ' + (err.message || '').substring(0, 80);
   }
+}
+
+// ─── Targeted per-group analytics (from the rolling 48h _msgCache) ──────
+// "נתח קבוצה <שם>" → top posters, busiest hours, and the dominant topic over
+// the window we actually retain. WhatsApp Web can't serve arbitrary history —
+// the cache holds ~48h / up to 250 msgs per group — so we report the REAL
+// window covered rather than pretend to do "the last 2 weeks".
+async function analyzeGroupActivity(groupQuery) {
+  if (!groupQuery || groupQuery.trim().length < 2) return 'ציין שם קבוצה. לדוגמה: *נתח קבוצה מלוכדים*';
+  let chats;
+  try { chats = await getAllChatsAndChannels(); } catch { chats = await client.getChats().catch(() => []); }
+  const ch = findChatByName(chats, groupQuery.trim());
+  if (!ch) return `📊 לא מצאתי קבוצה בשם "${groupQuery.trim()}". בדוק את השם המדויק.`;
+  const cid = ch.id?._serialized || '';
+  const name = ch.name || groupQuery.trim();
+  const msgs = (_msgCache[cid] || []).filter(m => m && m.ts && m.body);
+  if (msgs.length < 3) {
+    return `📊 *${name}* — אין מספיק הודעות שמורות לניתוח (${msgs.length}).\n_הזיכרון מכסה ~48ש' אחרונות. נסה קבוצה פעילה יותר, או המתן שייצבר מידע._`;
+  }
+  const sorted = [...msgs].sort((a, b) => a.ts - b.ts);
+  const spanHours = Math.max(1, Math.round((sorted[sorted.length - 1].ts - sorted[0].ts) / 3600));
+  const spanTxt = spanHours >= 24 ? `${(spanHours / 24).toFixed(1)} ימים` : `${spanHours} שעות`;
+
+  // Top posters
+  const byPoster = {};
+  for (const m of msgs) { const s = ((m.sender || '').trim()) || '—'; byPoster[s] = (byPoster[s] || 0) + 1; }
+  const topPosters = Object.entries(byPoster).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+  // Busiest hours (Israel time)
+  const byHour = {};
+  for (const m of msgs) {
+    const h = new Date(m.ts * 1000).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem', hour: '2-digit', hour12: false }).trim();
+    byHour[h] = (byHour[h] || 0) + 1;
+  }
+  const topHours = Object.entries(byHour).sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+  // Dominant topic — LLM over a recent sample of message bodies
+  let topicLine = '';
+  try {
+    const corpus = msgs.slice(-140).map(m => `• ${m.body}`).join('\n').substring(0, 6500);
+    const j = await require('./src/claude').classifyJSON(corpus, {
+      system: 'אתה מנתח שיח בקבוצות וואטסאפ פוליטיות. קבל אוסף הודעות והחזר JSON בלבד: {"main_topic":"...","subtopics":["...","..."],"summary":"משפט אחד"}. תמציתי, בעברית.',
+      maxTokens: 500,
+    });
+    if (j && j.main_topic) {
+      topicLine = `\n\n🔥 *הנושא הכי מדובר:* ${j.main_topic}`;
+      if (Array.isArray(j.subtopics) && j.subtopics.length) topicLine += `\n📌 גם: ${j.subtopics.slice(0, 3).join(' · ')}`;
+      if (j.summary) topicLine += `\n📝 ${j.summary}`;
+    }
+  } catch {}
+
+  let out = `📊 *ניתוח קבוצה — ${name}*\n_חלון זמין: ${spanTxt} אחרונות · ${msgs.length} הודעות_\n${'━'.repeat(20)}`;
+  out += `\n\n🏆 *מי פרסם הכי הרבה:*\n` + topPosters.map(([s, n], i) => `${i + 1}. ${s} — ${n} הודעות`).join('\n');
+  out += `\n\n⏰ *שעות השיא:* ` + topHours.map(([h, n]) => `${h}:00 (${n})`).join(' · ');
+  out += topicLine;
+  out += `\n\n_ℹ️ WhatsApp Web שומר היסטוריה מוגבלת — הניתוח מכסה את החלון שנאסף (~48ש')._`;
+  return out;
 }
 
 // ─── Router ──────────────────────────────────────────────────────
@@ -5220,6 +5324,19 @@ async function route(chatId, text) {
       catch (e) { try { await botSend(chat, '❌ ביצועי רשתות נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
     })();
     return '📊 מנתח ביצועים בכל הרשתות (X · טיקטוק · טלגרם · יוטיוב) — הכי ויראלי + השוואה... חוזר תוך ~דקה.';
+  }
+
+  // ─── Targeted group analytics (מי פרסם / נושא מרכזי / שעות שיא) ──
+  if (/^(נתח קבוצה|נתח את קבוצת|נתח את הקבוצה|ניתוח קבוצה|אנליטיקה)\s+/i.test(text.trim())) {
+    const gq = text.trim()
+      .replace(/^(נתח קבוצה|נתח את קבוצת|נתח את הקבוצה|ניתוח קבוצה|אנליטיקה)\s+/i, '')
+      .replace(/\s*(ב?שבוע(?:יים)?\s*(האחרונ(?:ים|ה))?|בימים האחרונים|היום|אתמול|לאחרונה)\s*/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    (async () => {
+      try { await botSend(chat, await analyzeGroupActivity(gq)); }
+      catch (e) { try { await botSend(chat, '❌ ניתוח הקבוצה נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
+    })();
+    return `📊 מנתח את "${gq}" — מי פרסם הכי הרבה, שעות שיא, והנושא המרכזי... שנייה.`;
   }
 
   // Rival management (for share-of-voice)
