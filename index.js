@@ -1540,6 +1540,37 @@ let dailyIdCounter = 1;
   }
 })();
 
+// Purge Chromium disk caches when they balloon. A multi-GB Cache/Code Cache
+// makes the renderer crash on load ("Execution context was destroyed") and
+// crash-loops the whole bot — this ran away on 2026-07-21 and again on
+// 2026-09-03 (Cache 984MB + Code Cache 541MB). Deleting these dirs is safe:
+// they regenerate and hold NO auth (auth lives in Local Storage / IndexedDB,
+// which we never touch here). Runs on every boot, before initialize().
+(function purgeBloatedCache() {
+  try {
+    const base = path.join(__dirname, '.wwebjs_auth', 'session-ai-personal-bot', 'Default');
+    if (!fs.existsSync(base)) return;
+    const dirs = ['Cache', 'Code Cache', 'Service Worker', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache'];
+    const { execSync } = require('child_process');
+    const present = [];
+    let totalMb = 0;
+    for (const d of dirs) {
+      const p = path.join(base, d);
+      if (!fs.existsSync(p)) continue;
+      present.push(p);
+      try { totalMb += Math.round((parseInt(execSync(`du -sk "${p}"`, { timeout: 20000 }).toString().split(/\s+/)[0], 10) || 0) / 1024); } catch {}
+    }
+    if (totalMb >= 400) {
+      for (const p of present) { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} }
+      console.log(`🧹 Purged bloated Chromium cache (${totalMb}MB ≥ 400MB) — prevents renderer crash-loop`);
+    } else if (totalMb > 0) {
+      console.log(`📦 Chromium cache ${totalMb}MB (under 400MB — kept)`);
+    }
+  } catch (e) {
+    console.warn('⚠️ Cache purge check failed:', e.message?.substring(0, 60));
+  }
+})();
+
 // ─── WhatsApp Client ─────────────────────────────────────────────
 const client = new Client({
   authStrategy: new LocalAuth({ clientId: 'ai-personal-bot', dataPath: path.join(__dirname, '.wwebjs_auth') }),
@@ -1574,6 +1605,12 @@ const client = new Client({
       '--disable-blink-features=AutomationControlled',
       '--no-zygote',
       '--memory-pressure-off',
+      // Cap on-disk caches so the session can't balloon to GBs and crash the
+      // renderer on load ("Execution context was destroyed"). 100MB HTTP cache,
+      // 50MB media cache. (Code Cache isn't capped by these — the pre-launch
+      // purge below handles that.)
+      '--disk-cache-size=104857600',
+      '--media-cache-size=52428800',
     ],
   },
 });
