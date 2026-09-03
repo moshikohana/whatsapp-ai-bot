@@ -1571,9 +1571,38 @@ let dailyIdCounter = 1;
   }
 })();
 
+// A CURRENT real-Chrome user agent. WhatsApp Web now rejects the default
+// "HeadlessChrome" UA and gates on browser version — on 2026-09-03 it started
+// serving the "update Chrome" page to the old UA, breaking init. Pin a normal
+// desktop-Chrome UA (matches the pinned Chrome 146 engine) so WA Web loads.
+const WA_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.153 Safari/537.36';
+
+// Self-heal a crash-looping init. A corrupted/invalidated session makes WA Web
+// reload mid-injection → "Execution context was destroyed" → wwebjs init throws
+// → process.exit → pm2 restarts → forever (1600+ restarts on 2026-09-03). If
+// init has failed this many times in a row, reset the session so the bot drops
+// to a clean QR (re-pair) instead of looping. Counter resets on 'ready'.
+const _initFailFile = path.join(__dirname, 'data', 'init-fail.json');
+(function selfHealSession() {
+  try {
+    let st = {}; try { st = JSON.parse(fs.readFileSync(_initFailFile, 'utf8')); } catch {}
+    if ((st.count || 0) >= 6) {
+      const sessDir = path.join(__dirname, '.wwebjs_auth', 'session-ai-personal-bot');
+      if (fs.existsSync(sessDir)) {
+        const bak = path.join(__dirname, '.wwebjs_auth', `session-ai-personal-bot.crashbak-${Date.now()}`);
+        try { fs.renameSync(sessDir, bak); } catch { try { fs.rmSync(sessDir, { recursive: true, force: true }); } catch {} }
+        console.log(`🩹 Self-heal: init crash-looped ${st.count}× — session reset (backup ${path.basename(bak)}); showing QR.`);
+      }
+      try { fs.writeFileSync(_initFailFile, JSON.stringify({ count: 0, healedAt: Date.now() })); } catch {}
+      try { setTimeout(() => notifyOwnerBotDown('session-reset', `הבוט קרס בלולאה (סשן פגום) — אופס אוטומטית. נדרשת סריקת QR מחדש.`).catch(() => {}), 8000); } catch {}
+    }
+  } catch (e) { console.warn('selfHeal check failed: ' + (e.message || '').substring(0, 60)); }
+})();
+
 // ─── WhatsApp Client ─────────────────────────────────────────────
 const client = new Client({
   authStrategy: new LocalAuth({ clientId: 'ai-personal-bot', dataPath: path.join(__dirname, '.wwebjs_auth') }),
+  userAgent: WA_USER_AGENT,
   // Phone-number pairing (instead of QR): the library only wires the
   // pairing-code machinery when this option is present at construction —
   // calling requestPairingCode() manually without it fails with
@@ -1669,6 +1698,7 @@ client.on('ready', () => {
   botStatus = 'connected';
   currentQR = null;
   _qrSince = null; _rescanAlertLast = 0;
+  try { fs.writeFileSync(_initFailFile, JSON.stringify({ count: 0 })); } catch {} // healthy — reset crash counter
   const info = client.info;
   logger.info(`✅ בוטי מחובר! | ${info.pushname} (+${info.wid.user})`);
 
@@ -7553,6 +7583,12 @@ process.on('SIGTERM', shutdown);
 
 client.initialize().catch(async (err) => {
   console.error('שגיאת אתחול:', err.message);
+  // Count consecutive init crashes so selfHealSession() can reset a corrupted
+  // session after enough failures (reset to 0 on 'ready').
+  try {
+    let st = {}; try { st = JSON.parse(fs.readFileSync(_initFailFile, 'utf8')); } catch {}
+    fs.writeFileSync(_initFailFile, JSON.stringify({ count: (st.count || 0) + 1, lastError: (err.message || '').substring(0, 120), ts: Date.now() }));
+  } catch {}
   try { await notifyOwnerBotDown('init-crash', err.message?.substring(0, 200)); } catch {}
   process.exit(1);
 });
