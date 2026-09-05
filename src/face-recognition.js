@@ -363,25 +363,50 @@ const MIN_FORWARD_CONFIDENCE = 10;
 // is exactly how "מיה" kept getting reported for her sister (2026-09-05).
 const AMBIGUITY_MARGIN = 0.06;
 
+// ── Crowd protection (2026-09-05) ──────────────────────────────
+// A group photo of many children gives many chances to false-match: an
+// 18-face photo produced "מיה (15%)" at distance ~0.425 — a stranger, not her.
+// Two rules, both only bite when the match is NOT strong on its own:
+//   • CROWD: with many faces, demand a clearly better distance.
+//   • STAND-OUT: the real child should be much closer to her references than
+//     every OTHER face in the same photo. If several kids are equally close,
+//     none of them is her.
+const STRONG_DIST = 0.35;          // this close = accept regardless
+const CROWD_FACES = 6;             // "many faces" starts here
+const CROWD_MAX_DIST = 0.42;       // in a crowd, weaker than this is noise
+const FACE_STANDOUT_MARGIN = 0.05; // winner must beat the next face by this
+
 // Match a set of detected faces against the references.
 // Each face is assigned ONLY to its closest person (winner-takes-the-face)
 // so similar-looking people (e.g. sisters) don't both get reported for the
 // same face. Returns deduped matches sorted best-first.
 function _matchDetections(detections, config) {
   const matches = [];
+  const faceCount = detections.length;
+
+  // Distance from every face to every person, so we can ask not just "is this
+  // face close enough?" but "is it closer than all the other faces here?".
+  const distOf = (det, descriptors) => {
+    let best = Infinity;
+    for (const refDesc of descriptors) {
+      const d = faceapi.euclideanDistance(det.descriptor, new Float32Array(refDesc));
+      if (d < best) best = d;
+    }
+    return best;
+  };
+  const perPersonAll = {}; // name → sorted distances across ALL faces
+  for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
+    if (!descriptors.length) continue;
+    perPersonAll[name] = detections.map(d => distOf(d, descriptors)).sort((a, b) => a - b);
+  }
+
   for (const det of detections) {
-    // Best distance PER PERSON, so the winner can be compared to the runner-up.
     const perPerson = [];
     for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
       if (!descriptors.length) continue;
-      let bestDistance = Infinity;
-      for (const refDesc of descriptors) {
-        const dist = faceapi.euclideanDistance(det.descriptor, new Float32Array(refDesc));
-        if (dist < bestDistance) bestDistance = dist;
-      }
       perPerson.push({
         name,
-        distance: bestDistance,
+        distance: distOf(det, descriptors),
         threshold: config.perPersonThresholds?.[name] ?? config.threshold,
       });
     }
@@ -389,10 +414,25 @@ function _matchDetections(detections, config) {
     const winner = perPerson.find(p => p.distance < p.threshold) || null;
     if (!winner) continue;
 
+    // 1) Which PERSON is it? Refuse to guess between look-alike siblings.
     const runnerUp = perPerson.find(p => p.name !== winner.name);
     if (runnerUp && (runnerUp.distance - winner.distance) < AMBIGUITY_MARGIN) {
       logger.info(`🤝 Ambiguous face: ${winner.name} ${winner.distance.toFixed(3)} vs ${runnerUp.name} ${runnerUp.distance.toFixed(3)} — not naming`);
       continue;
+    }
+
+    // 2) Crowd + stand-out checks — skipped for a strong, unmistakable match.
+    if (winner.distance > STRONG_DIST) {
+      if (faceCount >= CROWD_FACES && winner.distance > CROWD_MAX_DIST) {
+        logger.info(`👥 Crowd photo (${faceCount} faces): ${winner.name} at ${winner.distance.toFixed(3)} too weak — skipping`);
+        continue;
+      }
+      const all = perPersonAll[winner.name] || [];
+      const nextFace = all.find(d => d > winner.distance + 1e-9);
+      if (faceCount >= 3 && nextFace !== undefined && (nextFace - winner.distance) < FACE_STANDOUT_MARGIN) {
+        logger.info(`👥 ${winner.name} doesn't stand out (${winner.distance.toFixed(3)} vs next face ${nextFace.toFixed(3)}) — skipping`);
+        continue;
+      }
     }
 
     const confidence = Math.round(Math.max(0, (1 - winner.distance / winner.threshold) * 100));
@@ -876,6 +916,7 @@ module.exports = {
   blurNonMatchingFaces,
   highlightMatchingFaces,
   numberFaces,
+  _matchDetections, // exported for diagnostics/tests
   isBlurEnabled,
   setBlurEnabled,
   getHighlightMode,
