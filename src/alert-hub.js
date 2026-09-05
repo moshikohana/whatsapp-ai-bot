@@ -83,7 +83,8 @@ function queueAlert(a) {
   if (KELLNER_RE.test(blob)) return 'urgent';
   pending.push({
     keyword: a.keyword || '', group: a.group || '', sender: a.sender || '',
-    preview: (a.preview || '').substring(0, 200), ts: Date.now(),
+    preview: (a.preview || '').substring(0, 300), ts: Date.now(),
+    msgId: a.msgId || '', chatId: a.chatId || '',
   });
   if (pending.length > MAX_PENDING) pending = pending.slice(-MAX_PENDING);
   _save();
@@ -111,6 +112,15 @@ function _cluster(items) {
     (b.rep.ts - a.rep.ts));
 }
 
+// Trim to a word boundary — cutting mid-word made the digest unreadable.
+function _snip(str, max) {
+  const t = (str || '').replace(/\s+/g, ' ').trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const sp = cut.lastIndexOf(' ');
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut).trim() + '…';
+}
+
 function pendingCount() { return pending.length; }
 function dueForDigest() {
   if (!pending.length) return false;
@@ -118,38 +128,48 @@ function dueForDigest() {
   return (Date.now() - lastDigestAt) >= DIGEST_MINUTES * 60 * 1000;
 }
 
+const MAX_DIGEST_ITEMS = 8;
+
 // ── Build the digest ─────────────────────────────────────────────
 // Returns null when there's nothing to send, else { text, actions }.
-// `actions` maps the numbers shown to the topic they act on.
+// EVERY item is numbered and the available actions are spelled out once, so
+// the owner always knows what the message is asking of him. `actions` carries
+// the source message ids so "<n> הצג" can pull the original back.
 function buildDigest() {
   if (!pending.length) return null;
   const items = pending.slice();
   const clusters = _cluster(items);
+  const shown = clusters.slice(0, MAX_DIGEST_ITEMS);
 
-  // "Needs you" = a story with traction (seen in 2+ groups). Cap at 4.
-  const hot = clusters.filter(c => c.groups.length >= 2).slice(0, 4);
-  const rest = clusters.filter(c => !hot.includes(c));
-
-  const now = new Date().toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
-  let out = `📬 *מוקד* · ${now}\n_${items.length} עדכונים · ${clusters.length} נושאים_`;
+  const hhmm = ts => {
+    try { return new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' }); }
+    catch { return ''; }
+  };
+  const now = hhmm(Date.now());
+  let out = `📬 *מוקד* · ${now}\n_${items.length} עדכונים · ${clusters.length} נושאים_\n${'━'.repeat(18)}`;
 
   const actions = [];
-  if (hot.length) {
-    out += `\n${'━'.repeat(20)}\n\n⚡ *דורש התייחסות (${hot.length})*`;
-    hot.forEach((c, i) => {
-      const n = i + 1;
-      const topic = (c.rep.preview || c.rep.keyword || '').substring(0, 60);
-      actions.push({ n, topic, keyword: c.rep.keyword });
-      out += `\n\n*${n}.* 📍 ${c.groups.length} קבוצות · 🔑 ${c.rep.keyword}\n_"${(c.rep.preview || '').substring(0, 110)}"_`;
+  shown.forEach((c, i) => {
+    const n = i + 1;
+    const where = c.groups.length > 1 ? `📍 ${c.groups.length} קבוצות` : `📍 ${_snip(c.groups[0] || c.rep.group || '', 24)}`;
+    const hot = c.groups.length >= 2 ? '🔥 ' : '';
+    actions.push({
+      n,
+      topic: _snip(c.rep.preview || c.rep.keyword || '', 80),
+      keyword: c.rep.keyword,
+      msgIds: c.items.map(it => ({ msgId: it.msgId, chatId: it.chatId })).filter(x => x.msgId).slice(0, 3),
     });
-    out += `\n\n_להגיב: שלח *${actions.map(a => a.n).join('/')}* ואז:_\n*<מספר> תגובה* · *<מספר> הפצה* · *<מספר> שקט*`;
-  }
+    out += `\n\n*${n}.* ${hot}🔑 ${c.rep.keyword} · ${where} · 🕐 ${hhmm(c.rep.ts)}\n${_snip(c.rep.preview, 140)}`;
+  });
 
-  if (rest.length) {
-    out += `\n\n📰 *רקע (${rest.length})*\n`;
-    out += rest.slice(0, 12).map(c => `• ${c.rep.keyword} — ${(c.rep.preview || '').substring(0, 55)}`).join('\n');
-    if (rest.length > 12) out += `\n_+${rest.length - 12} נוספים_`;
-  }
+  if (clusters.length > shown.length) out += `\n\n_+${clusters.length - shown.length} נושאים נוספים_`;
+
+  out += `\n${'━'.repeat(18)}\n*מה לעשות?* ענה במספר + פעולה:\n` +
+    `📄 *הצג* — שולח לך את ההודעה המקורית\n` +
+    `✍️ *תגובה* — מנסח טיוטת תגובה\n` +
+    `📤 *הפצה* — פותח הכנת הפצה\n` +
+    `🔕 *שקט* — משתיק את הנושא ל-12 שעות\n\n` +
+    `_לדוגמה:_ *1 הצג*`;
 
   return { text: out.trim(), actions };
 }

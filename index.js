@@ -5026,6 +5026,7 @@ client.on('message', async (msg) => {
             // ~33 pings/day down to a handful of useful ones.
             const _verdict = require('./src/alert-hub').queueAlert({
               keyword: _matchedKw, group: _groupNameForAlert, sender: _sender, preview: _preview,
+              msgId: msg.id?._serialized || '', chatId: _kFromJid,
             });
             if (_verdict === 'urgent') {
               const _ownerC = await client.getChatById(OWNER_ID);
@@ -5677,13 +5678,32 @@ async function route(chatId, text) {
 
   // ─── מוקד quick actions — "<מספר> תגובה / הפצה / שקט" ───────────
   {
-    const _hm = text.trim().match(/^([1-9])\s*(תגובה|הפצה|שקט|התעלם|מידע)\s*[?!.]?$/);
+    const _hm = text.trim().match(/^([1-9])\s*(הצג|תגובה|הפצה|שקט|התעלם|מידע)\s*[?!.]?$/);
     if (_hm && pendingHubActions.has(_hm[1])) {
       const _act = pendingHubActions.get(_hm[1]);
       const _topic = (_act.topic || _act.keyword || '').trim();
       if (_hm[2] === 'שקט' || _hm[2] === 'התעלם') {
         require('./src/alert-hub').muteTopic(_topic, 12);
         return `🔕 מושתק ל-12 שעות — לא אטריד אותך על "${_topic.substring(0, 40)}".`;
+      }
+      if (_hm[2] === 'הצג') {
+        const _srcs = _act.msgIds || [];
+        if (!_srcs.length) return `🤷 אין לי את ההודעה המקורית לפריט ${_hm[1]} (ייתכן שנמחקה).`;
+        (async () => {
+          let sent = 0;
+          for (const { msgId } of _srcs) {
+            try {
+              const orig = await client.getMessageById(msgId);
+              if (orig) { await orig.forward(chat); sent++; }
+            } catch (e) { logger.warn('forward source failed: ' + (e.message || '').substring(0, 60)); }
+          }
+          try {
+            await botSend(chat, sent
+              ? '👆 ההודעה המקורית למעלה — הקש עליה כדי לקפוץ לקבוצה.'
+              : '❌ לא הצלחתי לשלוף את ההודעה המקורית (ייתכן שנמחקה).');
+          } catch {}
+        })();
+        return `📄 שולף את ההודעה המקורית של פריט ${_hm[1]}...`;
       }
       if (_hm[2] === 'הפצה') {
         pendingDistribution.set(OWNER_ID, { raw: '', phase: 'collect', expiresAt: Date.now() + 20 * 60 * 1000 });
