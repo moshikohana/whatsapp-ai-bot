@@ -211,7 +211,10 @@ async function detectFaces(imageBuffer) {
 }
 
 // ─── Add reference photo for a person ───────────────────────────
-async function addReference(name, imageBuffer, { force = false } = {}) {
+// `chooseIndex` (0-based) picks a SPECIFIC detected face instead of guessing
+// the largest — used by the numbered-faces flow, where the owner looks at an
+// annotated image and tells us exactly which face is the person.
+async function addReference(name, imageBuffer, { force = false, chooseIndex = null } = {}) {
   const detections = await detectFaces(imageBuffer);
 
   // Quality guard: reject images that are too dark or overexposed
@@ -238,7 +241,12 @@ async function addReference(name, imageBuffer, { force = false } = {}) {
   // subject you photographed up close is almost always the biggest. Only
   // block when two faces are similarly large (ambiguous who to store).
   let chosen = detections[0];
-  if (detections.length > 1) {
+  // Explicit pick from the numbered-faces flow — the owner already told us
+  // which face is the person, so skip the largest-face guessing entirely.
+  if (chooseIndex !== null && detections[chooseIndex]) {
+    chosen = detections[chooseIndex];
+    logger.info(`📸 addReference "${name}": using owner-picked face #${chooseIndex + 1} of ${detections.length}`);
+  } else if (detections.length > 1) {
     const area = d => (d.detection?.box?.width || 0) * (d.detection?.box?.height || 0);
     const sorted = [...detections].sort((a, b) => area(b) - area(a));
     const biggest = area(sorted[0]);
@@ -589,6 +597,71 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
 }
 
 // ─── Group management ───────────────────────────────────────────
+// Annotate EVERY detected face with a big number badge so the owner can refer
+// to a face by number ("2"). Powers both the pick-a-face reference flow and
+// detection feedback. `faces[i]` corresponds to `detections[i]`, so the number
+// the owner sees maps straight back to a specific detection.
+async function numberFaces(imageBuffer, preDetected = null) {
+  const config = loadConfig();
+  const detections = preDetected || await detectFaces(imageBuffer);
+  if (!detections.length) return { buffer: imageBuffer, faces: [], count: 0, detections: [] };
+
+  const origMeta = await sharp(imageBuffer).metadata();
+  const ratio = Math.min(1280 / origMeta.width, 1280 / origMeta.height, 1);
+  const scale = 1 / ratio;
+
+  const composites = [];
+  const faces = [];
+  const borderWidth = Math.max(4, Math.round(origMeta.width * 0.006));
+  const badge = Math.max(30, Math.round(origMeta.width * 0.055));
+
+  for (let i = 0; i < detections.length; i++) {
+    const det = detections[i];
+    // What does the bot currently think this face is?
+    let bestDist = Infinity, nearest = null;
+    for (const [name, descriptors] of Object.entries(config.referenceDescriptors || {})) {
+      for (const refDesc of descriptors) {
+        const d = faceapi.euclideanDistance(det.descriptor, new Float32Array(refDesc));
+        if (d < bestDist) { bestDist = d; nearest = name; }
+      }
+    }
+    const effTh = config.perPersonThresholds?.[nearest] ?? config.threshold;
+    const isMatch = nearest !== null && bestDist < effTh * (1 - MIN_FORWARD_CONFIDENCE / 100);
+    const confidence = bestDist === Infinity ? 0 : Math.max(0, Math.round((1 - bestDist) * 100));
+
+    const box = det.detection.box;
+    const pad = Math.round(box.width * scale * 0.3);
+    const x = Math.max(0, Math.round(box.x * scale - pad));
+    const y = Math.max(0, Math.round(box.y * scale - pad));
+    const w = Math.min(origMeta.width - x, Math.round(box.width * scale + pad * 2));
+    const h = Math.min(origMeta.height - y, Math.round(box.height * scale + pad * 2));
+
+    faces.push({ n: i + 1, matchedName: isMatch ? nearest : null, nearest, confidence, isMatch });
+    if (w <= 4 || h <= 4) continue;
+
+    const color = isMatch ? '#00e676' : '#2979ff';
+    try {
+      const boxSvg = Buffer.from(
+        `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">` +
+        `<rect x="${borderWidth / 2}" y="${borderWidth / 2}" width="${w - borderWidth}" height="${h - borderWidth}" ` +
+        `fill="none" stroke="${color}" stroke-width="${borderWidth}" rx="10"/></svg>`);
+      composites.push({ input: await sharp(boxSvg).png().toBuffer(), left: x, top: y });
+
+      const badgeSvg = Buffer.from(
+        `<svg width="${badge}" height="${badge}" xmlns="http://www.w3.org/2000/svg">` +
+        `<circle cx="${badge / 2}" cy="${badge / 2}" r="${badge / 2 - 2}" fill="${color}" stroke="#ffffff" stroke-width="3"/>` +
+        `<text x="50%" y="50%" dy="0.36em" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" ` +
+        `font-size="${Math.round(badge * 0.6)}" font-weight="bold" fill="#000000">${i + 1}</text></svg>`);
+      composites.push({ input: await sharp(badgeSvg).png().toBuffer(), left: x, top: Math.max(0, y - Math.round(badge * 0.15)) });
+    } catch {}
+  }
+
+  if (!composites.length) return { buffer: imageBuffer, faces, count: faces.length, detections };
+  const buffer = await sharp(imageBuffer).composite(composites).jpeg({ quality: 88 }).toBuffer();
+  logger.info(`🔢 numberFaces: annotated ${faces.length} face(s)`);
+  return { buffer, faces, count: faces.length, detections };
+}
+
 function getMonitoredGroups() {
   return loadConfig().monitoredGroups;
 }
@@ -757,6 +830,7 @@ module.exports = {
   findMatches,
   blurNonMatchingFaces,
   highlightMatchingFaces,
+  numberFaces,
   isBlurEnabled,
   setBlurEnabled,
   getHighlightMode,

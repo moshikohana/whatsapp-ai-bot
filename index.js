@@ -2997,6 +2997,12 @@ const pendingDistribution = new Map();
 // מוקד — numbers shown in the last digest → the topic each one acts on,
 // so the owner can reply "2 תגובה" instead of typing a command.
 let pendingHubActions = new Map();
+// Numbered-faces flows: after we send an annotated image, the owner answers
+// with a face number. `Pick` = "which face is <name>?" (reference add);
+// `Feedback` = "did I get these right?" (corrections). Keyed by OWNER_ID
+// because the self-chat id varies between c.us and @lid.
+const pendingFacePick = new Map();
+const pendingFaceFeedback = new Map();
 
 // ── Pending response-engine draft (owner can "שמור תגובה" to archive it) ──
 const pendingResponseSave = new Map();
@@ -3660,6 +3666,25 @@ client.on('message_create', async (msg) => {
         stats.received++;
         log({ time: ts(), from: 'מושיקו', text: `📸 ייחוס ${refName}`, direction: 'in' });
         const chat = await msg.getChat();
+        // Multiple faces → don't guess. Send the photo back with a numbered
+        // badge on every face and let the owner say exactly which one is them.
+        try {
+          const _media = await safeDownloadMedia(msg);
+          if (_media && _media.data) {
+            const _buf = Buffer.from(_media.data, 'base64');
+            const _nf = await require('./src/face-recognition').numberFaces(_buf);
+            if (_nf.count > 1) {
+              const { MessageMedia } = require('whatsapp-web.js');
+              await chat.sendMessage(
+                new MessageMedia('image/jpeg', _nf.buffer.toString('base64'), 'faces.jpg'),
+                { caption: `🔢 זוהו *${_nf.count}* פרצופים בתמונה.\n\nאיזה מהם *${refName}*?\nשלח את המספר (1-${_nf.count}) — או *"ביטול"*.` + BOT_MARKER }
+              );
+              pendingFacePick.set(OWNER_ID, { name: refName, force, buf: _buf, count: _nf.count, expiresAt: Date.now() + 10 * 60 * 1000 });
+              stats.sent++;
+              return;
+            }
+          }
+        } catch (e) { logger.warn('numberFaces (ref pick) failed: ' + (e.message || '').substring(0, 70)); }
         await chat.sendMessage('📸 _שומר תמונת ייחוס..._' + BOT_MARKER);
         const response = await handleReferencePhoto(msg, refName, force);
         await botSend(chat, response);
@@ -3682,7 +3707,41 @@ client.on('message_create', async (msg) => {
       const isFeedbackYes  = /^(פידבק כן|feedback yes|✅ נכון|נכון)/i.test(trimCap);
       const isFeedbackNo   = /^(פידבק לא|feedback no|❌ לא נכון|לא נכון)/i.test(trimCap);
       // "בדיקה" prefix (not "בדיקת טשטוש"/"בדיקת סימון" which are caught above)
-      const isMatchTest    = /^(בדיקה|בדוק|test|טסט|זיהוי)/i.test(trimCap) && !isBlurTest && !isHighlightBlur && !isHighlight;
+      const isNumberFaces  = /^(מספור|מספר פרצופים|פרצופים|מי בתמונה|number)/i.test(trimCap);
+      const isMatchTest    = /^(בדיקה|בדוק|test|טסט|זיהוי)/i.test(trimCap) && !isBlurTest && !isHighlightBlur && !isHighlight && !isNumberFaces;
+
+      // ── Numbered faces + feedback ────────────────────────────
+      // Returns the photo with a number on every face and what the bot thinks
+      // each one is, so the owner can confirm or correct it by number.
+      if (isNumberFaces) {
+        console.log(`📨 [${ts()}] 🔢 מספור פרצופים`);
+        stats.received++;
+        const chat = await msg.getChat();
+        await chat.sendStateTyping();
+        try {
+          const _media = await safeDownloadMedia(msg);
+          if (!_media || !_media.data) { await botSend(chat, '❌ לא הצלחתי להוריד את התמונה'); stats.sent++; return; }
+          const _buf = Buffer.from(_media.data, 'base64');
+          const _nf = await require('./src/face-recognition').numberFaces(_buf);
+          if (!_nf.count) { await botSend(chat, '🤷 לא זוהו פנים בתמונה.'); stats.sent++; return; }
+
+          const lines = _nf.faces.map(f => f.isMatch
+            ? `*${f.n}.* ✅ ${f.matchedName} _(${f.confidence}%)_`
+            : `*${f.n}.* ❓ לא מזוהה${f.nearest ? ` — הכי קרוב ל-${f.nearest} (${f.confidence}%)` : ''}`).join('\n');
+
+          const { MessageMedia } = require('whatsapp-web.js');
+          await chat.sendMessage(
+            new MessageMedia('image/jpeg', _nf.buffer.toString('base64'), 'faces.jpg'),
+            { caption: `🔢 *${_nf.count} פרצופים*\n\n${lines}\n\n━━━━━━━━━━\n*צדקתי?*\n• *נכון* — הכל מדויק\n• *<מספר> <שם>* — לתקן/להוסיף ייחוס (למשל: _2 מיה_)\n• *טעות* — אם הזיהוי שגוי` + BOT_MARKER }
+          );
+          pendingFaceFeedback.set(OWNER_ID, { buf: _buf, faces: _nf.faces, count: _nf.count, expiresAt: Date.now() + 15 * 60 * 1000 });
+          stats.sent++;
+        } catch (e) {
+          await botSend(chat, '❌ מספור נכשל: ' + (e.message || '').substring(0, 60));
+          stats.sent++;
+        }
+        return;
+      }
 
       if (isBlurTest || isHighlight || isHighlightBlur || isMatchTest) {
         const testType = isBlurTest ? '🔒 בדיקת טשטוש' : isHighlightBlur ? '🟢 סימון+טשטוש' : isHighlight ? '🟢 סימון' : '🔍 בדיקת זיהוי';
@@ -3884,6 +3943,79 @@ client.on('message_create', async (msg) => {
         }
         // Looks like a different request — drop the pending state, fall through.
         pendingGroupSuggest.delete(OWNER_ID);
+      }
+    }
+
+    // ── Pending "which face is <name>?" — numbered reference pick ──
+    {
+      const fp = pendingFacePick.get(OWNER_ID);
+      if (fp && fp.expiresAt > Date.now()) {
+        const t = text.trim();
+        if (/^(ביטול|בטל|עזוב|לא|סיום)\s*[?!.]?$/i.test(t)) {
+          pendingFacePick.delete(OWNER_ID);
+          await botSend(chat, '❌ בוטל — לא נשמר ייחוס.');
+          stats.sent++; return;
+        }
+        const m = t.match(/^(\d{1,2})\s*[?!.]?$/);
+        if (m) {
+          const idx = parseInt(m[1], 10) - 1;
+          if (idx < 0 || idx >= fp.count) {
+            await botSend(chat, `🤔 יש *${fp.count}* פרצופים — שלח מספר בין 1 ל-${fp.count}.`);
+            stats.sent++; return;
+          }
+          pendingFacePick.delete(OWNER_ID);
+          await botSend(chat, `📸 שומר את פרצוף *${m[1]}* כייחוס ל-*${fp.name}*...`);
+          try {
+            const r = await require('./src/face-recognition').addReference(fp.name, fp.buf, { force: fp.force, chooseIndex: idx });
+            await botSend(chat, r.success
+              ? `✅ נשמר! *${fp.name}* — סה״כ *${r.totalReferences}* ייחוסים.${r.note ? '\n\n' + r.note : ''}`
+              : `❌ ${r.error}`);
+          } catch (e) { await botSend(chat, '❌ שמירה נכשלה: ' + (e.message || '').substring(0, 70)); }
+          stats.sent++; return;
+        }
+        pendingFacePick.delete(OWNER_ID); // something else — drop and fall through
+      }
+    }
+
+    // ── Pending face-detection feedback ("נכון" / "<מספר> <שם>") ──
+    {
+      const ff = pendingFaceFeedback.get(OWNER_ID);
+      if (ff && ff.expiresAt > Date.now()) {
+        const t = text.trim();
+        if (/^(נכון|צדקת|מדויק|כן)\s*[?!.]?$/i.test(t)) {
+          pendingFaceFeedback.delete(OWNER_ID);
+          await botSend(chat, '👍 מעולה, תודה על האישור.');
+          stats.sent++; return;
+        }
+        if (/^(טעות|לא נכון|שגוי|טעית)\s*[?!.]?$/i.test(t)) {
+          await botSend(chat, `🔧 בוא נתקן — שלח *<מספר> <שם>* (למשל: _2 מיה_) ואשמור את הפרצוף הנכון כייחוס.\n_או "סיום" לצאת._`);
+          stats.sent++; return;
+        }
+        if (/^(סיום|ביטול|עזוב)\s*[?!.]?$/i.test(t)) {
+          pendingFaceFeedback.delete(OWNER_ID);
+          await botSend(chat, '✅ סגרנו.');
+          stats.sent++; return;
+        }
+        const m = t.match(/^(\d{1,2})\s+(.{1,30})$/);
+        if (m) {
+          const idx = parseInt(m[1], 10) - 1;
+          const who = m[2].replace(/\s*!+\s*$/, '').trim();
+          const force = /!\s*$/.test(m[2]);
+          if (idx < 0 || idx >= ff.count) {
+            await botSend(chat, `🤔 יש *${ff.count}* פרצופים — בחר מספר בין 1 ל-${ff.count}.`);
+            stats.sent++; return;
+          }
+          await botSend(chat, `📸 שומר את פרצוף *${m[1]}* כייחוס ל-*${who}*...`);
+          try {
+            const r = await require('./src/face-recognition').addReference(who, ff.buf, { force, chooseIndex: idx });
+            await botSend(chat, r.success
+              ? `✅ נשמר! *${who}* — סה״כ *${r.totalReferences}* ייחוסים. הזיהוי ישתפר מעכשיו.${r.note ? '\n\n' + r.note : ''}\n\n_אפשר לתקן עוד פרצוף, או "סיום"._`
+              : `❌ ${r.error}`);
+          } catch (e) { await botSend(chat, '❌ שמירה נכשלה: ' + (e.message || '').substring(0, 70)); }
+          stats.sent++; return;
+        }
+        // Not a feedback reply — drop the state and let the message route normally.
+        pendingFaceFeedback.delete(OWNER_ID);
       }
     }
 
