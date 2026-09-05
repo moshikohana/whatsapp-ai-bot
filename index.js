@@ -5672,52 +5672,79 @@ async function route(chatId, text) {
     const _d = _hub.buildDigest();
     if (!_d) return `📭 *מוקד ריק* — אין התראות ממתינות.${_hub.inQuietHours() ? '\n_(כרגע שעות שקט — התראות נאספות ויגיעו אחר כך.)_' : ''}`;
     pendingHubActions = new Map((_d.actions || []).map(a => [String(a.n), a]));
-    _hub.markDigestSent();
+    _hub.markDigestSent(_d.actions || []);
     return _d.text;
   }
 
-  // ─── מוקד quick actions — "<מספר> תגובה / הפצה / שקט" ───────────
+  // ─── מוקד quick actions — "1 הצג", "הצג 1", or just "הצג" ────────
+  // The owner naturally types the bare verb (there is often only one item),
+  // so a number is optional. Actions are read from the hub, which persists
+  // them, so they survive a bot restart.
   {
-    const _hm = text.trim().match(/^([1-9])\s*(הצג|תגובה|הפצה|שקט|התעלם|מידע)\s*[?!.]?$/);
-    if (_hm && pendingHubActions.has(_hm[1])) {
-      const _act = pendingHubActions.get(_hm[1]);
-      const _topic = (_act.topic || _act.keyword || '').trim();
-      if (_hm[2] === 'שקט' || _hm[2] === 'התעלם') {
-        require('./src/alert-hub').muteTopic(_topic, 12);
-        return `🔕 מושתק ל-12 שעות — לא אטריד אותך על "${_topic.substring(0, 40)}".`;
+    const _t = text.trim();
+    const _verb = /(הצג|תגובה|הפצה|שקט|התעלם)/;
+    const _m1 = _t.match(/^([1-9])\s*(הצג|תגובה|הפצה|שקט|התעלם|מידע)\s*[?!.]?$/);
+    const _m2 = _t.match(/^(הצג|תגובה|הפצה|שקט|התעלם|מידע)\s*([1-9])?\s*[?!.]?$/);
+    if (_m1 || _m2) {
+      const _num = _m1 ? _m1[1] : (_m2[2] || null);
+      const _kind = _m1 ? _m1[2] : _m2[1];
+      // Prefer the in-memory map, fall back to the persisted list.
+      let _acts = pendingHubActions;
+      if (!_acts.size) {
+        const saved = require('./src/alert-hub').getLastActions() || [];
+        _acts = new Map(saved.map(a => [String(a.n), a]));
       }
-      if (_hm[2] === 'הצג') {
-        const _srcs = _act.msgIds || [];
-        if (!_srcs.length) return `🤷 אין לי את ההודעה המקורית לפריט ${_hm[1]} (ייתכן שנמחקה).`;
-        (async () => {
-          let sent = 0;
-          for (const { msgId } of _srcs) {
+      if (_acts.size) {
+        let _act = null;
+        if (_num) _act = _acts.get(_num);
+        else if (_acts.size === 1) _act = [..._acts.values()][0];
+        else {
+          return `🔢 על איזה פריט? יש ${_acts.size} במוקד — שלח *<מספר> ${_kind}* (למשל: _1 ${_kind}_).`;
+        }
+        if (!_act) return `🤔 אין פריט מספר ${_num} במוקד (יש ${_acts.size}).`;
+        pendingHubActions = _acts;
+
+        const _topic = (_act.topic || _act.keyword || '').trim();
+        if (_kind === 'שקט' || _kind === 'התעלם') {
+          require('./src/alert-hub').muteTopic(_topic, 12);
+          return `🔕 מושתק ל-12 שעות — לא אטריד אותך על "${_topic.substring(0, 40)}".`;
+        }
+        if (_kind === 'הצג') {
+          const _srcs = _act.msgIds || [];
+          if (!_srcs.length) return `🤷 אין לי את ההודעה המקורית לפריט ${_act.n} (ייתכן שנמחקה).`;
+          (async () => {
+            let sent = 0;
+            for (const { msgId } of _srcs) {
+              try {
+                const orig = await client.getMessageById(msgId);
+                if (orig) { await orig.forward(chat); sent++; }
+              } catch (e) { logger.warn('forward source failed: ' + (e.message || '').substring(0, 60)); }
+            }
             try {
-              const orig = await client.getMessageById(msgId);
-              if (orig) { await orig.forward(chat); sent++; }
-            } catch (e) { logger.warn('forward source failed: ' + (e.message || '').substring(0, 60)); }
-          }
+              await botSend(chat, sent
+                ? '👆 ההודעה המקורית למעלה — הקש עליה כדי לקפוץ לקבוצה.'
+                : '❌ לא הצלחתי לשלוף את ההודעה המקורית (ייתכן שנמחקה).');
+            } catch {}
+          })();
+          return `📄 שולף את ההודעה המקורית של פריט ${_act.n}...`;
+        }
+        if (_kind === 'הפצה') {
+          pendingDistribution.set(OWNER_ID, { raw: '', phase: 'collect', expiresAt: Date.now() + 20 * 60 * 1000 });
+          return `📤 *הכנת הפצה* על "${_topic.substring(0, 40)}"\n\nהדבק קישורים ואז שלח *"הכן"*.`;
+        }
+        // תגובה / מידע
+        (async () => {
           try {
-            await botSend(chat, sent
-              ? '👆 ההודעה המקורית למעלה — הקש עליה כדי לקפוץ לקבוצה.'
-              : '❌ לא הצלחתי לשלוף את ההודעה המקורית (ייתכן שנמחקה).');
-          } catch {}
+            const r = await require('./src/response-engine').buildResponse(_topic);
+            pendingResponseSave.set(OWNER_ID, { topic: _topic, text: r.text, expiresAt: Date.now() + 15 * 60 * 1000 });
+            await botSend(chat, r.text + '\n\n💾 _"שמור תגובה" לארכב_');
+          } catch (e) { try { await botSend(chat, '❌ ניסוח נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
         })();
-        return `📄 שולף את ההודעה המקורית של פריט ${_hm[1]}...`;
+        return `📝 מנסח תגובה על "${_topic.substring(0, 40)}"... שנייה.`;
       }
-      if (_hm[2] === 'הפצה') {
-        pendingDistribution.set(OWNER_ID, { raw: '', phase: 'collect', expiresAt: Date.now() + 20 * 60 * 1000 });
-        return `📤 *הכנת הפצה* על "${_topic.substring(0, 40)}"\n\nהדבק קישורים ואז שלח *"הכן"*.`;
-      }
-      // תגובה / מידע → draft a spokesperson response grounded in his positions
-      (async () => {
-        try {
-          const r = await require('./src/response-engine').buildResponse(_topic);
-          pendingResponseSave.set(OWNER_ID, { topic: _topic, text: r.text, expiresAt: Date.now() + 15 * 60 * 1000 });
-          await botSend(chat, r.text + '\n\n💾 _"שמור תגובה" לארכב_');
-        } catch (e) { try { await botSend(chat, '❌ ניסוח נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
-      })();
-      return `📝 מנסח תגובה על "${_topic.substring(0, 40)}"... שנייה.`;
+      // No digest items — answer helpfully instead of letting the LLM guess
+      // (a bare "הצג" used to come back as "לא הבנתי מה להציג").
+      return '📭 *אין פריטים במוקד כרגע.*\n\nשלח *מוקד* לרענון, או המתן לדייג׳סט הבא.\n_(התכוונת למשהו אחר? נסח מלא — למשל "הצג יומן" / "הצג תבניות".)_';
     }
   }
 
@@ -6556,7 +6583,7 @@ setInterval(async () => {
     const oc = await client.getChatById(OWNER_ID);
     await botSend(oc, d.text);
     pendingHubActions = new Map((d.actions || []).map(a => [String(a.n), a]));
-    hub.markDigestSent();
+    hub.markDigestSent(d.actions || []);
     logger.info(`📬 מוקד digest sent (${(d.actions || []).length} actionable)`);
   } catch (e) { logger.warn('digest flush failed: ' + (e.message || '').substring(0, 80)); }
 }, 5 * 60 * 1000);

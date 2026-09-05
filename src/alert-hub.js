@@ -24,15 +24,17 @@ const CLUSTER_OVERLAP = 4;   // shared significant words → same story
 let pending = [];            // queued non-urgent alerts
 let muted = {};              // { normalizedTopicKey: expiryTs }
 let lastDigestAt = 0;
+let lastActions = [];        // the numbered items from the last digest sent
 
 function _load() {
   try {
     const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     pending = s.pending || []; muted = s.muted || {}; lastDigestAt = s.lastDigestAt || 0;
-  } catch { pending = []; muted = {}; lastDigestAt = 0; }
+    lastActions = s.lastActions || [];
+  } catch { pending = []; muted = {}; lastDigestAt = 0; lastActions = []; }
 }
 function _save() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify({ pending, muted, lastDigestAt })); } catch {}
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify({ pending, muted, lastDigestAt, lastActions })); } catch {}
 }
 _load();
 
@@ -175,9 +177,15 @@ function buildDigest() {
 }
 
 // Called after a digest is actually delivered.
-function markDigestSent() { pending = []; lastDigestAt = Date.now(); _save(); }
+function markDigestSent(actions) {
+  pending = [];
+  lastDigestAt = Date.now();
+  if (Array.isArray(actions)) lastActions = actions;
+  _save();
+}
+function getLastActions() { return lastActions; }
 
 module.exports = {
   queueAlert, buildDigest, markDigestSent, dueForDigest, pendingCount,
-  muteTopic, isMuted, inQuietHours, DIGEST_MINUTES,
+  muteTopic, isMuted, inQuietHours, DIGEST_MINUTES, getLastActions,
 };
