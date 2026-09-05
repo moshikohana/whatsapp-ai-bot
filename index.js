@@ -2994,6 +2994,9 @@ const pendingPresetSave = new Map();
 
 // ── Pending "prepare distribution" state (owner sends text+links next) ──
 const pendingDistribution = new Map();
+// מוקד — numbers shown in the last digest → the topic each one acts on,
+// so the owner can reply "2 תגובה" instead of typing a command.
+let pendingHubActions = new Map();
 
 // ── Pending response-engine draft (owner can "שמור תגובה" to archive it) ──
 const pendingResponseSave = new Map();
@@ -4842,7 +4845,6 @@ client.on('message', async (msg) => {
           const _groupNameForAlert = _alertChat.name || _kFromJid;
           const _sender = msg._data?.notifyName || 'מישהו';
           const _preview = stripUrls(msg.body.substring(0, 150));
-          const _ownerC = await client.getChatById(OWNER_ID);
           // Crisis mode check — if this critical alert pushes us over the
           // war-room threshold, suppress this individual alert and trigger
           // the consolidated war-room flow instead.
@@ -4851,12 +4853,21 @@ client.on('message', async (msg) => {
           if (_crisisTrigger) {
             triggerWarRoom(_crisisTrigger).catch(e => logger.error('warRoom failed:', e.message));
           } else if (!_crisisActive()) {
-            await botSend(_ownerC,
-              `🚨 *התראה — מילת מפתח: "${_matchedKw}"*\n` +
-              `📍 *${_groupNameForAlert}*\n` +
-              `👤 ${_sender}\n` +
-              `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
-            );
+            // מוקד — only Kellner-related alerts interrupt immediately; everything
+            // else is batched into one ranked digest (src/alert-hub.js). This cut
+            // ~33 pings/day down to a handful of useful ones.
+            const _verdict = require('./src/alert-hub').queueAlert({
+              keyword: _matchedKw, group: _groupNameForAlert, sender: _sender, preview: _preview,
+            });
+            if (_verdict === 'urgent') {
+              const _ownerC = await client.getChatById(OWNER_ID);
+              await botSend(_ownerC,
+                `🚨 *התראה — מילת מפתח: "${_matchedKw}"*\n` +
+                `📍 *${_groupNameForAlert}*\n` +
+                `👤 ${_sender}\n` +
+                `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
+              );
+            }
           }
           // Always log to keyword-alerts journal (whether war-room or solo alert)
           require('./src/keyword-alerts').logAlert(_matchedKw, _groupNameForAlert, _sender, _preview);
@@ -5458,6 +5469,42 @@ async function route(chatId, text) {
       catch (e) { try { await botSend(chat, '❌ ביצועי רשתות נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
     })();
     return '📊 מנתח ביצועים בכל הרשתות (X · טיקטוק · טלגרם · יוטיוב) — הכי ויראלי + השוואה... חוזר תוך ~דקה.';
+  }
+
+  // ─── "מוקד" — pull the digest on demand ──────────────────────────
+  if (/^(מוקד|דייג'סט|דיגסט|מה חדש היום|סיכום התראות)\s*[?!.]?$/i.test(text.trim())) {
+    const _hub = require('./src/alert-hub');
+    const _d = _hub.buildDigest();
+    if (!_d) return `📭 *מוקד ריק* — אין התראות ממתינות.${_hub.inQuietHours() ? '\n_(כרגע שעות שקט — התראות נאספות ויגיעו אחר כך.)_' : ''}`;
+    pendingHubActions = new Map((_d.actions || []).map(a => [String(a.n), a]));
+    _hub.markDigestSent();
+    return _d.text;
+  }
+
+  // ─── מוקד quick actions — "<מספר> תגובה / הפצה / שקט" ───────────
+  {
+    const _hm = text.trim().match(/^([1-9])\s*(תגובה|הפצה|שקט|התעלם|מידע)\s*[?!.]?$/);
+    if (_hm && pendingHubActions.has(_hm[1])) {
+      const _act = pendingHubActions.get(_hm[1]);
+      const _topic = (_act.topic || _act.keyword || '').trim();
+      if (_hm[2] === 'שקט' || _hm[2] === 'התעלם') {
+        require('./src/alert-hub').muteTopic(_topic, 12);
+        return `🔕 מושתק ל-12 שעות — לא אטריד אותך על "${_topic.substring(0, 40)}".`;
+      }
+      if (_hm[2] === 'הפצה') {
+        pendingDistribution.set(OWNER_ID, { raw: '', phase: 'collect', expiresAt: Date.now() + 20 * 60 * 1000 });
+        return `📤 *הכנת הפצה* על "${_topic.substring(0, 40)}"\n\nהדבק קישורים ואז שלח *"הכן"*.`;
+      }
+      // תגובה / מידע → draft a spokesperson response grounded in his positions
+      (async () => {
+        try {
+          const r = await require('./src/response-engine').buildResponse(_topic);
+          pendingResponseSave.set(OWNER_ID, { topic: _topic, text: r.text, expiresAt: Date.now() + 15 * 60 * 1000 });
+          await botSend(chat, r.text + '\n\n💾 _"שמור תגובה" לארכב_');
+        } catch (e) { try { await botSend(chat, '❌ ניסוח נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
+      })();
+      return `📝 מנסח תגובה על "${_topic.substring(0, 40)}"... שנייה.`;
+    }
   }
 
   // ─── Targeted group analytics (מי פרסם / נושא מרכזי / שעות שיא) ──
@@ -6282,6 +6329,23 @@ setInterval(() => {
     setTimeout(() => process.exit(1), 1000);
   }
 }, 60 * 1000);
+
+// מוקד — deliver the batched alert digest when one is due (the hub itself
+// holds delivery during quiet hours / Shabbat and rate-limits to DIGEST_MINUTES).
+setInterval(async () => {
+  try {
+    if (botStatus !== 'connected') return;
+    const hub = require('./src/alert-hub');
+    if (!hub.dueForDigest()) return;
+    const d = hub.buildDigest();
+    if (!d) return;
+    const oc = await client.getChatById(OWNER_ID);
+    await botSend(oc, d.text);
+    pendingHubActions = new Map((d.actions || []).map(a => [String(a.n), a]));
+    hub.markDigestSent();
+    logger.info(`📬 מוקד digest sent (${(d.actions || []).length} actionable)`);
+  } catch (e) { logger.warn('digest flush failed: ' + (e.message || '').substring(0, 80)); }
+}, 5 * 60 * 1000);
 
 // Periodic re-alert while the bot is stuck needing a QR re-scan. A WhatsApp
 // LOGOUT (device unlinked server-side) can't be auto-recovered — it needs a
