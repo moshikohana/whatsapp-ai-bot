@@ -306,6 +306,35 @@ async function addReference(name, imageBuffer, { force = false, chooseIndex = nu
     }
   }
 
+  // ── Cross-person contamination guard ──────────────────────────
+  // The real-world failure (2026-09-05): a photo of מיה got stored under שי,
+  // which pulled the two sibling sets together (closest cross distance 0.40)
+  // and made every match weak and unreliable. If the new face is closer to
+  // SOMEONE ELSE's references than to this person's, it's the wrong label.
+  {
+    let bestOther = Infinity, otherName = null;
+    for (const [otherPerson, descs] of Object.entries(config.referenceDescriptors)) {
+      if (otherPerson === name || !descs.length) continue;
+      for (const refArr of descs) {
+        const d = faceapi.euclideanDistance(chosen.descriptor, new Float32Array(refArr));
+        if (d < bestOther) { bestOther = d; otherName = otherPerson; }
+      }
+    }
+    let bestOwn = Infinity;
+    for (const refArr of (config.referenceDescriptors[name] || [])) {
+      const d = faceapi.euclideanDistance(chosen.descriptor, new Float32Array(refArr));
+      if (d < bestOwn) bestOwn = d;
+    }
+    if (otherName && bestOther < bestOwn && !force) {
+      logger.warn(`📸 addReference "${name}": rejected — closer to ${otherName} (${bestOther.toFixed(3)} < ${bestOwn.toFixed(3)})`);
+      return {
+        success: false,
+        error: `הפנים האלה דומות יותר ל-*${otherName}* מאשר ל-*${name}* (${bestOther.toFixed(2)} מול ${bestOwn.toFixed(2)}) — כנראה בחרת את הפרצוף הלא נכון. בדוק את המספר, או שלח עם "!" בסוף כדי לאלץ.`,
+        facesFound: detections.length,
+      };
+    }
+  }
+
   // Store the chosen (largest / only) face descriptor
   config.referenceDescriptors[name].push(Array.from(chosen.descriptor));
 
@@ -328,6 +357,12 @@ async function addReference(name, imageBuffer, { force = false, chooseIndex = nu
 // 0.32–0.43 band (fresh photos of the real child) through instead of "No match".
 const MIN_FORWARD_CONFIDENCE = 10;
 
+// Siblings' reference sets sit only ~0.41 apart, so one face can fall under
+// BOTH thresholds. If the runner-up person is nearly as close as the winner we
+// genuinely cannot tell them apart — naming one would be a coin flip, and that
+// is exactly how "מיה" kept getting reported for her sister (2026-09-05).
+const AMBIGUITY_MARGIN = 0.06;
+
 // Match a set of detected faces against the references.
 // Each face is assigned ONLY to its closest person (winner-takes-the-face)
 // so similar-looking people (e.g. sisters) don't both get reported for the
@@ -335,7 +370,8 @@ const MIN_FORWARD_CONFIDENCE = 10;
 function _matchDetections(detections, config) {
   const matches = [];
   for (const det of detections) {
-    let winner = null; // { name, distance, threshold }
+    // Best distance PER PERSON, so the winner can be compared to the runner-up.
+    const perPerson = [];
     for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
       if (!descriptors.length) continue;
       let bestDistance = Infinity;
@@ -343,21 +379,30 @@ function _matchDetections(detections, config) {
         const dist = faceapi.euclideanDistance(det.descriptor, new Float32Array(refDesc));
         if (dist < bestDistance) bestDistance = dist;
       }
-      const effectiveThreshold = config.perPersonThresholds?.[name] ?? config.threshold;
-      if (bestDistance < effectiveThreshold && (!winner || bestDistance < winner.distance)) {
-        winner = { name, distance: bestDistance, threshold: effectiveThreshold };
-      }
+      perPerson.push({
+        name,
+        distance: bestDistance,
+        threshold: config.perPersonThresholds?.[name] ?? config.threshold,
+      });
     }
-    if (winner) {
-      const confidence = Math.round(Math.max(0, (1 - winner.distance / winner.threshold) * 100));
-      if (confidence >= MIN_FORWARD_CONFIDENCE) {
-        matches.push({
-          name: winner.name,
-          distance: Math.round(winner.distance * 1000) / 1000,
-          confidence,
-          threshold: winner.threshold,
-        });
-      }
+    perPerson.sort((a, b) => a.distance - b.distance);
+    const winner = perPerson.find(p => p.distance < p.threshold) || null;
+    if (!winner) continue;
+
+    const runnerUp = perPerson.find(p => p.name !== winner.name);
+    if (runnerUp && (runnerUp.distance - winner.distance) < AMBIGUITY_MARGIN) {
+      logger.info(`🤝 Ambiguous face: ${winner.name} ${winner.distance.toFixed(3)} vs ${runnerUp.name} ${runnerUp.distance.toFixed(3)} — not naming`);
+      continue;
+    }
+
+    const confidence = Math.round(Math.max(0, (1 - winner.distance / winner.threshold) * 100));
+    if (confidence >= MIN_FORWARD_CONFIDENCE) {
+      matches.push({
+        name: winner.name,
+        distance: Math.round(winner.distance * 1000) / 1000,
+        confidence,
+        threshold: winner.threshold,
+      });
     }
   }
   const deduped = {};
