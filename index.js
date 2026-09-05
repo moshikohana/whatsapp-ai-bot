@@ -3003,6 +3003,11 @@ let pendingHubActions = new Map();
 // because the self-chat id varies between c.us and @lid.
 const pendingFacePick = new Map();
 const pendingFaceFeedback = new Map();
+// The last photo the OWNER sent, kept briefly so a follow-up text ("מספור", or
+// a correction like "1 שי 3 מיה") applies to THAT photo instead of making him
+// resend it. { buf, ts }
+const lastOwnerPhoto = new Map();
+const LAST_PHOTO_TTL = 20 * 60 * 1000;
 
 // ── Pending response-engine draft (owner can "שמור תגובה" to archive it) ──
 const pendingResponseSave = new Map();
@@ -3648,6 +3653,17 @@ client.on('message_create', async (msg) => {
     if (msg.type === 'image' || msg.type === 'sticker') {
       const caption = rawBody.trim() || 'מה יש בתמונה?';
 
+      // Remember this photo so a follow-up text ("מספור" / "1 שי 3 מיה") can
+      // act on it without the owner having to resend the image.
+      if (msg.type === 'image') {
+        (async () => {
+          try {
+            const _m = await safeDownloadMedia(msg);
+            if (_m && _m.data) lastOwnerPhoto.set(OWNER_ID, { buf: Buffer.from(_m.data, 'base64'), ts: Date.now() });
+          } catch {}
+        })();
+      }
+
       // ── Reference photo for face recognition ──
       const refMatch = caption.match(/ייחוס\s+(?:של\s+)?(.+)/i);
       // Also check if this is a batch photo (no caption) after a recent "ייחוס" caption
@@ -3977,46 +3993,66 @@ client.on('message_create', async (msg) => {
       }
     }
 
-    // ── Pending face-detection feedback ("נכון" / "<מספר> <שם>") ──
+    // ── Face corrections ("נכון" / "1 שי 3 מיה") ─────────────────
+    // Works while a "מספור" report is open, AND — because the owner naturally
+    // just answers after any photo — also against the LAST photo he sent, so
+    // he never has to resend it. Accepts SEVERAL pairs in one message.
     {
       const ff = pendingFaceFeedback.get(OWNER_ID);
-      if (ff && ff.expiresAt > Date.now()) {
-        const t = text.trim();
-        if (/^(נכון|צדקת|מדויק|כן)\s*[?!.]?$/i.test(t)) {
-          pendingFaceFeedback.delete(OWNER_ID);
-          await botSend(chat, '👍 מעולה, תודה על האישור.');
-          stats.sent++; return;
-        }
-        if (/^(טעות|לא נכון|שגוי|טעית)\s*[?!.]?$/i.test(t)) {
-          await botSend(chat, `🔧 בוא נתקן — שלח *<מספר> <שם>* (למשל: _2 מיה_) ואשמור את הפרצוף הנכון כייחוס.\n_או "סיום" לצאת._`);
-          stats.sent++; return;
-        }
-        if (/^(סיום|ביטול|עזוב)\s*[?!.]?$/i.test(t)) {
-          pendingFaceFeedback.delete(OWNER_ID);
-          await botSend(chat, '✅ סגרנו.');
-          stats.sent++; return;
-        }
-        const m = t.match(/^(\d{1,2})\s+(.{1,30})$/);
-        if (m) {
-          const idx = parseInt(m[1], 10) - 1;
-          const who = m[2].replace(/\s*!+\s*$/, '').trim();
-          const force = /!\s*$/.test(m[2]);
-          if (idx < 0 || idx >= ff.count) {
-            await botSend(chat, `🤔 יש *${ff.count}* פרצופים — בחר מספר בין 1 ל-${ff.count}.`);
-            stats.sent++; return;
-          }
-          await botSend(chat, `📸 שומר את פרצוף *${m[1]}* כייחוס ל-*${who}*...`);
-          try {
-            const r = await require('./src/face-recognition').addReference(who, ff.buf, { force, chooseIndex: idx });
-            await botSend(chat, r.success
-              ? `✅ נשמר! *${who}* — סה״כ *${r.totalReferences}* ייחוסים. הזיהוי ישתפר מעכשיו.${r.note ? '\n\n' + r.note : ''}\n\n_אפשר לתקן עוד פרצוף, או "סיום"._`
-              : `❌ ${r.error}`);
-          } catch (e) { await botSend(chat, '❌ שמירה נכשלה: ' + (e.message || '').substring(0, 70)); }
-          stats.sent++; return;
-        }
-        // Not a feedback reply — drop the state and let the message route normally.
+      const ffActive = ff && ff.expiresAt > Date.now();
+      const lp = lastOwnerPhoto.get(OWNER_ID);
+      const lpFresh = lp && (Date.now() - lp.ts) < LAST_PHOTO_TTL;
+      const t = text.trim();
+      const pairs = [...t.matchAll(/(\d{1,2})\s+([\p{L}][\p{L}'"`\-! ]{0,24}?)(?=\s*(?:\d{1,2}\s+[\p{L}]|$|[\n,.;]))/gu)]
+        .map(m => ({ idx: parseInt(m[1], 10) - 1, who: m[2].trim(), num: m[1] }))
+        .filter(x => x.who && !/^(תגובה|הפצה|שקט|התעלם|מידע|ימים)$/.test(x.who));
+
+      if (ffActive && /^(נכון|צדקת|מדויק|כן)\s*[?!.]?$/i.test(t)) {
         pendingFaceFeedback.delete(OWNER_ID);
+        await botSend(chat, '👍 מעולה, תודה על האישור.');
+        stats.sent++; return;
       }
+      if (ffActive && /^(סיום|ביטול|עזוב)\s*[?!.]?$/i.test(t)) {
+        pendingFaceFeedback.delete(OWNER_ID);
+        await botSend(chat, '✅ סגרנו.');
+        stats.sent++; return;
+      }
+      if ((ffActive || lpFresh) && !pairs.length && /^(טעות|לא נכון|שגוי|טעית)\s*[?!.]?$/i.test(t)) {
+        await botSend(chat, '🔧 בוא נתקן — שלח *<מספר> <שם>* (אפשר כמה יחד, למשל: _1 שי 3 מיה_).');
+        stats.sent++; return;
+      }
+
+      // Without an open report, only treat it as a correction when the message
+      // actually STARTS like one — otherwise ordinary text ("5 דקות") would be
+      // misread as a reference name in the 20 min after any photo.
+      const looksLikeCorrection = ffActive || /^(?:טעות|תיקון)?[\s,]*(?:\d{1,2}\s+\p{L}[\p{L}'"`\-!]*(?:\s+\p{L}[\p{L}'"`\-!]*)?[\s,;.]*)+$/u.test(t);
+      if (pairs.length && (ffActive || lpFresh) && looksLikeCorrection) {
+        const buf = ffActive ? ff.buf : lp.buf;
+        let count = ffActive ? ff.count : 0;
+        const fr = require('./src/face-recognition');
+        if (!count) {
+          try { count = (await fr.detectFaces(buf)).length; } catch { count = 0; }
+        }
+        if (!count) { await botSend(chat, '🤷 לא זוהו פנים בתמונה האחרונה — שלח תמונה ואז את התיקון.'); stats.sent++; return; }
+
+        await botSend(chat, `📸 מעדכן ${pairs.length} ייחוס${pairs.length > 1 ? 'ים' : ''} מהתמונה האחרונה...`);
+        const lines = [];
+        for (const { idx, who, num } of pairs) {
+          if (idx < 0 || idx >= count) { lines.push(`⚠️ ${num} — אין פרצוף כזה (יש ${count})`); continue; }
+          const force = /!$/.test(who);
+          const name = who.replace(/\s*!+\s*$/, '').trim();
+          try {
+            const r = await fr.addReference(name, buf, { force, chooseIndex: idx });
+            lines.push(r.success
+              ? `✅ ${num} → *${name}* (סה״כ ${r.totalReferences})`
+              : `❌ ${num} → ${name}: ${r.error}`);
+          } catch (e) { lines.push(`❌ ${num} → ${name}: ${(e.message || '').substring(0, 60)}`); }
+        }
+        await botSend(chat, `🔢 *עודכן מהתמונה*\n\n${lines.join('\n')}\n\n_אפשר לתקן עוד, או "סיום"._`);
+        stats.sent++; return;
+      }
+
+      if (ffActive) pendingFaceFeedback.delete(OWNER_ID);
     }
 
     // ── Pending "prepare distribution" — collect → build → complete ──
@@ -5601,6 +5637,32 @@ async function route(chatId, text) {
       catch (e) { try { await botSend(chat, '❌ ביצועי רשתות נכשל: ' + (e.message || '').substring(0, 60)); } catch {} }
     })();
     return '📊 מנתח ביצועים בכל הרשתות (X · טיקטוק · טלגרם · יוטיוב) — הכי ויראלי + השוואה... חוזר תוך ~דקה.';
+  }
+
+  // ─── "מספור" as a standalone text — acts on the LAST photo sent ──
+  if (/^(מספור|מספר פרצופים|פרצופים|מי בתמונה|תמספר)\s*[?!.]?$/i.test(text.trim())) {
+    const _lp = lastOwnerPhoto.get(OWNER_ID);
+    if (!_lp || (Date.now() - _lp.ts) >= LAST_PHOTO_TTL) {
+      return '📸 שלח לי קודם תמונה, ואז "מספור" — או שלח את התמונה עם הכיתוב "מספור".';
+    }
+    (async () => {
+      try {
+        const _nf = await require('./src/face-recognition').numberFaces(_lp.buf);
+        if (!_nf.count) { await botSend(chat, '🤷 לא זוהו פנים בתמונה האחרונה.'); return; }
+        const lines = _nf.faces.map(f => f.isMatch
+          ? `*${f.n}.* ✅ ${f.matchedName} _(${f.confidence}%)_`
+          : `*${f.n}.* ❓ לא מזוהה${f.nearest ? ` — הכי קרוב ל-${f.nearest} (${f.confidence}%)` : ''}`).join('\n');
+        const { MessageMedia } = require('whatsapp-web.js');
+        await chat.sendMessage(
+          new MessageMedia('image/jpeg', _nf.buffer.toString('base64'), 'faces.jpg'),
+          { caption: `🔢 *${_nf.count} פרצופים*\n\n${lines}\n\n━━━━━━━━━━\n*צדקתי?*\n• *נכון* — הכל מדויק\n• *<מספר> <שם>* — לתקן (אפשר כמה: _1 שי 3 מיה_)` + BOT_MARKER }
+        );
+        pendingFaceFeedback.set(OWNER_ID, { buf: _lp.buf, faces: _nf.faces, count: _nf.count, expiresAt: Date.now() + 15 * 60 * 1000 });
+      } catch (e) {
+        try { await botSend(chat, '❌ מספור נכשל: ' + (e.message || '').substring(0, 60)); } catch {}
+      }
+    })();
+    return '🔢 ממספר את הפרצופים בתמונה האחרונה... שנייה.';
   }
 
   // ─── "מוקד" — pull the digest on demand ──────────────────────────
