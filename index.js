@@ -6315,8 +6315,24 @@ setInterval(async () => {
     const silentMin = Math.round((Date.now() - _lastMsgEventAt) / 60000);
     logger.info(`🔍 Watchdog: page=alive | last msg event ${silentMin}min ago`);
     if (silentMin >= 45) {
-      logger.warn(`💀 Watchdog: page alive but ZERO message events for ${silentMin}min — listeners are dead (zombie). Exiting for clean pm2 restart.`);
-      notifyOwnerBotDown('watchdog-zombie', `no events ${silentMin}min`).catch(()=>{});
+      // Quiet ≠ zombie. The political/news groups go SILENT on Shabbat and
+      // overnight — that used to false-trigger this and KILL a perfectly
+      // healthy connection ("the code disconnected me", 2026-09-05). Before
+      // exiting, verify the WhatsApp socket is actually dead: if getState() is
+      // CONNECTED, it's just quiet — leave it alone.
+      let state = null;
+      try {
+        state = await Promise.race([
+          client.getState(),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('getState-timeout')), 15000)),
+        ]);
+      } catch (e) { state = 'ERR:' + (e.message || '').substring(0, 30); }
+      if (state === 'CONNECTED') {
+        logger.info(`🔍 Watchdog: ${silentMin}min quiet but WA state=CONNECTED — healthy (just quiet, e.g. Shabbat). Not killing.`);
+        return;
+      }
+      logger.warn(`💀 Watchdog: ${silentMin}min no events AND WA state=${state} — genuinely dead. Exiting for clean pm2 restart.`);
+      notifyOwnerBotDown('watchdog-zombie', `no events ${silentMin}min, state=${state}`).catch(()=>{});
       setTimeout(() => process.exit(1), 1500);
       return;
     }
