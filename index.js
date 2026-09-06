@@ -5692,7 +5692,7 @@ async function route(chatId, text, chat) {
   }
 
   // ─── 🖥️ סוכן שולחני ──────────────────────────────────────────────
-  if (/^סוכן\b/i.test(text.trim())) {
+  if (/^סוכן(?:\s|$)/i.test(text.trim())) {
     const da = require('./src/desktop-agent');
     const rest = text.trim().replace(/^סוכן\s*/i, '').trim();
     if (!rest || /^(סטטוס|מצב)$/i.test(rest)) return da.getStatus();
@@ -5746,7 +5746,7 @@ async function route(chatId, text, chat) {
   }
 
   // ─── 📻 ניטור שידורים חיים ────────────────────────────────────────
-  if (/^שידורים\b/i.test(text.trim())) {
+  if (/^שידורים(?:\s|$)/i.test(text.trim())) {
     const bm = require('./src/broadcast-monitor');
     const rest = text.trim().replace(/^שידורים\s*/i, '').trim();
     if (!rest || /^(סטטוס|מצב)$/i.test(rest)) return bm.getStatus();
