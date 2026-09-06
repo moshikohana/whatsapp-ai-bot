@@ -3964,12 +3964,27 @@ ${rawBody}`;
           stats.sent++; return;
         }
         // Not a yes/no/number and not another command → nudge once, keep pending.
-        if (!looksLikeOtherCommand && t.length <= 30) {
+        // A question or a new request is clearly NOT an answer to "add these
+        // groups?" — releasing the state beats swallowing his message, which
+        // is how "כמה זמן מתל אביב לחולון" got answered with "שלח כן/מספרים".
+        // Inverted on purpose: instead of guessing whether this is a new
+        // request, ask whether it is a VALID ANSWER to the question we asked.
+        // Anything that isn't releases the state and falls through to normal
+        // routing, so he gets what he actually asked for. This is exactly how
+        // "כמה זמן מתל אביב לחולון" ended up answered with "שלח כן/מספרים".
+        const _dg = require('./src/diagnostics');
+        pendingGroupSuggest.delete(OWNER_ID);
+        if (!_dg.looksLikeAnswer(t)) {
+          _dg.record({ kind: 'state_hijack', input: t,
+            reason: 'הבוט חיכה לתשובה על הוספת קבוצות לסריקה, וההודעה שלך לא הייתה קשורה לזה',
+            hint: 'ביטלתי את השאלה הפתוחה וטיפלתי בבקשה שלך רגיל. ההצעה תחזור מחר.' });
+          await botSend(chat, '↩️ _ביטלתי את השאלה על הוספת קבוצות — ממשיך עם הבקשה שלך._');
+          stats.sent++;
+        } else if (!looksLikeOtherCommand && t.length <= 30) {
           await botSend(chat, '🤔 לא הבנתי — שלח *כן*/מספרים כדי להוסיף, או *לא* כדי לדלג.');
           stats.sent++; return;
         }
-        // Looks like a different request — drop the pending state, fall through.
-        pendingGroupSuggest.delete(OWNER_ID);
+        // fall through — the message is handled as a normal request
       }
     }
 
@@ -5559,7 +5574,7 @@ function _canonicalizeCommand(text, quotedText = '') {
   // Hebrew-safe "contains this word": JS  is ASCII-only (תפעיל never
   // matches), and building the class inside a single-quoted string silently
   // turned s into a literal "s". Normalise punctuation to spaces instead.
-  const padded = " " + t.replace(/[?!.,:;"״׳–—-]/g, " ").replace(/s+/g, " ") + " ";
+  const padded = " " + t.replace(/[?!.,:;"״׳–—-]/g, " ").replace(/\s+/g, " ") + " ";
   const has = (alts) => alts.split("|").some(w => padded.includes(" " + w + " "));
 
   // Which feature is being discussed — from the message, else from what he replied to.
@@ -5603,6 +5618,19 @@ async function route(chatId, text, chat) {
   {
     const _canon = _canonicalizeCommand(text);
     if (_canon) { logger.info(`🎯 intent => ${_canon}`); text = _canon; }
+  }
+
+  // ─── אבחון עצמי: "למה" / "תקלות" ─────────────────────────────────
+  // He kept having to bring every dead end back to a developer to find out
+  // what went wrong. These two answer that themselves.
+  {
+    const _t = (text || '').trim();
+    if (/^(למה|למה\?|מה קרה|מה השתבש|למה זה לא עבד|למה לא עבד|למה לא הבנת)[?!.]*$/i.test(_t)) {
+      return require('./src/diagnostics').explainLast();
+    }
+    if (/^(תקלות|בעיות|היסטוריית תקלות|מה נכשל)[?!.]*$/i.test(_t)) {
+      return require('./src/diagnostics').report();
+    }
   }
   // `chat` is the live, already-resolved Chat handed over by the message
   // handlers. 22 call sites inside this function use botSend(chat, …); before
@@ -6179,9 +6207,59 @@ async function route(chatId, text, chat) {
     return reply;
   }
 
+  // ─── "התכוונת ל…?" — a typo shouldn't cost him a round trip ──────
+  // Reaching here means nothing matched. If what he sent is one or two words
+  // that are one or two letters away from a real command, say so instead of
+  // handing it to the LLM, which answers something plausible and unrelated.
+  {
+    const _t = (text || '').trim().replace(/[?!.]+$/, '');
+    if (/^[א-ת]{3,}(\s[א-ת]{2,})?$/.test(_t) && _t.length <= 24) {
+      const VOCAB = ['מוקד','סריקה','סקירה','תפריט','עזרה','שידורים','סוכן','מספור',
+                     'נרטיבים','קרדיטים','סטטיסטיקות','גיבוי','הפצה','יריבים','סטטוס',
+                     'תקלות','מה חדש','נתח קבוצה'];
+      const dist = (a, b) => {
+        const m = a.length, n = b.length;
+        let prev = Array.from({ length: n + 1 }, (_, j) => j);
+        for (let i = 1; i <= m; i++) {
+          const cur = [i];
+          for (let j = 1; j <= n; j++) {
+            cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+          }
+          prev = cur;
+        }
+        return prev[n];
+      };
+      let best = null, bestD = 99;
+      for (const v of VOCAB) { const d = dist(_t, v); if (d < bestD) { bestD = d; best = v; } }
+      // Conservative on purpose: 1 letter off for short words, 2 for longer
+      // ones. Anything looser starts "correcting" real sentences.
+      if (best && bestD > 0 && bestD <= 2 && bestD * 3 <= _t.length) {
+        require('./src/diagnostics').record({
+          kind: 'unknown_cmd', input: _t,
+          reason: `אין פקודה בשם "${_t}" — הכי קרוב אליה: "${best}"`,
+          hint: `שלח *${best}*. לרשימה המלאה: *תפריט*`,
+        });
+        return `🤔 אין פקודה "${_t}".\n\n💡 התכוונת ל-*${best}*?\n\n_לרשימת הפקודות: *תפריט*_`;
+      }
+    }
+  }
+
   // Tier 2: Everything else → Claude with tools (natural language)
   const history = getHistory(chatId);
-  const reply = await smartChat(text, history);
+  let reply;
+  try {
+    reply = await smartChat(text, history);
+  } catch (e) {
+    // Record the real error so "למה" can name it, instead of him seeing a
+    // generic failure and having to come ask what broke.
+    require('./src/diagnostics').record({
+      kind: 'tool_error', input: text,
+      reason: 'הבקשה נשלחה ל-AI ונכשלה באמצע',
+      hint: 'נסה שוב בעוד רגע. אם זה חוזר — שלח *תקלות* ותראה אם זו אותה שגיאה.',
+      detail: (e && e.message || String(e)).substring(0, 200),
+    });
+    throw e;
+  }
   history.push({ role: 'user', content: text });
   history.push({ role: 'assistant', content: reply });
   if (history.length > 10) history.splice(0, 2);
@@ -6248,7 +6326,11 @@ function helpMenu() {
 ├ /תזכורת [דקות] [מה]
 ├ /נקה — אפס שיחה
 ├ /מה חדש — עדכונים אחרונים
-└ /תפריט — העזרה הזו`;
+└ /תפריט — העזרה הזו
+
+🩺 *כשמשהו לא עבד:*
+├ *למה* — מה בדיוק השתבש בפעם האחרונה ומה לעשות
+└ *תקלות* — היסטוריית התקלות, לפי סוג`;
 }
 
 // ─── What's New ─────────────────────────────────────────────────
