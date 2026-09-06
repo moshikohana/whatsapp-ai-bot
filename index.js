@@ -3785,7 +3785,7 @@ client.on('message_create', async (msg) => {
         log({ time: ts(), from: 'מושיקו', text: caption, direction: 'in' });
         const chat = await msg.getChat();
         await chat.sendStateTyping();
-        const response = await route(chatId, caption);
+        const response = await route(chatId, caption, chat);
         await botSend(chat, response);
         stats.sent++;
         log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
@@ -4491,7 +4491,7 @@ client.on('message_create', async (msg) => {
     let response;
     try {
       try {
-        response = await route(chatId, text);
+        response = await route(chatId, text, chat);
       } catch (firstErr) {
         // ── Auto-recover from 400 "messages must alternate" errors ──
         // These happen when the conversation history gets into a state
@@ -4506,7 +4506,7 @@ client.on('message_create', async (msg) => {
         logger.warn(`🔁 400 detected — clearing history and retrying for ${chatId}`);
         conversations.delete(chatId);
         saveConversations(conversations);
-        response = await route(chatId, text);
+        response = await route(chatId, text, chat);
       }
     } finally {
       slowTimers.forEach(clearTimeout);
@@ -5531,14 +5531,20 @@ async function analyzeGroupActivity(groupQuery, sinceDays = 7) {
 }
 
 // ─── Router ──────────────────────────────────────────────────────
-async function route(chatId, text) {
+async function route(chatId, text, chat) {
+  // `chat` is the live, already-resolved Chat handed over by the message
+  // handlers. 22 call sites inside this function use botSend(chat, …); before
+  // this parameter existed `chat` was undefined here and every one of them
+  // threw silently (swallowed by their catch), which is why the on-demand
+  // report commands answered with nothing. Re-resolving is only a fallback —
+  // getChatById can hang under load.
+  if (!chat) { try { chat = await client.getChatById(chatId); } catch (_) {} }
 
   // Auto-send last video if user confirms
   if (lastVideoPath && /^(כן|yes|✅|שלח|תשלח|בטח)/i.test(text)) {
     try {
       const { MessageMedia } = require('whatsapp-web.js');
       const media = MessageMedia.fromFilePath(lastVideoPath);
-      const chat = await client.getChatById(chatId);
       await chat.sendMessage(media, { caption: '🎬 הנה הסרטון!' + BOT_MARKER });
       lastVideoPath = null;
       return '✅ הסרטון נשלח!';
