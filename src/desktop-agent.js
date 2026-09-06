@@ -174,6 +174,61 @@ function getStatus() {
   return out;
 }
 
+
+// Full command reference — the owner asked to always have this at hand.
+function getHelp() {
+  const c = loadConfig();
+  const on = connected().length;
+  return `🖥️ *פקודות הסוכן השולחני*
+` +
+    `_מצב: ${on ? '🟢 מחובר' : '🔴 המחשב לא מחובר — הפעל start-agent.bat'}_
+` +
+    `${'━'.repeat(18)}
+
+` +
+    `👁️ *לראות מה קורה במחשב*
+` +
+    `• *סוכן צלם* — צילום מסך מלא (נשלח כקובץ, ללא דחיסה)
+` +
+    `• *סוכן חלונות* — אילו תוכנות פתוחות עכשיו
+` +
+    `• *סוכן הורדות* — 10 הקבצים האחרונים שהורדת
+
+` +
+    `📋 *להעביר טקסט בין הטלפון למחשב*
+` +
+    `• *סוכן העתק <טקסט>* — שולח ללוח של המחשב (Ctrl+V שם)
+` +
+    `• *סוכן לוח* — מביא לך מה שמועתק במחשב
+
+` +
+    `⚡ *לבצע פעולות*
+` +
+    `• *סוכן פתח <קישור>* — פותח בדפדפן (בלי https גם עובד)
+` +
+    `• *סוכן התראה <טקסט>* — התראה קופצת על המסך
+` +
+    `• *סוכן נעל* — נועל את המחשב
+
+` +
+    `🔧 *ניהול*
+` +
+    `• *סוכן* — סטטוס
+` +
+    `• *סוכן בדיקה* — האם המחשב מחובר
+` +
+    `• *סוכן חשבונות* — רשימת חשבונות
+` +
+    `• *סוכן הוסף חשבון <שם> | <פלטפורמה>*
+` +
+    `• *סוכן חשבון <id>* — לבחור חשבון פעיל
+` +
+    `• *סוכן פרסום הפעל/כבה* — ${c.publishing.enabled ? '🟢 מופעל' : '🔴 מושבת'}
+
+` +
+    `💡 _טיפ:_ *סוכן העתק* הכי שימושי — מכין הפצה בוואטסאפ, שולח ללוח, ומדביק במחשב.`;
+}
+
 function listAccounts() {
   const c = loadConfig();
   if (!c.accounts.length) {
@@ -185,6 +240,6 @@ function listAccounts() {
 }
 
 module.exports = {
-  attach, run, connected, isConnected, getStatus, listAccounts,
+  attach, run, connected, isConnected, getStatus, getHelp, listAccounts,
   addAccount, removeAccount, setActiveAccount, setPublishing, loadConfig, ACTIONS,
 };

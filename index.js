@@ -5696,6 +5696,7 @@ async function route(chatId, text, chat) {
     const da = require('./src/desktop-agent');
     const rest = text.trim().replace(/^סוכן\s*/i, '').trim();
     if (!rest || /^(סטטוס|מצב)$/i.test(rest)) return da.getStatus();
+    if (/^(עזרה|פקודות|help)$/i.test(rest)) return da.getHelp();
     if (/^חשבונות$/i.test(rest)) return da.listAccounts();
 
     const addM = rest.match(/^הוסף חשבון\s+(.+?)\s*(?:\|\s*(.+))?$/i);
@@ -5726,8 +5727,13 @@ async function route(chatId, text, chat) {
         if (!r.ok) { await botSend(chat, `❌ ${r.error}`); return; }
         try {
           const { MessageMedia } = require('whatsapp-web.js');
-          await chat.sendMessage(new MessageMedia('image/png', r.data.image, 'screen.png'),
-            { caption: '🖥️ המסך שלך עכשיו' + BOT_MARKER });
+          const media = new MessageMedia(r.data.mime || 'image/png', r.data.image, 'screen.png');
+          // Sent as a DOCUMENT on purpose: WhatsApp re-compresses photos hard
+          // and small on-screen text turns to mush. Documents arrive untouched.
+          await chat.sendMessage(media, {
+            sendMediaAsDocument: true,
+            caption: `🖥️ המסך שלך · ${r.data.dims || ''} · ${r.data.sizeKB || '?'}KB` + BOT_MARKER,
+          });
         } catch (e) { await botSend(chat, '❌ שליחת הצילום נכשלה: ' + (e.message || '').substring(0, 60)); }
       })();
       return '📸 מצלם את המסך...';
