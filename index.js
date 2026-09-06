@@ -1657,7 +1657,17 @@ const client = new Client({
       '--disable-software-rasterizer',
       '--disable-blink-features=AutomationControlled',
       '--no-zygote',
-      '--memory-pressure-off',
+      // --memory-pressure-off was here and has been removed deliberately. It
+      // tells Chrome to ignore system memory pressure, so the renderer never
+      // releases anything and simply grows until the kernel kills it. dmesg
+      // shows exactly that twice: the renderer at 1.9GB, then 3.3GB, both
+      // ended by the OOM killer. With it gone Chrome sheds caches instead.
+      '--js-flags=--max-old-space-size=512',   // hard ceiling on the renderer JS heap
+      '--renderer-process-limit=2',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--disable-breakpad',
+      '--disable-component-update',
       // Cap on-disk caches so the session can't balloon to GBs and crash the
       // renderer on load ("Execution context was destroyed"). 100MB HTTP cache,
       // 50MB media cache. (Code Cache isn't capped by these — the pre-launch

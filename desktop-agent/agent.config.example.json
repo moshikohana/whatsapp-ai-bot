@@ -1,5 +1,5 @@
 {
-  "botUrl": "https://<the bot tunnel url>.trycloudflare.com",
+  "botUrl": "https://bot.204-168-132-44.sslip.io",
   "secret": "<same AGENT_SECRET as the server .env>",
   "name": "my-pc"
 }
