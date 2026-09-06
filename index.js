@@ -5689,6 +5689,41 @@ async function route(chatId, text, chat) {
     return '🔢 ממספר את הפרצופים בתמונה האחרונה... שנייה.';
   }
 
+  // ─── 📻 ניטור שידורים חיים ────────────────────────────────────────
+  if (/^שידורים\b/i.test(text.trim())) {
+    const bm = require('./src/broadcast-monitor');
+    const rest = text.trim().replace(/^שידורים\s*/i, '').trim();
+    if (!rest || /^(סטטוס|מצב)$/i.test(rest)) return bm.getStatus();
+    if (/^(הפעל|פעיל|התחל|on)$/i.test(rest)) { bm.setEnabled(true); return '📻 *ניטור שידורים הופעל* 🟢\n\n' + bm.getStatus(); }
+    if (/^(כבה|עצור|off)$/i.test(rest)) { bm.setEnabled(false); return '📻 *ניטור שידורים כובה* 🔴'; }
+    if (/^תחנות$/i.test(rest)) return bm.listStations();
+    const stM = rest.match(/^תחנה\s+(\S+)$/i);
+    if (stM) {
+      const list = bm.toggleStation(stM[1]);
+      return list ? `✅ עודכן.\n\n${bm.listStations()}` : `❌ אין תחנה בשם "${stM[1]}".\n\n${bm.listStations()}`;
+    }
+    const addM = rest.match(/^(?:מילה|הוסף)\s+(.{2,30})$/i);
+    if (addM) { const t = bm.addTerm(addM[1]); return `✅ נוסף למעקב: *${addM[1]}*\n🔑 ${t.join(' · ')}`; }
+    const rmM = rest.match(/^(?:הסר|מחק)\s+(.{2,30})$/i);
+    if (rmM) { const t = bm.removeTerm(rmM[1]); return `🗑️ הוסר: *${rmM[1]}*\n🔑 ${t.join(' · ') || '—'}`; }
+    if (/^(בדוק|עכשיו|test)$/i.test(rest)) {
+      (async () => {
+        try {
+          await botSend(chat, '📻 דוגם את השידורים עכשיו... (~דקה)');
+          const hits = await bm.checkOnce();
+          if (!hits.length) {
+            const r = bm.getRecent(2);
+            await botSend(chat, `📻 *לא נמצאו אזכורים כרגע.*\n\n${r.length ? '_מה שנשמע עכשיו:_\n' + r.map(x => `🎙️ *${x.station}*: "${x.text.substring(0, 150)}…"`).join('\n\n') : '_(לא הצלחתי לקלוט אודיו)_'}`);
+            return;
+          }
+          for (const h of hits) await botSend(chat, bm.formatHit(h));
+        } catch (e) { try { await botSend(chat, '❌ בדיקת שידורים נכשלה: ' + (e.message || '').substring(0, 60)); } catch {} }
+      })();
+      return '📻 בודק שידורים חיים...';
+    }
+    return bm.getStatus();
+  }
+
   // ─── "מוקד" — pull the digest on demand ──────────────────────────
   if (/^(מוקד|דייג'סט|דיגסט|מה חדש היום|מה קרה|סיכום התראות)\s*[?!.]?$/i.test(text.trim())) {
     const _hub = require('./src/alert-hub');
@@ -6600,6 +6635,29 @@ setInterval(() => {
     setTimeout(() => process.exit(1), 1000);
   }
 }, 60 * 1000);
+
+
+// ─── 📻 Live broadcast monitor loop ──────────────────────────────
+// Samples the enabled stations, transcribes, and pushes an alert the moment a
+// watched term is said on air. Self-throttling: only inside active hours.
+let _bcBusy = false;
+setInterval(async () => {
+  try {
+    if (botStatus !== 'connected' || _bcBusy) return;
+    const bm = require('./src/broadcast-monitor');
+    if (!bm.isEnabled() || !bm.inActiveHours()) return;
+    const c = bm.loadConfig();
+    if (Date.now() - (_bcLast || 0) < (c.intervalMin || 4) * 60 * 1000) return;
+    _bcBusy = true; _bcLast = Date.now();
+    const hits = await bm.checkOnce();
+    for (const h of hits) {
+      try { await botSend(await client.getChatById(OWNER_ID), bm.formatHit(h)); } catch {}
+    }
+    if (hits.length) logger.info(`📻 broadcast: ${hits.length} mention(s) alerted`);
+  } catch (e) { logger.warn('broadcast loop: ' + (e.message || '').substring(0, 70)); }
+  finally { _bcBusy = false; }
+}, 60 * 1000);
+let _bcLast = 0;
 
 // מוקד — deliver the batched alert digest when one is due (the hub itself
 // holds delivery during quiet hours / Shabbat and rate-limits to DIGEST_MINUTES).
