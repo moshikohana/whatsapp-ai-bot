@@ -116,9 +116,61 @@ function _mimeOf(name) {
   })[e] || 'application/octet-stream';
 }
 
-// Two levels deep: deep enough for Desktop/<project>/file, shallow enough
-// not to walk the whole profile on every request.
+// Real filenames are "מושיק_אוחנה_קורות_חיים.pdf" and he asks for
+// "קורות חיים". A plain substring test fails on that, purely because of the
+// separators — which is exactly how the first live attempt came back empty
+// on a file that was sitting right there in Downloads. So: flatten
+// _ - . , ( ) to spaces on BOTH sides, then match word by word in any order.
+function _norm(s) {
+  return String(s).toLowerCase()
+    .replace(/[_\-.,()\[\]{}'"`]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _lev(a, b) {
+  const m = a.length, n = b.length;
+  if (!m || !n) return Math.max(m, n);
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+// Scored rather than filtered: a weak match still beats "לא נמצא", and the
+// ranking is what decides. Returns [] only when nothing resembles the query.
+function _scoreName(base, qNorm, qTokens) {
+  const nb = _norm(base);
+  const stem = _norm(path.basename(base, path.extname(base)));
+  if (stem === qNorm) return 1000;               // exact name
+  if (nb.includes(qNorm)) return 800;            // the whole phrase appears
+  if (!qTokens.length) return 0;
+
+  const words = nb.split(' ').filter(Boolean);
+  let hit = 0, fuzzy = 0;
+  for (const t of qTokens) {
+    if (words.some(w => w === t)) { hit++; continue; }
+    if (words.some(w => w.startsWith(t) || t.startsWith(w))) { hit++; continue; }
+    if (nb.includes(t)) { hit++; continue; }
+    // A typo or a different inflection shouldn't cost him the file.
+    if (words.some(w => w.length > 3 && _lev(w, t) <= (t.length > 6 ? 2 : 1))) { fuzzy++; }
+  }
+  if (!hit && !fuzzy) return 0;
+  const covered = (hit + fuzzy * 0.5) / qTokens.length;
+  if (covered < 0.5) return 0;                   // barely related — drop it
+  return Math.round(covered * 500) + hit * 10;
+}
+
+// Two levels deep: enough for Desktop/<project>/file, not so much that every
+// request walks the whole profile.
 function _searchFiles(q, maxDepth = 2) {
+  const qNorm = _norm(q);
+  const qTokens = qNorm.split(' ').filter(Boolean);
   const out = [];
   const walk = (dir, label, depth) => {
     let entries = [];
@@ -127,17 +179,28 @@ function _searchFiles(q, maxDepth = 2) {
       if (e.name.startsWith('.') || SKIP_DIRS.has(e.name)) continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) { if (depth < maxDepth) walk(full, label, depth + 1); continue; }
-      if (!e.name.toLowerCase().includes(q)) continue;
-      try { const st = fs.statSync(full); out.push({ full, base: e.name, size: st.size, mtime: st.mtimeMs, where: label }); } catch {}
+      const score = _scoreName(e.name, qNorm, qTokens);
+      if (!score) continue;
+      try { const st = fs.statSync(full); out.push({ full, base: e.name, size: st.size, mtime: st.mtimeMs, where: label, score }); } catch {}
     }
   };
   for (const r of FILE_ROOTS) walk(r.dir, r.label, 0);
-  // Exact-ish matches first, then most recent — the newest file with that
-  // name in it is nearly always the one he means.
-  return out.sort((a, b) => {
-    const ax = a.base.toLowerCase() === q ? 0 : 1, bx = b.base.toLowerCase() === q ? 0 : 1;
-    return ax - bx || b.mtime - a.mtime;
-  });
+  return out.sort((a, b) => b.score - a.score || b.mtime - a.mtime);
+}
+
+// Newest files across the roots — the fallback when a search finds nothing,
+// so he gets something to pick from instead of a flat "not found".
+function _recentFiles(n = 6) {
+  const all = [];
+  for (const r of FILE_ROOTS.slice(0, 3)) {          // his folders, not the repo
+    let entries = [];
+    try { entries = fs.readdirSync(r.dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isFile() || e.name.startsWith('.')) continue;
+      try { const st = fs.statSync(path.join(r.dir, e.name)); all.push({ name: e.name, kb: Math.round(st.size / 1024), where: r.label, mtime: st.mtimeMs }); } catch {}
+    }
+  }
+  return all.sort((a, b) => b.mtime - a.mtime).slice(0, n);
 }
 
 // ── Action handlers ──────────────────────────────────────────────
@@ -238,10 +301,14 @@ $i.Save('${jpg.replace(/\\/g, '\\\\')}', $c, $p); $i.Dispose();`, 30000).catch((
     const q = String(name || '').trim().toLowerCase();
     if (!q) throw new Error('no file name');
     const hits = _searchFiles(q);
-    if (!hits.length) throw new Error(`no file matching "${name}"`);
+    // A dead end is the thing to avoid: show what is actually there instead
+    // of only saying no.
+    if (!hits.length) return { notFound: true, query: String(name).trim(), recent: _recentFiles(6) };
 
-    // Ambiguous → hand back the options rather than guessing wrong.
-    if (hits.length > 1 && !index) {
+    // Only ask when it is genuinely a toss-up. If the best match clearly
+    // beats the runner-up, sending it beats making him answer a question.
+    const clearWinner = hits.length === 1 || hits[0].score >= 800 || hits[0].score - hits[1].score >= 150;
+    if (!clearWinner && !index) {
       return { ambiguous: true, matches: hits.slice(0, 8).map(h => ({ name: h.base, kb: Math.round(h.size / 1024), where: h.where })) };
     }
     const pick = hits[Math.max(0, (parseInt(index, 10) || 1) - 1)] || hits[0];

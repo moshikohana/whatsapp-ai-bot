@@ -5973,6 +5973,14 @@ async function route(chatId, text, chat) {
           await botSend(chat, `❌ ${r.error}`);
           return;
         }
+        if (r.data.notFound) {
+          await botSend(chat, `🔍 *לא מצאתי "${r.data.query}"* בהורדות / שולחן העבודה / מסמכים / תיקיית הבוט.\n\n` +
+            (r.data.recent?.length
+              ? `📂 *הקבצים האחרונים שלך:*\n` + r.data.recent.map(f => `• *${f.name}* _(${f.kb}KB · ${f.where})_`).join('\n') +
+                `\n\n_נסה מילה אחת מתוך השם._`
+              : '_נסה מילה אחת מתוך שם הקובץ._'));
+          return;
+        }
         if (r.data.ambiguous) {
           await botSend(chat, `🔍 *נמצאו ${r.data.matches.length} קבצים:*\n\n` +
             r.data.matches.map((m, i) => `${i + 1}. *${m.name}* _(${m.kb}KB · ${m.where})_`).join('\n') +
