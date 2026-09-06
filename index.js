@@ -5697,7 +5697,7 @@ async function route(chatId, text) {
         try { await botSend(chat, '❌ בניית המוקד נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
       }
     })();
-    return '📬 מרכיב את המוקד — סוקר מה קרה בקבוצות... שנייה.';
+    return '🎯 בודק מה דורש אותך בקבוצות... (עד ~45 שניות)';
   }
 
   // ─── מוקד quick actions — "1 הצג", "הצג 1", or just "הצג" ────────

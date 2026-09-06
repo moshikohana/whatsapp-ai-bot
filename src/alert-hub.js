@@ -131,72 +131,81 @@ function dueForDigest() {
 }
 
 const MAX_DIGEST_ITEMS = 8;
-const MAX_POOL_CHARS = 9000;
+const MAX_POOL_CHARS = 5000;
+const EXTRACT_TIMEOUT_MS = 45000;
 
-// Summarize what actually HAPPENED in the monitored groups since the last
-// digest. The keyword list only covers 17 Kellner/בג"ץ terms, so the original
-// digest was blind to everything else — it missed a whole night of political
-// drama and the morning's IDF strikes (2026-09-06). This reads the real group
-// traffic instead of a keyword filter.
-async function _extractStories(pool) {
-  if (!pool || pool.length < 5) return [];
-  const byGroup = {};
-  for (const m of pool) (byGroup[m.group] = byGroup[m.group] || []).push(m);
+// Only messages that could plausibly matter to a Likud MK's spokesperson.
+// Pre-filtering keeps the prompt small (fast + cheap) and keeps the digest
+// focused on his job instead of duplicating סריקה's general news picture.
+const REL_RE = /קלנר|ליכוד|נתניהו|קואליצי|אופוזיצי|כנסת|בחירות|פריימריז|שמאל|ימין|בג"?ץ|בגצ|חקיקה|הצעת חוק|ועדת|מפלג|גולן|לפיד|בנט|ליברמן|איזנקוט|עבאס|סמוטריץ|בן ?גביר|ש"ס|יהדות התורה|דגל התורה|צה"?ל|מילואים|גיוס|חמאס|חיזבאללה|התנחל|ריבונות|שב"?כ|היועמ"?ש/;
+
+// מוקד = "what needs YOU" (the owner picked this over a general news recap:
+// סריקה already does the broad picture). Returns spokesperson-actionable
+// items only: response openings, attacks to answer, rival messaging.
+async function _extractActionable(pool) {
+  if (!pool || pool.length < 3) return [];
+  const relevant = pool.filter(m => REL_RE.test(m.body || ''));
+  if (relevant.length < 3) return [];
+
   let corpus = '';
-  for (const [grp, msgs] of Object.entries(byGroup)) {
-    for (const m of msgs.slice(-25)) {
-      const line = `[${grp}] ${(m.body || '').replace(/\s+/g, ' ').substring(0, 180)}\n`;
-      if (corpus.length + line.length > MAX_POOL_CHARS) break;
-      corpus += line;
-    }
-    if (corpus.length >= MAX_POOL_CHARS) break;
+  for (const m of relevant.slice(-120)) {
+    const line = `[${m.group}] ${(m.body || '').replace(/\s+/g, ' ').substring(0, 170)}\n`;
+    if (corpus.length + line.length > MAX_POOL_CHARS) break;
+    corpus += line;
   }
   if (!corpus.trim()) return [];
+
   try {
-    const j = await require('./claude').classifyJSON(corpus, {
-      system: 'אתה עורך חדשות שמסכם שיח בקבוצות וואטסאפ פוליטיות/חדשותיות ישראליות. ' +
-        'קבל אוסף הודעות והחזר JSON בלבד: {"stories":[{"title":"כותרת קצרה","summary":"משפט אחד עובדתי","importance":1-5}]}. ' +
-        'עד 6 סיפורים, מהחשוב לפחות. אל תמציא — רק מה שמופיע בהודעות. בעברית.',
-      maxTokens: 900,
+    const call = require('./claude').classifyJSON(corpus, {
+      system: 'אתה יועץ תקשורת של ח"כ אריאל קלנר (הליכוד). קבל הודעות מקבוצות פוליטיות והחזר JSON בלבד: ' +
+        '{"items":[{"type":"opportunity|attack|rival","title":"כותרת קצרה","why":"למה זה נוגע לקלנר - משפט","action":"מה לעשות - משפט קצר","urgency":1-5}]}. ' +
+        'עד 5 פריטים, רק מה שבאמת דורש את קלנר: הזדמנות להגיב/להוביל, ביקורת שצריך לענות עליה, או מסר של יריבים שצובר תאוצה. ' +
+        'אל תכלול חדשות כלליות שלא נוגעות לו. אם אין כלום רלוונטי — החזר {"items":[]}. בעברית.',
+      maxTokens: 800,
     });
-    const st = (j && Array.isArray(j.stories)) ? j.stories : [];
-    return st.filter(s => s && s.title).sort((a, b) => (b.importance || 0) - (a.importance || 0)).slice(0, 6);
-  } catch (e) { return []; }
+    // Hard timeout — a stalled LLM call used to hang the whole digest silently.
+    const j = await Promise.race([
+      call,
+      new Promise(res => setTimeout(() => res(null), EXTRACT_TIMEOUT_MS)),
+    ]);
+    const items = (j && Array.isArray(j.items)) ? j.items : [];
+    return items.filter(i => i && i.title)
+      .sort((a, b) => (b.urgency || 0) - (a.urgency || 0)).slice(0, 5);
+  } catch { return []; }
 }
 
 // ── Build the digest ─────────────────────────────────────────────
-// Returns null when there's nothing to send, else { text, actions }.
-// `pool` = recent group messages (from index.js's _msgCache) so the digest
-// reports what happened, not just what tripped a keyword.
+// { text, actions } or null. `pool` = recent group messages from index.js.
 async function buildDigest(pool) {
   const items = pending.slice();
   const clusters = _cluster(items);
-  const stories = await _extractStories(pool);
-  if (!clusters.length && !stories.length) return null;
+  const focus = await _extractActionable(pool);
+  if (!clusters.length && !focus.length) return null;
 
   const hhmm = ts => {
     try { return new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' }); }
     catch { return ''; }
   };
   const sinceTxt = lastDigestAt ? `מאז ${hhmm(lastDigestAt)}` : 'מהתקופה האחרונה';
-  let out = `📬 *מוקד* · ${hhmm(Date.now())}\n_${sinceTxt} · ${(pool || []).length} הודעות נסרקו_\n${'━'.repeat(18)}`;
+  let out = `🎯 *מוקד — מה דורש אותך* · ${hhmm(Date.now())}\n_${sinceTxt}_\n${'━'.repeat(18)}`;
 
-  // 1) What actually happened
-  if (stories.length) {
-    out += `\n\n📰 *מה קרה*`;
-    stories.forEach(s => {
-      const dot = (s.importance || 0) >= 4 ? '🔴' : (s.importance || 0) >= 3 ? '🟠' : '⚪';
-      out += `\n\n${dot} *${_snip(s.title, 70)}*\n${_snip(s.summary || '', 150)}`;
-    });
-  }
-
-  // 2) Keyword-flagged items — these keep the numbered actions
+  const ICON = { opportunity: '🟢 הזדמנות', attack: '🔴 ביקורת', rival: '🟠 יריבים' };
   const actions = [];
-  const shown = clusters.slice(0, MAX_DIGEST_ITEMS);
+  let n = 0;
+
+  focus.forEach(f => {
+    n++;
+    actions.push({ n, topic: _snip(`${f.title} — ${f.why || ''}`, 90), keyword: f.title, msgIds: [] });
+    const tag = ICON[f.type] || '⚪ לתשומת לב';
+    out += `\n\n*${n}.* ${tag}${(f.urgency || 0) >= 4 ? ' ‼️' : ''}\n*${_snip(f.title, 70)}*\n${_snip(f.why || '', 120)}`;
+    if (f.action) out += `\n💡 _${_snip(f.action, 100)}_`;
+  });
+
+  const shown = clusters.slice(0, MAX_DIGEST_ITEMS - n);
   if (shown.length) {
-    out += `\n${'━'.repeat(18)}\n🔑 *סומן עבורך (${clusters.length})*`;
-    shown.forEach((c, i) => {
-      const n = i + 1;
+    out += `\n${'━'.repeat(18)}\n🔑 *סומן במילות מפתח*`;
+    shown.forEach(c => {
+      n++;
       const where = c.groups.length > 1 ? `${c.groups.length} קבוצות` : _snip(c.groups[0] || c.rep.group || '', 22);
       actions.push({
         n,
@@ -204,11 +213,11 @@ async function buildDigest(pool) {
         keyword: c.rep.keyword,
         msgIds: c.items.map(it => ({ msgId: it.msgId, chatId: it.chatId })).filter(x => x.msgId).slice(0, 3),
       });
-      out += `\n\n*${n}.* ${c.groups.length >= 2 ? '🔥 ' : ''}${c.rep.keyword} · 📍 ${where} · 🕐 ${hhmm(c.rep.ts)}\n${_snip(c.rep.preview, 130)}`;
+      out += `\n\n*${n}.* ${c.rep.keyword} · 📍 ${where} · 🕐 ${hhmm(c.rep.ts)}\n${_snip(c.rep.preview, 120)}`;
     });
-    if (clusters.length > shown.length) out += `\n\n_+${clusters.length - shown.length} נוספים_`;
-    out += `\n${'━'.repeat(18)}\n*פעולות:* ענה במספר + \n📄 *הצג* · ✍️ *תגובה* · 📤 *הפצה* · 🔕 *שקט*\n_לדוגמה:_ *1 הצג*`;
   }
+
+  out += `\n${'━'.repeat(18)}\n*פעולות:* ענה במספר +\n✍️ *תגובה* · 📤 *הפצה* · 📄 *הצג* · 🔕 *שקט*\n_לדוגמה:_ *1 תגובה*\n\n_(לתמונה הרחבה של החדשות — שלח *סריקה*)_`;
 
   return { text: out.trim(), actions };
 }
