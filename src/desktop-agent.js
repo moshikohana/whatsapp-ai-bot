@@ -41,6 +41,8 @@ const ACTIONS = {
   downloads:  { desc: 'הורדות אחרונות', publicFacing: false },
   claude_ask:   { desc: 'שליחת פרומפט ל-Claude במחשב', publicFacing: false },
   claude_queue: { desc: 'מה ממתין לתשובה', publicFacing: false },
+  send_file:    { desc: 'קבלת קובץ מהמחשב', publicFacing: false },
+  save_file:    { desc: 'שמירת קובץ למחשב', publicFacing: false },
   // Reserved for when publishing is enabled — declared so the interface can
   // show them, but the handler refuses until `publishing.enabled` is true.
   publish:    { desc: 'פרסום לרשת (מושבת)', publicFacing: true },
@@ -207,9 +209,22 @@ function getHelp() {
 ` +
     `• *קלוד <מה שרצית>* — נכנס ישירות לשיחת הפיתוח הפתוחה במחשב
 ` +
+    `• *תמונה + "קלוד <שאלה>"* — צילום מסך של תקלה נכנס יחד עם הבקשה
+` +
     `• *קלוד?* — מה עדיין ממתין לתשובה
 ` +
     `_התשובה חוזרת לכאן מעצמה, גם אחרי כמה דקות._
+
+` +
+    `📎 *קבצים*
+` +
+    `• *סוכן שלח <שם קובץ>* — מביא אותו מהמחשב לוואטסאפ
+` +
+    `• *סוכן שלח <שם> #2* — אם נמצאו כמה, לבחור מהרשימה
+` +
+    `• *סוכן שמור* — שולח קובץ בוואטסאפ ואז זה, והוא נוחת ב-Downloads
+` +
+    `_מחפש ב: הורדות · שולחן העבודה · מסמכים · תיקיית הבוט_
 
 ` +
     `👁️ *לראות מה קורה במחשב*

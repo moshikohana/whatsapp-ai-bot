@@ -1427,7 +1427,11 @@ registerToolHandlers({
 // ─── Express ─────────────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+// maxHttpBufferSize is set explicitly: socket.io defaults to 1MB, and the
+// desktop agent ships whole files (and screenshots) as base64 over this same
+// socket. Over the default the connection is dropped mid-transfer with no
+// visible error — a silent failure exactly where it hurts.
+const io = new Server(server, { maxHttpBufferSize: 50 * 1024 * 1024 });
 // Desktop-agent bridge rides the same socket.io server (no extra port).
 try {
   const _da = require('./src/desktop-agent');
@@ -3036,6 +3040,9 @@ const GROUP_SUGGEST_THRESHOLD = 30;                 // msgs/24h to qualify
 const GROUP_SUGGEST_COOLDOWN_MS = 14 * 24 * 3600 * 1000; // re-ask window after "no"
 const _GROUP_SUGGEST_FILE = require('path').join(__dirname, 'data', 'group-suggest-state.json');
 const pendingGroupSuggest = new Map();              // ownerId → { candidates, expiresAt }
+// Last file/photo the owner sent, so "סוכן שמור" has something to act on.
+// The message is kept, not its bytes — downloaded only if he actually asks.
+let _agentLastMedia = null;                         // { msg, name, at }
 
 function _loadGroupSuggestState() {
   try { return JSON.parse(require('fs').readFileSync(_GROUP_SUGGEST_FILE, 'utf8')); }
@@ -3676,6 +3683,9 @@ ${rawBody}`;
     // Handle image messages
     if (msg.type === 'image' || msg.type === 'sticker') {
       const caption = rawBody.trim() || 'מה יש בתמונה?';
+      if (msg.type === 'image' && chatId === OWNER_ID) {
+        _agentLastMedia = { msg, name: `photo-${Date.now().toString(36)}.jpg`, at: Date.now() };
+      }
 
       // Remember this photo so a follow-up text ("מספור" / "1 שי 3 מיה") can
       // act on it without the owner having to resend the image.
@@ -3797,6 +3807,42 @@ ${rawBody}`;
         return;
       }
 
+      // ── תמונה + "קלוד ..." → נכנסת לשיחת הפיתוח עם התמונה ──
+      // Handled here rather than in route(): route only receives text, and
+      // the image is the whole point — most of what he reports is a
+      // screenshot of the thing that went wrong.
+      const _claudeCap = caption.match(/^(?:קלוד|claude)\s*(?:[:،,]\s*)?([\s\S]*)$/i);
+      if (_claudeCap && chatId === OWNER_ID) {
+        console.log(`📨 [${ts()}] 🖼️→🧠 קלוד + תמונה: ${caption.substring(0, 60)}`);
+        stats.received++;
+        log({ time: ts(), from: 'מושיקו', text: `🖼️ ${caption}`, direction: 'in' });
+        const chat = await msg.getChat();
+        await chat.sendStateTyping();
+        let out;
+        try {
+          const _m = await safeDownloadMedia(msg);
+          if (!_m || !_m.data) throw new Error('לא הצלחתי להוריד את התמונה מוואטסאפ');
+          const r = await require('./src/desktop-agent').run('claude_ask', {
+            prompt: (_claudeCap[1] || '').trim() || 'תסתכל על התמונה ותגיד לי מה אתה רואה',
+            image: _m.data, imageMime: _m.mimetype || 'image/jpeg',
+          }, 60000);
+          out = r.ok
+            ? `🧠 *התמונה + הבקשה נכנסו לשיחת הפיתוח* \`${r.data.id}\`\n\n_התשובה תגיע לכאן._`
+            : `❌ *לא הגיע למחשב* — ${r.error}`;
+          if (!r.ok) {
+            require('./src/diagnostics').record({
+              kind: 'agent_fail', input: caption, reason: `תמונה לא הגיעה למחשב — ${r.error}`,
+              hint: 'ודא ש-start-agent.bat רץ. בדיקה: *סוכן בדיקה*',
+            });
+          }
+        } catch (e) {
+          out = `❌ ${(e.message || '').substring(0, 100)}`;
+        }
+        await botSend(chat, out);
+        stats.sent++;
+        return;
+      }
+
       // ── If the caption is a WhatsApp/bot command, ignore the image and route as text ──
       // e.g. user sends a group screenshot with "סרוק לי את 50 ההודעות האחרונות בקבוצת X"
       const _isWACmd = caption.length > 5 && (
@@ -3835,6 +3881,7 @@ ${rawBody}`;
       const caption = rawBody.trim() || '';
       const fileName = msg._data?.filename || 'document';
       const ext = fileName.split('.').pop().toLowerCase();
+      if (chatId === OWNER_ID) _agentLastMedia = { msg, name: fileName, at: Date.now() };
 
       // Audio file → call recording handler
       if (AUDIO_EXTENSIONS.has(ext)) {
@@ -5910,6 +5957,60 @@ async function route(chatId, text, chat) {
       return '🪟 בודק מה פתוח...';
     }
 
+    // ── קבל קובץ מהמחשב ──
+    // "סוכן שלח נייר עמדה" — he names the file the way he thinks of it, not
+    // the way it is spelled on disk, so the agent substring-matches and hands
+    // back a numbered list when more than one thing fits.
+    const _sendM = rest.match(/^(?:שלח|תשלח|הבא|תביא|קובץ)\s+(.+?)\s*(?:#(\d+))?$/i);
+    if (_sendM) {
+      (async () => {
+        const r = await da.run('send_file', { name: _sendM[1].trim(), index: _sendM[2] }, 90000);
+        if (!r.ok) {
+          require('./src/diagnostics').record({
+            kind: 'agent_fail', input: rest, reason: `שליחת הקובץ נכשלה — ${r.error}`,
+            hint: 'ודא שהסוכן רץ (*סוכן בדיקה*) ושהקובץ נמצא בהורדות / שולחן העבודה / מסמכים.',
+          });
+          await botSend(chat, `❌ ${r.error}`);
+          return;
+        }
+        if (r.data.ambiguous) {
+          await botSend(chat, `🔍 *נמצאו ${r.data.matches.length} קבצים:*\n\n` +
+            r.data.matches.map((m, i) => `${i + 1}. *${m.name}* _(${m.kb}KB · ${m.where})_`).join('\n') +
+            `\n\n_לבחור:_ *סוכן שלח ${_sendM[1].trim()} #2*`);
+          return;
+        }
+        try {
+          const { MessageMedia } = require('whatsapp-web.js');
+          const media = new MessageMedia(r.data.mime, r.data.data, r.data.name);
+          await chat.sendMessage(media, { sendMediaAsDocument: true, caption: `📎 ${r.data.name} · ${r.data.sizeKB}KB` + BOT_MARKER });
+        } catch (e) {
+          await botSend(chat, `❌ הקובץ נמצא אבל השליחה נכשלה: ${(e.message || '').substring(0, 80)}`);
+        }
+      })();
+      return `🔍 מחפש "${_sendM[1].trim()}" במחשב...`;
+    }
+
+    // ── שמור קובץ למחשב ──
+    // Applies to the document/image he is replying to, or the last one he sent.
+    if (/^(שמור|תשמור|הורד|קח)$/i.test(rest)) {
+      (async () => {
+        const src = (_agentLastMedia && Date.now() - _agentLastMedia.at < 30 * 60 * 1000) ? _agentLastMedia : null;
+        if (!src) {
+          await botSend(chat, '📎 *לא מצאתי קובץ לשמור.*\n\n_שלח את הקובץ ואז כתוב_ *סוכן שמור*_, או שלח אותו עם הכיתוב_ *סוכן שמור*_._');
+          return;
+        }
+        // Downloaded on demand rather than cached: holding every incoming
+        // file as base64 would grow memory for something rarely used.
+        const media = await safeDownloadMedia(src.msg);
+        if (!media || !media.data) { await botSend(chat, '❌ לא הצלחתי להוריד את הקובץ מוואטסאפ. שלח אותו שוב.'); return; }
+        const r = await da.run('save_file', { name: src.name, data: media.data }, 90000);
+        await botSend(chat, r.ok
+          ? `💾 *נשמר במחשב*\n📁 ${r.data.dir}\n📎 ${r.data.saved} · ${r.data.kb}KB`
+          : `❌ ${r.error}`);
+      })();
+      return '💾 שומר במחשב...';
+    }
+
     if (/^(הורדות|downloads)$/i.test(rest)) {
       (async () => {
         const r = await da.run('downloads');
@@ -6386,7 +6487,12 @@ function helpMenu() {
 
 🧠 *לפתח את הבוט מהטלפון:*
 ├ *קלוד <מה שרצית>* — נכנס לשיחת הפיתוח הפתוחה במחשב
-└ *קלוד?* — מה עדיין ממתין לתשובה`;
+├ *תמונה + "קלוד <שאלה>"* — צילום מסך נכנס עם הבקשה
+└ *קלוד?* — מה עדיין ממתין לתשובה
+
+📎 *קבצים מהמחשב:*
+├ *סוכן שלח <שם קובץ>* — מביא אותו לוואטסאפ
+└ *סוכן שמור* — שולח קובץ, והוא נוחת ב-Downloads`;
 }
 
 // ─── What's New ─────────────────────────────────────────────────

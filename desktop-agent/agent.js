@@ -87,6 +87,59 @@ function ps(script, timeout = 30000) {
   });
 }
 
+// ── File lookup ──────────────────────────────────────────────────
+// He will ask for "נייר עמדה", not "נייר-עמדה-סופי-v3.docx". Substring match
+// over a few known roots, newest first, is what actually fits how he speaks.
+const MAX_FILE_BYTES = 32 * 1024 * 1024;   // WhatsApp rejects far bigger anyway
+const FILE_ROOTS = [
+  { dir: path.join(os.homedir(), 'Downloads'), label: 'הורדות' },
+  { dir: path.join(os.homedir(), 'Desktop'), label: 'שולחן העבודה' },
+  { dir: path.join(os.homedir(), 'Documents'), label: 'מסמכים' },
+  { dir: path.join(__dirname, '..'), label: 'תיקיית הבוט' },
+];
+const SKIP_DIRS = new Set(['node_modules', '.git', '.wwebjs_auth', '.wwebjs_cache', 'AppData']);
+
+function _mimeOf(name) {
+  const e = path.extname(name).toLowerCase();
+  return ({
+    '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+    '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+    '.txt': 'text/plain', '.csv': 'text/csv', '.json': 'application/json', '.md': 'text/markdown',
+    '.zip': 'application/zip',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xls': 'application/vnd.ms-excel',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.ppt': 'application/vnd.ms-powerpoint',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  })[e] || 'application/octet-stream';
+}
+
+// Two levels deep: deep enough for Desktop/<project>/file, shallow enough
+// not to walk the whole profile on every request.
+function _searchFiles(q, maxDepth = 2) {
+  const out = [];
+  const walk = (dir, label, depth) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name.startsWith('.') || SKIP_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { if (depth < maxDepth) walk(full, label, depth + 1); continue; }
+      if (!e.name.toLowerCase().includes(q)) continue;
+      try { const st = fs.statSync(full); out.push({ full, base: e.name, size: st.size, mtime: st.mtimeMs, where: label }); } catch {}
+    }
+  };
+  for (const r of FILE_ROOTS) walk(r.dir, r.label, 0);
+  // Exact-ish matches first, then most recent — the newest file with that
+  // name in it is nearly always the one he means.
+  return out.sort((a, b) => {
+    const ax = a.base.toLowerCase() === q ? 0 : 1, bx = b.base.toLowerCase() === q ? 0 : 1;
+    return ax - bx || b.mtime - a.mtime;
+  });
+}
+
 // ── Action handlers ──────────────────────────────────────────────
 const handlers = {
   async ping() {
@@ -142,12 +195,22 @@ $i.Save('${jpg.replace(/\\/g, '\\\\')}', $c, $p); $i.Dispose();`, 30000).catch((
   // execute anything itself — it writes a file and returns. Everything that
   // happens next is a human-supervised Claude session, which is precisely why
   // this belongs in the whitelist and isn't a shell escape.
-  async claude_ask({ prompt, id }) {
+  async claude_ask({ prompt, id, image, imageMime }) {
     const text = String(prompt || '').trim();
-    if (!text) throw new Error('empty prompt');
+    if (!text && !image) throw new Error('empty prompt');
     const reqId = String(id || Date.now().toString(36));
+
+    // A screenshot of the problem is how he actually reports bugs, so the
+    // bridge carries images too: the file is written next to the prompt and
+    // the JSON points at it, which is all a Claude session needs to read it.
+    let imagePath = null;
+    if (image) {
+      const ext = String(imageMime || '').includes('png') ? '.png' : '.jpg';
+      imagePath = path.join(INBOX, `${reqId}${ext}`);
+      fs.writeFileSync(imagePath, Buffer.from(String(image), 'base64'));
+    }
     fs.writeFileSync(path.join(INBOX, `${reqId}.json`),
-      JSON.stringify({ id: reqId, prompt: text, ts: Date.now() }, null, 2), 'utf8');
+      JSON.stringify({ id: reqId, prompt: text, image: imagePath, ts: Date.now() }, null, 2), 'utf8');
     let waiting = 0;
     try { waiting = fs.readdirSync(INBOX).filter(n => n.endsWith('.json')).length; } catch {}
     return { queued: true, id: reqId, waiting };
@@ -165,6 +228,44 @@ $i.Save('${jpg.replace(/\\/g, '\\\\')}', $c, $p); $i.Dispose();`, 30000).catch((
       }).filter(Boolean).sort((a, b) => a.ts - b.ts);
     } catch {}
     return { items };
+  },
+
+  // ── File transfer ──────────────────────────────────────────────
+  // Scoped to a few named roots on purpose. The agent runs as the user, so
+  // "read any path the bot asks for" would turn a WhatsApp message into
+  // read access to the whole disk.
+  async send_file({ name, index }) {
+    const q = String(name || '').trim().toLowerCase();
+    if (!q) throw new Error('no file name');
+    const hits = _searchFiles(q);
+    if (!hits.length) throw new Error(`no file matching "${name}"`);
+
+    // Ambiguous → hand back the options rather than guessing wrong.
+    if (hits.length > 1 && !index) {
+      return { ambiguous: true, matches: hits.slice(0, 8).map(h => ({ name: h.base, kb: Math.round(h.size / 1024), where: h.where })) };
+    }
+    const pick = hits[Math.max(0, (parseInt(index, 10) || 1) - 1)] || hits[0];
+    if (pick.size > MAX_FILE_BYTES) {
+      throw new Error(`file is ${Math.round(pick.size / 1048576)}MB — over the ${Math.round(MAX_FILE_BYTES / 1048576)}MB limit`);
+    }
+    const buf = fs.readFileSync(pick.full);
+    return { name: pick.base, mime: _mimeOf(pick.base), sizeKB: Math.round(pick.size / 1024), data: buf.toString('base64') };
+  },
+
+  // Incoming: always lands in Downloads, never a caller-chosen path.
+  async save_file({ name, data }) {
+    if (!data) throw new Error('no data');
+    const safe = path.basename(String(name || 'file')).replace(/[<>:"|?*\x00-\x1f]/g, '_') || 'file';
+    const buf = Buffer.from(String(data), 'base64');
+    if (buf.length > MAX_FILE_BYTES) throw new Error('file too large');
+    const dir = path.join(os.homedir(), 'Downloads');
+    let out = path.join(dir, safe);
+    if (fs.existsSync(out)) {                       // never clobber
+      const ext = path.extname(safe), stem = path.basename(safe, ext);
+      out = path.join(dir, `${stem}-${Date.now().toString(36)}${ext}`);
+    }
+    fs.writeFileSync(out, buf);
+    return { saved: path.basename(out), dir, kb: Math.round(buf.length / 1024) };
   },
 
   async open_url({ url }) {
