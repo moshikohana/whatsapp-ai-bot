@@ -309,7 +309,21 @@ $i.Save('${jpg.replace(/\\/g, '\\\\')}', $c, $p); $i.Dispose();`, 30000).catch((
     // beats the runner-up, sending it beats making him answer a question.
     const clearWinner = hits.length === 1 || hits[0].score >= 800 || hits[0].score - hits[1].score >= 150;
     if (!clearWinner && !index) {
-      return { ambiguous: true, matches: hits.slice(0, 8).map(h => ({ name: h.base, kb: Math.round(h.size / 1024), where: h.where })) };
+      // Report the true total and where we looked, not just the page shown:
+      // "3 out of 22" tells him to narrow the query, "3 of 3" tells him the
+      // file simply isn't there.
+      const byFolder = {};
+      for (const hit of hits) byFolder[hit.where] = (byFolder[hit.where] || 0) + 1;
+      return {
+        ambiguous: true,
+        total: hits.length,
+        folders: FILE_ROOTS.map(r => r.label),
+        breakdown: Object.entries(byFolder).map(([where, n]) => ({ where, n })),
+        matches: hits.slice(0, 8).map(h => ({
+          name: h.base, kb: Math.round(h.size / 1024), where: h.where,
+          when: new Date(h.mtime).toISOString().slice(0, 10),
+        })),
+      };
     }
     const pick = hits[Math.max(0, (parseInt(index, 10) || 1) - 1)] || hits[0];
     if (pick.size > MAX_FILE_BYTES) {

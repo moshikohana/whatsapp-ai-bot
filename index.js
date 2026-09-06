@@ -5982,9 +5982,16 @@ async function route(chatId, text, chat) {
           return;
         }
         if (r.data.ambiguous) {
-          await botSend(chat, `🔍 *נמצאו ${r.data.matches.length} קבצים:*\n\n` +
-            r.data.matches.map((m, i) => `${i + 1}. *${m.name}* _(${m.kb}KB · ${m.where})_`).join('\n') +
-            `\n\n_לבחור:_ *סוכן שלח ${_sendM[1].trim()} #2*`);
+          const _total = r.data.total || r.data.matches.length;
+          const _shown = r.data.matches.length;
+          const _bd = (r.data.breakdown || []).map(b => `${b.where} (${b.n})`).join(' · ');
+          await botSend(chat,
+            `🔍 *נמצאו ${_total} קבצים* התואמים ל-"${_sendM[1].trim()}"` +
+            (_shown < _total ? ` — מציג ${_shown} הראשונים` : '') + `\n` +
+            (_bd ? `📂 ${_bd}\n` : '') + `\n` +
+            r.data.matches.map((m, i) => `${i + 1}. *${m.name}*\n    _${m.kb}KB · ${m.where} · ${m.when || ''}_`).join('\n') +
+            `\n\n_לבחור:_ *סוכן שלח ${_sendM[1].trim()} #2*` +
+            (r.data.folders?.length ? `\n_חיפשתי ב: ${r.data.folders.join(' · ')}_` : ''));
           return;
         }
         try {
