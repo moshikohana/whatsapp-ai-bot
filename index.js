@@ -1429,7 +1429,20 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 // Desktop-agent bridge rides the same socket.io server (no extra port).
-try { require('./src/desktop-agent').attach(io); } catch (e) { console.warn('desktop-agent attach: ' + e.message); }
+try {
+  const _da = require('./src/desktop-agent');
+  _da.attach(io);
+  // Claude's answer comes back on its own clock, minutes after the question,
+  // so it arrives as a push rather than as a reply to a pending request.
+  _da.onPush(async ({ kind, id, text }) => {
+    if (kind !== 'claude') return;
+    try {
+      const chat = await client.getChatById(OWNER_ID);
+      const head = `🧠 *תשובה מהמחשב* \`${id || ''}\`\n${'━'.repeat(18)}\n\n`;
+      await botSend(chat, head + text);
+    } catch (e) { logger.warn('claude push failed: ' + (e.message || '').substring(0, 80)); }
+  });
+} catch (e) { console.warn('desktop-agent attach: ' + e.message); }
 app.use(express.static(path.join(__dirname, 'public')));
 
 let botStatus = 'disconnected';
@@ -5789,6 +5802,46 @@ async function route(chatId, text, chat) {
     return '🔢 ממספר את הפרצופים בתמונה האחרונה... שנייה.';
   }
 
+  // ─── 🧠 גשר ל-Claude Code שבמחשב ─────────────────────────────────
+  // "קלוד <משהו>" מהטלפון נכנס לשיחת הפיתוח שכבר פתוחה במחשב — אותו הקשר,
+  // בלי להתחיל מאפס. התשובה חוזרת לבד דרך agent:push, כי היא יכולה לקחת
+  // דקות ארוכות ואין טעם להחזיק בקשה פתוחה כל הזמן הזה.
+  {
+    const _t = text.trim();
+    const _cm = _t.match(/^(?:קלוד|claude)\s*(?:[:،,]\s*)?([\s\S]*)$/i);
+    if (_cm && chatId === OWNER_ID) {
+      const da = require('./src/desktop-agent');
+      const _body = (_cm[1] || '').trim().replace(/^\?+$/, '');
+      const _isQuery = /^\?+$/.test((_cm[1] || '').trim()) || /^(תור|מה ממתין|status)$/i.test(_body);
+
+      // Awaited rather than fire-and-forget: writing the file takes
+      // milliseconds, and he should learn immediately if the PC is off —
+      // that is the one failure mode that matters here.
+      if (_isQuery || !_body) {
+        const r = await da.run('claude_queue', {}, 20000);
+        if (!r.ok) return `❌ ${r.error}`;
+        const items = r.data.items || [];
+        return items.length
+          ? `🧠 *ממתין לתשובה* (${items.length})\n\n` + items.map((x, i) =>
+              `${i + 1}. "${x.prompt}"\n   _נשלח ${new Date(x.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' })}_`).join('\n\n')
+          : '🧠 *אין פרומפטים ממתינים* — הכל נענה.\n\n_לשלוח חדש:_ *קלוד <מה שרצית>*';
+      }
+
+      const r = await da.run('claude_ask', { prompt: _body }, 20000);
+      if (!r.ok) {
+        require('./src/diagnostics').record({
+          kind: 'agent_fail', input: _body,
+          reason: `הפרומפט לא הגיע למחשב — ${r.error}`,
+          hint: 'ודא ש-start-agent.bat רץ במחשב. בדיקה מהירה: *סוכן בדיקה*',
+        });
+        return `❌ *לא הגיע למחשב* — ${r.error}\n\n_ודא ש-start-agent.bat רץ. בדיקה:_ *סוכן בדיקה*`;
+      }
+      return `🧠 *נכנס לשיחת הפיתוח* \`${r.data.id}\`` +
+        (r.data.waiting > 1 ? `\n_לפניך ${r.data.waiting - 1} בתור._` : '') +
+        `\n\n_התשובה תגיע לכאן כשתהיה מוכנה._`;
+    }
+  }
+
   // ─── 🖥️ סוכן שולחני ──────────────────────────────────────────────
   if (/^סוכן(?:\s|$)/i.test(text.trim())) {
     const da = require('./src/desktop-agent');
@@ -6322,7 +6375,6 @@ function helpMenu() {
 
 ⚡ *פקודות מיוחדות:*
 ├ /think [שאלה] — ניתוח מעמיק
-├ /code [משימה] — Claude Code
 ├ /תזכורת [דקות] [מה]
 ├ /נקה — אפס שיחה
 ├ /מה חדש — עדכונים אחרונים
@@ -6330,7 +6382,11 @@ function helpMenu() {
 
 🩺 *כשמשהו לא עבד:*
 ├ *למה* — מה בדיוק השתבש בפעם האחרונה ומה לעשות
-└ *תקלות* — היסטוריית התקלות, לפי סוג`;
+└ *תקלות* — היסטוריית התקלות, לפי סוג
+
+🧠 *לפתח את הבוט מהטלפון:*
+├ *קלוד <מה שרצית>* — נכנס לשיחת הפיתוח הפתוחה במחשב
+└ *קלוד?* — מה עדיין ממתין לתשובה`;
 }
 
 // ─── What's New ─────────────────────────────────────────────────

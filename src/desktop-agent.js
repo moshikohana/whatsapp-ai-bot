@@ -39,6 +39,8 @@ const ACTIONS = {
   lock:       { desc: 'נעילת המחשב', publicFacing: false },
   windows:    { desc: 'מה פתוח עכשיו', publicFacing: false },
   downloads:  { desc: 'הורדות אחרונות', publicFacing: false },
+  claude_ask:   { desc: 'שליחת פרומפט ל-Claude במחשב', publicFacing: false },
+  claude_queue: { desc: 'מה ממתין לתשובה', publicFacing: false },
   // Reserved for when publishing is enabled — declared so the interface can
   // show them, but the handler refuses until `publishing.enabled` is true.
   publish:    { desc: 'פרסום לרשת (מושבת)', publicFacing: true },
@@ -53,6 +55,10 @@ const DEFAULTS = {
 let cfg = null;
 let agents = new Map();             // socketId → { name, connectedAt, socket }
 const pending = new Map();          // requestId → { resolve, timer }
+const pushHandlers = [];            // for replies that arrive on their own clock
+
+// index.js registers here to forward agent-initiated messages to the owner.
+function onPush(cb) { if (typeof cb === 'function') pushHandlers.push(cb); }
 
 function loadConfig() {
   if (cfg) return cfg;
@@ -92,6 +98,17 @@ function attach(io) {
       logger.info(`🖥️ Desktop agent connected: ${name}`);
       _log({ event: 'connect', agent: name });
       if (typeof ack === 'function') ack({ ok: true, actions: Object.keys(ACTIONS) });
+    });
+
+    // Unsolicited push from the agent — a Claude answer arriving minutes
+    // after the question, long past the request/response timeout. Only from
+    // an already-authenticated agent socket.
+    socket.on('agent:push', (msg = {}) => {
+      if (!agents.has(socket.id)) return;
+      const text = String(msg.text || '').trim();
+      if (!text) return;
+      _log({ event: 'push', kind: msg.kind || 'unknown', chars: text.length });
+      for (const cb of pushHandlers) { try { cb({ kind: msg.kind || 'unknown', id: msg.id, text }); } catch (_) {} }
     });
 
     socket.on('agent:result', (res = {}) => {
@@ -186,6 +203,15 @@ function getHelp() {
     `${'━'.repeat(18)}
 
 ` +
+    `🧠 *לעבוד על הבוט מהטלפון*
+` +
+    `• *קלוד <מה שרצית>* — נכנס ישירות לשיחת הפיתוח הפתוחה במחשב
+` +
+    `• *קלוד?* — מה עדיין ממתין לתשובה
+` +
+    `_התשובה חוזרת לכאן מעצמה, גם אחרי כמה דקות._
+
+` +
     `👁️ *לראות מה קורה במחשב*
 ` +
     `• *סוכן צלם* — צילום מסך מלא (נשלח כקובץ, ללא דחיסה)
@@ -240,6 +266,6 @@ function listAccounts() {
 }
 
 module.exports = {
-  attach, run, connected, isConnected, getStatus, getHelp, listAccounts,
+  attach, run, onPush, connected, isConnected, getStatus, getHelp, listAccounts,
   addAccount, removeAccount, setActiveAccount, setPublishing, loadConfig, ACTIONS,
 };

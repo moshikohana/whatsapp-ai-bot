@@ -43,6 +43,37 @@ socket.on('connect', () => {
   });
 });
 socket.on('disconnect', () => console.log('[..] Disconnected - reconnecting...'));
+
+// ── Claude bridge ────────────────────────────────────────────────
+// The whole point of this agent is that the owner can keep improving the bot
+// from his phone. A prompt sent in WhatsApp lands as a file in inbox/, the
+// Claude Code session already open on this PC picks it up and continues the
+// SAME conversation (full context, no cold start), and drops its answer in
+// outbox/ — which we watch here and push back to WhatsApp.
+const BRIDGE = fileCfg.bridgeDir || path.join(__dirname, '..', '.claude-bridge');
+const INBOX = path.join(BRIDGE, 'inbox');
+const OUTBOX = path.join(BRIDGE, 'outbox');
+for (const d of [BRIDGE, INBOX, OUTBOX]) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
+console.log('[..] Claude bridge: ' + BRIDGE);
+
+// Polled rather than fs.watch: on Windows the watch event fires before the
+// file is fully written, which truncates replies.
+setInterval(() => {
+  let names = [];
+  try { names = fs.readdirSync(OUTBOX).filter(n => n.endsWith('.txt')); } catch { return; }
+  for (const n of names) {
+    const f = path.join(OUTBOX, n);
+    let body = '';
+    try {
+      if (Date.now() - fs.statSync(f).mtimeMs < 1200) continue;   // still being written
+      body = fs.readFileSync(f, 'utf8');
+    } catch { continue; }
+    if (!body.trim()) continue;
+    try { fs.unlinkSync(f); } catch {}
+    console.log(`[<] reply ${n} (${body.length} chars)`);
+    socket.emit('agent:push', { kind: 'claude', id: n.replace(/\.txt$/, ''), text: body });
+  }
+}, 2000);
 socket.on('connect_error', (e) => console.log('[!] Connection error:', e.message));
 
 // Run a PowerShell snippet and resolve when it exits.
@@ -105,6 +136,35 @@ $i.Save('${jpg.replace(/\\/g, '\\\\')}', $c, $p); $i.Dispose();`, 30000).catch((
       try { fs.unlinkSync(out); } catch {}
     }
     return { image: buf.toString('base64'), mime, dims, sizeKB: Math.round(buf.length / 1024) };
+  },
+
+  // Hands a prompt to the Claude Code session running on this PC. It does NOT
+  // execute anything itself — it writes a file and returns. Everything that
+  // happens next is a human-supervised Claude session, which is precisely why
+  // this belongs in the whitelist and isn't a shell escape.
+  async claude_ask({ prompt, id }) {
+    const text = String(prompt || '').trim();
+    if (!text) throw new Error('empty prompt');
+    const reqId = String(id || Date.now().toString(36));
+    fs.writeFileSync(path.join(INBOX, `${reqId}.json`),
+      JSON.stringify({ id: reqId, prompt: text, ts: Date.now() }, null, 2), 'utf8');
+    let waiting = 0;
+    try { waiting = fs.readdirSync(INBOX).filter(n => n.endsWith('.json')).length; } catch {}
+    return { queued: true, id: reqId, waiting };
+  },
+
+  // What is still unanswered, so he isn't left guessing whether it arrived.
+  async claude_queue() {
+    let items = [];
+    try {
+      items = fs.readdirSync(INBOX).filter(n => n.endsWith('.json')).map(n => {
+        try {
+          const j = JSON.parse(fs.readFileSync(path.join(INBOX, n), 'utf8'));
+          return { id: j.id, prompt: String(j.prompt || '').substring(0, 80), ts: j.ts };
+        } catch { return null; }
+      }).filter(Boolean).sort((a, b) => a.ts - b.ts);
+    } catch {}
+    return { items };
   },
 
   async open_url({ url }) {
