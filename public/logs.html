@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>יומן הבוטים</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#100904; --bg2:#16100a; --bg3:#1d1510;
+    --card:rgba(28,18,10,.72); --card-h:rgba(38,26,16,.85);
+    --border:rgba(255,133,57,.09); --border-h:rgba(255,133,57,.28);
+    --text:#F5EDE0; --text2:#D9CCBC; --muted:#8A7060; --muted2:#6B5548;
+    --orange:#FF8539; --amber:#FFB347; --red:#E05252; --green:#4CC38A; --blue:#7EB8D4;
+    --radius:20px; --radius-sm:12px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Heebo',-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+  a{color:var(--orange)}
+
+  nav{position:sticky;top:0;z-index:100;background:rgba(16,9,4,.88);
+    backdrop-filter:blur(28px) saturate(1.5);-webkit-backdrop-filter:blur(28px) saturate(1.5);
+    border-bottom:1px solid var(--border);padding:13px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .nav-logo{width:36px;height:36px;background:var(--orange);border-radius:11px;display:grid;place-items:center;font-size:19px}
+  .nav-title{font-weight:800;font-size:1.02rem;letter-spacing:-.2px}
+  .nav-sub{font-size:.72rem;color:var(--muted);font-weight:500}
+  .nav-right{margin-right:auto;display:flex;align-items:center;gap:8px}
+  .btn{background:rgba(255,133,57,.1);border:1px solid var(--border-h);color:var(--amber);
+    font-family:inherit;font-weight:600;font-size:.78rem;padding:7px 13px;border-radius:999px;cursor:pointer}
+  .btn:hover{background:rgba(255,133,57,.18)}
+  .btn:focus-visible{outline:2px solid var(--orange);outline-offset:2px}
+  .btn.on{background:var(--orange);color:#180d04;border-color:var(--orange)}
+
+  .wrap{max-width:1080px;margin:0 auto;padding:22px 16px 70px;display:flex;flex-direction:column;gap:22px}
+
+  .verdict{border-radius:var(--radius);padding:20px 22px;border:1px solid var(--border);
+    background:var(--card);display:flex;flex-direction:column;gap:6px}
+  .verdict.good{border-color:rgba(76,195,138,.3);background:rgba(76,195,138,.07)}
+  .verdict.bad{border-color:rgba(224,82,82,.35);background:rgba(224,82,82,.08)}
+  .verdict h2{font-size:1.18rem;font-weight:800}
+  .verdict p{color:var(--text2);font-size:.92rem}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+  .card-head{padding:15px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+  .card-head .icon{width:32px;height:32px;border-radius:9px;background:rgba(255,133,57,.12);display:grid;place-items:center;font-size:16px}
+  .card-head h3{font-size:.99rem;font-weight:700}
+  .card-head .sub{font-size:.72rem;color:var(--muted);font-weight:500}
+  .pill{margin-right:auto;font-size:.7rem;font-weight:700;padding:4px 10px;border-radius:999px;
+    background:rgba(76,195,138,.12);color:var(--green);border:1px solid rgba(76,195,138,.2);white-space:nowrap}
+  .pill.warn{background:rgba(255,179,71,.1);color:var(--amber);border-color:rgba(255,179,71,.2)}
+  .pill.bad{background:rgba(224,82,82,.1);color:var(--red);border-color:rgba(224,82,82,.2)}
+  .card-body{padding:16px 18px}
+
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .stat{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px 8px;text-align:center}
+  .stat .n{font-size:1.32rem;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1}
+  .stat .l{font-size:.66rem;color:var(--muted);font-weight:600;margin-top:3px}
+  .stat.alert .n{color:var(--red)}
+  .stat.ok .n{color:var(--green)}
+
+  .note{font-size:.76rem;color:var(--muted2);margin-top:11px;line-height:1.5}
+
+  .events{display:flex;flex-direction:column;margin-top:6px;max-height:430px;overflow-y:auto}
+  .ev{display:grid;grid-template-columns:auto auto 1fr;gap:9px;align-items:baseline;
+    padding:8px 2px;border-bottom:1px solid rgba(255,133,57,.05);font-size:.83rem}
+  .ev:last-child{border-bottom:0}
+  .ev time{color:var(--muted2);font-size:.72rem;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .ev .lbl{font-weight:600;white-space:nowrap}
+  .ev .det{color:var(--muted);overflow-wrap:anywhere}
+  .ev.crash .lbl,.ev.error .lbl{color:var(--red)}
+  .ev.logout .lbl{color:var(--amber)}
+  .ev.ready .lbl,.ev.auth .lbl{color:var(--green)}
+  .ev.message_in .lbl{color:var(--blue)}
+
+  .filters{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 4px}
+  .chip{background:var(--bg3);border:1px solid var(--border);color:var(--text2);
+    font-family:inherit;font-size:.73rem;font-weight:600;padding:5px 11px;border-radius:999px;cursor:pointer}
+  .chip.on{background:var(--orange);color:#180d04;border-color:var(--orange)}
+
+  table{width:100%;border-collapse:collapse;font-size:.82rem}
+  td{padding:7px 4px;border-bottom:1px solid rgba(255,133,57,.05);vertical-align:top}
+  td:first-child{color:var(--muted2);white-space:nowrap;font-variant-numeric:tabular-nums;font-size:.74rem}
+  tr:last-child td{border-bottom:0}
+  .lvl-restart{color:var(--red);font-weight:700}
+
+  .empty{color:var(--muted2);font-size:.85rem;padding:14px 2px}
+  .scroller{overflow-x:auto}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-logo">📋</div>
+  <div>
+    <div class="nav-title">יומן הבוטים</div>
+    <div class="nav-sub" id="stamp">טוען…</div>
+  </div>
+  <div class="nav-right">
+    <button class="btn on" id="auto">רענון אוטומטי</button>
+    <button class="btn" id="refresh">רענן עכשיו</button>
+  </div>
+</nav>
+
+<div class="wrap">
+  <div class="verdict" id="verdict">
+    <h2>בודק…</h2>
+    <p>קורא את היומנים משני הבוטים.</p>
+  </div>
+
+  <div class="grid" id="cards"></div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="icon">🧠</div>
+      <div>
+        <h3>שומר הזיכרון</h3>
+        <div class="sub">בדיקה כל שתי דקות · מאתחל בוט לפני שהמערכת נופלת</div>
+      </div>
+    </div>
+    <div class="card-body scroller"><table id="guard"><tbody></tbody></table></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var KEY = new URLSearchParams(location.search).get('key') || '';
+  var FILTER = 'all';
+  var timer = null, auto = true;
+
+  var KIND_HE = {
+    all:'הכל', message_in:'הודעות', crash:'קריסות', error:'שגיאות',
+    logout:'ניתוקים', restart:'אתחולים', auth:'אימות', ready:'עלייה',
+    qr:'QR', agent:'הסוכן', guest_block:'חסימות', reply_out:'תשובות'
+  };
+
+  function t(ms){
+    if(!ms) return '—';
+    try{ return new Date(ms).toLocaleString('he-IL',{timeZone:'Asia/Jerusalem',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+    catch(e){ return ''; }
+  }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+  function verdict(d){
+    var el=document.getElementById('verdict');
+    var bad=[], warn=[];
+    d.instances.forEach(function(i){
+      if(i.day.crashes>5) bad.push(i.label+' קרס '+i.day.crashes+' פעמים היום');
+      else if(i.day.crashes>0) warn.push(i.label+' קרס '+i.day.crashes+' פעמים');
+      if(i.day.logouts>0) warn.push(i.label+' התנתק מוואטסאפ '+i.day.logouts+' פעמים');
+    });
+    var restarts=d.guard.filter(function(g){return g.level==='restart';}).length;
+    if(restarts) warn.push('שומר הזיכרון אתחל בוט '+restarts+' פעמים');
+
+    if(bad.length){
+      el.className='verdict bad';
+      el.innerHTML='<h2>⚠️ יש בעיה שדורשת טיפול</h2><p>'+bad.map(esc).join(' · ')+'</p>';
+    } else if(warn.length){
+      el.className='verdict';
+      el.innerHTML='<h2>🟡 עובד, אבל שווה להסתכל</h2><p>'+warn.map(esc).join(' · ')+'</p>';
+    } else {
+      el.className='verdict good';
+      el.innerHTML='<h2>✅ הכל תקין</h2><p>אין קריסות, אין ניתוקים, ואין אתחולים חריגים ב־24 השעות האחרונות.</p>';
+    }
+  }
+
+  function statsBlock(s){
+    function cell(n,l,cls){ return '<div class="stat '+(cls||'')+'"><div class="n">'+n+'</div><div class="l">'+l+'</div></div>'; }
+    return '<div class="stats">'+
+      cell(s.messages,'הודעות', s.messages?'ok':'')+
+      cell(s.crashes,'קריסות', s.crashes?'alert':'')+
+      cell(s.errors,'שגיאות', s.errors?'alert':'')+
+      cell(s.restarts,'אתחולים', s.restarts?'alert':'')+
+      '</div>';
+  }
+
+  function render(d){
+    document.getElementById('stamp').textContent='עודכן '+t(d.generated);
+    verdict(d);
+
+    var host=document.getElementById('cards');
+    host.innerHTML=d.instances.map(function(i){
+      var kinds={}; i.events.forEach(function(e){kinds[e.kind]=1;});
+      var chips=['all'].concat(Object.keys(kinds));
+      var state = i.day.crashes>5 ? '<span class="pill bad">קורס</span>'
+                : i.day.crashes>0 ? '<span class="pill warn">היו קריסות</span>'
+                : '<span class="pill">יציב</span>';
+
+      var evs=i.events.filter(function(e){return FILTER==='all'||e.kind===FILTER;}).slice(0,120);
+      var list = evs.length ? evs.map(function(e){
+        return '<div class="ev '+e.kind+'"><time>'+ (e.ts? t(e.ts).split(', ')[1] || t(e.ts) : '—') +'</time>'+
+               '<span class="lbl">'+e.icon+' '+esc(e.label)+'</span>'+
+               '<span class="det">'+esc(e.detail||'')+'</span></div>';
+      }).join('') : '<div class="empty">אין אירועים מסוג זה.</div>';
+
+      return '<div class="card"><div class="card-head">'+
+        '<div class="icon">'+(i.id==='wife'?'👤':'🤖')+'</div>'+
+        '<div><h3>'+esc(i.label)+'</h3><div class="sub">24 השעות האחרונות</div></div>'+state+
+        '</div><div class="card-body">'+
+        statsBlock(i.day)+
+        (i.day.undated ? '<div class="note">⏱️ '+i.day.undated+' שורות ביומן נכתבו בלי חותמת זמן, ולכן לא נספרות כאן — הן עדיין מופיעות ברשימה למטה.</div>' : '')+
+        '<div class="filters">'+chips.map(function(k){
+          return '<button class="chip'+(FILTER===k?' on':'')+'" data-k="'+k+'">'+(KIND_HE[k]||k)+'</button>';
+        }).join('')+'</div>'+
+        '<div class="events">'+list+'</div>'+
+        (i.diagnostics && i.diagnostics.length ? '<div class="note">🩺 '+i.diagnostics.length+' תקלות מתועדות שהמשתמש נתקל בהן — נגישות בוואטסאפ בפקודה <b>תקלות</b>.</div>' : '')+
+        '</div></div>';
+    }).join('');
+
+    Array.prototype.forEach.call(document.querySelectorAll('.chip'), function(c){
+      c.onclick=function(){ FILTER=c.getAttribute('data-k'); render(window.__last); };
+    });
+
+    var g=document.querySelector('#guard tbody');
+    g.innerHTML = d.guard.length ? d.guard.slice(0,25).map(function(r){
+      return '<tr><td>'+esc(r.time)+'</td><td'+(r.level==='restart'?' class="lvl-restart"':'')+'>'+
+             (r.level==='restart'?'אתחל: ':'')+esc(r.text)+'</td></tr>';
+    }).join('') : '<tr><td colspan="2" class="empty">אין רשומות עדיין.</td></tr>';
+  }
+
+  function load(){
+    fetch('/api/logs?key='+encodeURIComponent(KEY))
+      .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function(d){ window.__last=d; render(d); })
+      .catch(function(e){
+        document.getElementById('verdict').className='verdict bad';
+        document.getElementById('verdict').innerHTML='<h2>לא הצלחתי לקרוא את היומנים</h2><p>'+esc(e.message)+' — בדוק שהקישור כולל את המפתח.</p>';
+      });
+  }
+
+  document.getElementById('refresh').onclick=load;
+  document.getElementById('auto').onclick=function(){
+    auto=!auto; this.classList.toggle('on',auto);
+    if(auto){ timer=setInterval(load,15000); } else { clearInterval(timer); }
+  };
+  timer=setInterval(load,15000);
+  load();
+})();
+</script>
+</body>
+</html>

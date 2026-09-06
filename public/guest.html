@@ -1,301 +1,330 @@
 <!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>בוטי — העוזר האישי שלך</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;600;700&family=Frank+Ruhl+Libre:wght@500;700&family=Heebo:wght@500;700&display=swap">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
 <script src="/socket.io/socket.io.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --ground:#F2F3F7; --surface:#FFFFFF; --surface-2:#E9EBF2;
-    --ink:#1C2033; --muted:#666C82; --edge:#DCDFE9;
-    --accent:#C2456B; --accent-soft:#FBE9EF; --accent-ink:#8E2F4E;
-    --ok:#2E7D5B; --ok-soft:#E4F1EA; --off:#8A6520; --off-soft:#F5EEDF;
-    --shadow:0 1px 2px rgba(28,32,51,.06), 0 8px 24px rgba(28,32,51,.05);
+  :root{
+    --bg:#100904; --bg2:#16100a; --bg3:#1d1510; --bg4:#231a13;
+    --card:rgba(28,18,10,.72); --card-h:rgba(38,26,16,.85);
+    --border:rgba(255,133,57,.09); --border-h:rgba(255,133,57,.28);
+    --text:#F5EDE0; --text2:#D9CCBC; --muted:#8A7060; --muted2:#6B5548;
+    --orange:#FF8539; --orange2:#E06520; --orange-glow:rgba(255,133,57,.30);
+    --amber:#FFB347; --red:#E05252; --green:#4CC38A; --blue:#7EB8D4;
+    --radius:20px; --radius-sm:12px;
   }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --ground:#141726; --surface:#1D2136; --surface-2:#262B45;
-      --ink:#E7E9F2; --muted:#9AA0B8; --edge:#333955;
-      --accent:#E8829F; --accent-soft:#3A2333; --accent-ink:#F3B2C4;
-      --ok:#6FCBA0; --ok-soft:#1E3630; --off:#D8AE64; --off-soft:#352D1C;
-      --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
-    }
-  }
-  :root[data-theme="dark"] {
-    --ground:#141726; --surface:#1D2136; --surface-2:#262B45;
-    --ink:#E7E9F2; --muted:#9AA0B8; --edge:#333955;
-    --accent:#E8829F; --accent-soft:#3A2333; --accent-ink:#F3B2C4;
-    --ok:#6FCBA0; --ok-soft:#1E3630; --off:#D8AE64; --off-soft:#352D1C;
-    --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
-  }
-  * { box-sizing: border-box; }
-  html, body { margin:0; padding:0; }
-  body {
-    background: var(--ground); color: var(--ink);
-    font-family: 'Assistant','Segoe UI',system-ui,sans-serif;
-    font-size:17px; line-height:1.65; -webkit-text-size-adjust:100%;
-  }
-  img { max-width:100%; }
-  .page { max-width:660px; margin:0 auto; padding:36px 20px 72px; }
-  h1,h2 { font-family:'Frank Ruhl Libre',Georgia,serif; text-wrap:balance; margin:0; }
-  h1 { font-size:clamp(29px,7vw,40px); font-weight:700; line-height:1.2; }
-  h2 { font-size:clamp(20px,4.6vw,24px); font-weight:700; }
-  p { margin:0; }
-  .eyebrow { font-family:'Heebo',sans-serif; font-weight:700; font-size:12px;
-    letter-spacing:.14em; color:var(--accent); text-transform:uppercase; margin-bottom:9px; }
-  header { display:flex; flex-direction:column; gap:12px; margin-bottom:26px; }
-  .lede { font-size:18.5px; color:var(--muted); max-width:54ch; }
-  section { margin-top:44px; display:flex; flex-direction:column; gap:18px; }
-  .section-head { display:flex; flex-direction:column; gap:6px; }
-  .section-note { color:var(--muted); font-size:15.5px; }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:'Heebo',-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
 
-  /* ── The live panel: this is why the page exists ── */
-  .panel {
-    background:var(--surface); border:1px solid var(--edge); border-radius:16px;
-    padding:26px 22px; box-shadow:var(--shadow);
-    display:flex; flex-direction:column; align-items:center; gap:16px; text-align:center;
-  }
-  .state {
-    display:inline-flex; align-items:center; gap:8px;
-    font-family:'Heebo',sans-serif; font-weight:700; font-size:12.5px; letter-spacing:.06em;
-    padding:6px 13px; border-radius:999px; background:var(--surface-2); color:var(--muted);
-  }
-  .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
-  .state.live { background:var(--ok-soft); color:var(--ok); }
-  .state.wait { background:var(--off-soft); color:var(--off); }
-  .qr-frame {
-    width:min(280px,74vw); aspect-ratio:1; border-radius:14px; background:#fff;
-    border:1px solid var(--edge); display:grid; place-items:center; padding:12px; overflow:hidden;
-  }
-  #qr-img { width:100%; height:100%; object-fit:contain; display:none; }
-  .spinner {
-    width:34px; height:34px; border-radius:50%;
-    border:3px solid var(--edge); border-top-color:var(--accent); animation:spin 1s linear infinite;
-  }
-  @keyframes spin { to { transform:rotate(360deg); } }
-  .panel .msg { font-size:16px; color:var(--muted); max-width:38ch; }
-  .panel .big { font-size:19px; font-weight:700; color:var(--ink); font-family:'Frank Ruhl Libre',serif; }
-  .tick { font-size:40px; line-height:1; }
+  /* ── NAV ─────────────────────────────────── */
+  nav{position:sticky;top:0;z-index:100;background:rgba(16,9,4,.85);
+    backdrop-filter:blur(32px) saturate(1.5);-webkit-backdrop-filter:blur(32px) saturate(1.5);
+    border-bottom:1px solid var(--border);padding:13px 20px;display:flex;align-items:center;gap:12px}
+  .nav-logo{width:38px;height:38px;background:var(--orange);border-radius:12px;display:grid;place-items:center;
+    font-size:20px;animation:logoPulse 3.5s ease-in-out infinite}
+  @keyframes logoPulse{0%,100%{box-shadow:0 0 20px var(--orange-glow)}50%{box-shadow:0 0 44px var(--orange-glow),0 0 72px rgba(255,133,57,.13)}}
+  .nav-title{font-weight:800;font-size:1.03rem;letter-spacing:-.2px}
+  .nav-sub{font-size:.72rem;color:var(--muted);font-weight:500}
+  .status-pill{margin-right:auto;display:inline-flex;align-items:center;gap:7px;font-size:.73rem;font-weight:700;
+    padding:6px 13px;border-radius:999px;border:1px solid var(--border);background:var(--bg3);color:var(--muted);white-space:nowrap}
+  .status-pill.connected{background:rgba(76,195,138,.1);color:var(--green);border-color:rgba(76,195,138,.2)}
+  .status-pill.qr{background:rgba(255,179,71,.08);color:var(--amber);border-color:rgba(255,179,71,.18)}
+  .status-pill.disconnected{background:rgba(224,82,82,.08);color:var(--red);border-color:rgba(224,82,82,.15)}
+  .status-dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.25;transform:scale(.72)}}
 
-  /* ── Steps ── */
-  .steps { display:flex; flex-direction:column; gap:12px; counter-reset:s; list-style:none; padding:0; margin:0; }
-  .step { counter-increment:s; background:var(--surface); border:1px solid var(--edge); border-radius:12px;
-    padding:16px 18px; display:grid; grid-template-columns:32px 1fr; gap:6px 13px; align-items:start; box-shadow:var(--shadow); }
-  .step::before { content:counter(s); grid-row:1/span 2; font-family:'Heebo',sans-serif; font-weight:700; font-size:14px;
-    width:32px; height:32px; border-radius:50%; background:var(--accent); color:#fff; display:grid; place-items:center; }
-  .step h3 { margin:0; font-size:17px; font-weight:700; align-self:center; }
-  .step .body { grid-column:2; color:var(--muted); font-size:15.5px; }
-  .path { font-family:'Heebo',sans-serif; font-weight:500; color:var(--ink); background:var(--surface-2);
-    border-radius:6px; padding:2px 7px; font-size:14.5px; white-space:nowrap; }
+  /* ── HERO ────────────────────────────────── */
+  .hero{position:relative;padding:46px 20px 26px;text-align:center;overflow:hidden}
+  .hero-gradient{position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse 70% 55% at 50% 0%,rgba(255,133,57,.13),transparent 70%)}
+  .hero-content{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:12px}
+  .hero-eyebrow{display:inline-flex;align-items:center;gap:7px;font-size:.72rem;font-weight:700;letter-spacing:1.4px;
+    color:var(--orange);background:rgba(255,133,57,.08);border:1px solid var(--border-h);padding:6px 14px;border-radius:999px}
+  .hero-eyebrow-dot{width:6px;height:6px;border-radius:50%;background:var(--orange);animation:pulse 2s ease-in-out infinite}
+  .hero-title{font-size:clamp(2.1rem,9vw,3.1rem);font-weight:900;letter-spacing:-1.5px;line-height:1.05}
+  .hero-title .g{background:linear-gradient(100deg,var(--orange),var(--amber),var(--orange));
+    background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shimmer 5s linear infinite}
+  @keyframes shimmer{0%{background-position:0% center}100%{background-position:200% center}}
+  .hero-sub{color:var(--text2);font-size:1.02rem;font-weight:400;max-width:44ch;line-height:1.62}
 
-  /* ── Chat pairs ── */
-  .chat { display:flex; flex-direction:column; gap:21px; }
-  .pair { display:flex; flex-direction:column; gap:7px; }
-  .pair .why { font-size:14.5px; color:var(--muted); font-family:'Heebo',sans-serif; font-weight:500; }
-  .bub { max-width:84%; padding:11px 15px; font-size:16.5px; line-height:1.55; box-shadow:var(--shadow); }
-  .me { align-self:flex-end; background:var(--accent); color:#fff; border-radius:14px 14px 4px 14px; font-weight:600; }
-  .bot { align-self:flex-start; background:var(--surface); color:var(--ink); border:1px solid var(--edge);
-    border-radius:14px 14px 14px 4px; }
-  .bot .thin { color:var(--muted); font-size:15px; }
+  /* ── LAYOUT ──────────────────────────────── */
+  .wrap{max-width:880px;margin:0 auto;padding:6px 16px 70px;display:flex;flex-direction:column;gap:18px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+  .card-head{padding:16px 19px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:11px}
+  .card-head .icon{width:34px;height:34px;border-radius:10px;background:rgba(255,133,57,.12);display:grid;place-items:center;font-size:17px;flex:none}
+  .card-head h3{font-size:1.01rem;font-weight:700}
+  .card-head .sub{font-size:.74rem;color:var(--muted);font-weight:500;margin-top:1px}
+  .card-body{padding:19px}
 
-  /* ── Capabilities ── */
-  .caps { display:flex; flex-direction:column; gap:8px; }
-  .cap { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; align-items:baseline;
-    padding:13px 16px; border-radius:10px; background:var(--surface); border:1px solid var(--edge); }
-  .cap .tag { grid-row:1/span 2; align-self:center; font-family:'Heebo',sans-serif; font-weight:700;
-    font-size:11.5px; letter-spacing:.06em; padding:4px 9px; border-radius:999px; white-space:nowrap; }
-  .cap.yes .tag { background:var(--ok-soft); color:var(--ok); }
-  .cap.no { background:transparent; border-style:dashed; }
-  .cap.no .tag { background:var(--off-soft); color:var(--off); }
-  .cap .what { font-weight:700; font-size:16.5px; }
-  .cap .how { color:var(--muted); font-size:15.5px; grid-column:2; }
+  /* ── QR ──────────────────────────────────── */
+  .qr-card{border-color:var(--border-h)}
+  .qr-area{display:flex;flex-direction:column;align-items:center;gap:15px;text-align:center}
+  .qr-frame{position:relative;width:min(272px,72vw);aspect-ratio:1;background:#fff;border-radius:16px;
+    padding:12px;display:grid;place-items:center;box-shadow:0 0 44px rgba(255,133,57,.14)}
+  #qr-img{width:100%;height:100%;object-fit:contain;display:none;animation:qrIn .45s cubic-bezier(.2,.9,.3,1.2)}
+  @keyframes qrIn{from{opacity:0;transform:scale(.86)}to{opacity:1;transform:scale(1)}}
+  .spinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(16,9,4,.12);border-top-color:var(--orange2);animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .cover{position:absolute;inset:0;background:rgba(16,9,4,.94);border-radius:16px;display:grid;place-items:center;
+    text-align:center;padding:16px;color:var(--text)}
+  .cover .big{font-size:1.06rem;font-weight:800;margin:8px 0 3px}
+  .cover .small{font-size:.8rem;color:var(--muted);line-height:1.5}
+  .qr-msg{color:var(--text2);font-size:.93rem;max-width:36ch;line-height:1.6}
+  .qr-hint{font-size:.74rem;color:var(--muted2)}
+  .btn{background:rgba(255,133,57,.12);border:1px solid var(--border-h);color:var(--amber);font-family:inherit;
+    font-weight:700;font-size:.82rem;padding:9px 18px;border-radius:999px;cursor:pointer;margin-top:8px}
+  .btn:hover{background:rgba(255,133,57,.2)}
+  .btn:focus-visible{outline:2px solid var(--orange);outline-offset:2px}
+  .tick{font-size:44px;line-height:1}
 
-  .callout { background:var(--surface-2); border-radius:12px; padding:17px 19px;
-    display:flex; flex-direction:column; gap:8px; border-inline-start:3px solid var(--accent); }
-  .callout .t { font-weight:700; }
-  .callout p { color:var(--muted); font-size:16px; }
+  /* ── STEPS ───────────────────────────────── */
+  .steps{display:flex;flex-direction:column;gap:11px;counter-reset:s;list-style:none}
+  .step{counter-increment:s;display:grid;grid-template-columns:30px 1fr;gap:4px 13px;align-items:start;
+    background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:13px 15px}
+  .step::before{content:counter(s);grid-row:1/span 2;width:30px;height:30px;border-radius:50%;
+    background:var(--orange);color:#180d04;font-weight:800;font-size:.85rem;display:grid;place-items:center}
+  .step b{font-size:.95rem;font-weight:700;align-self:center}
+  .step .d{grid-column:2;color:var(--muted);font-size:.86rem;line-height:1.55}
+  .kbd{background:var(--bg4);border:1px solid var(--border);border-radius:6px;padding:2px 7px;
+    font-size:.83rem;color:var(--text2);font-weight:600;white-space:nowrap}
 
-  .rescue { display:flex; flex-direction:column; }
-  .rescue .row { display:grid; grid-template-columns:minmax(70px,auto) 1fr; gap:14px; align-items:baseline;
-    padding-block:10px; border-bottom:1px solid var(--edge); }
-  .rescue .row:last-child { border-bottom:0; }
-  .rescue .cmd { font-family:'Heebo',sans-serif; font-weight:700; color:var(--accent); font-size:16.5px; }
-  .rescue .txt { color:var(--muted); font-size:16px; }
+  /* ── CHAT EXAMPLES ───────────────────────── */
+  .chat{display:flex;flex-direction:column;gap:17px}
+  .pair{display:flex;flex-direction:column;gap:6px}
+  .why{font-size:.75rem;color:var(--muted2);font-weight:600}
+  .bub{max-width:85%;padding:10px 14px;font-size:.92rem;line-height:1.55}
+  .me{align-self:flex-end;background:var(--orange);color:#180d04;border-radius:14px 14px 4px 14px;font-weight:600}
+  .bot{align-self:flex-start;background:var(--bg4);border:1px solid var(--border);border-radius:14px 14px 14px 4px;color:var(--text2)}
 
-  footer { margin-top:50px; padding-top:20px; border-top:1px solid var(--edge);
-    color:var(--muted); font-size:15px; display:flex; flex-direction:column; gap:6px; }
-  @media (prefers-reduced-motion: reduce) { *,*::before { animation:none!important; transition:none!important; } }
+  /* ── CAPABILITIES ────────────────────────── */
+  .caps{display:grid;gap:9px}
+  .cap{display:grid;grid-template-columns:auto 1fr;gap:3px 11px;align-items:baseline;
+    background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px}
+  .cap .tag{grid-row:1/span 2;align-self:center;font-size:.66rem;font-weight:800;padding:4px 9px;border-radius:999px;white-space:nowrap;
+    background:rgba(76,195,138,.12);color:var(--green);border:1px solid rgba(76,195,138,.2)}
+  .cap.no{border-style:dashed;background:transparent}
+  .cap.no .tag{background:rgba(255,179,71,.1);color:var(--amber);border-color:rgba(255,179,71,.2)}
+  .cap .w{font-weight:700;font-size:.93rem}
+  .cap .h{grid-column:2;color:var(--muted);font-size:.84rem;line-height:1.55}
+
+  /* ── RESCUE ──────────────────────────────── */
+  .rows{display:flex;flex-direction:column}
+  .row{display:grid;grid-template-columns:minmax(66px,auto) 1fr;gap:13px;align-items:baseline;
+    padding:10px 0;border-bottom:1px solid rgba(255,133,57,.06)}
+  .row:last-child{border-bottom:0}
+  .row .c{font-weight:800;color:var(--orange);font-size:.93rem}
+  .row .t{color:var(--muted);font-size:.86rem;line-height:1.55}
+
+  .tipbox{background:rgba(255,133,57,.06);border:1px solid var(--border-h);border-radius:var(--radius-sm);padding:14px 16px}
+  .tipbox b{color:var(--amber)}
+  .tipbox p{color:var(--text2);font-size:.88rem;line-height:1.6;margin-top:5px}
+
+  footer{max-width:880px;margin:0 auto;padding:0 16px 60px;color:var(--muted2);font-size:.79rem;line-height:1.65;
+    display:flex;flex-direction:column;gap:7px;border-top:1px solid var(--border);padding-top:20px;margin-top:8px}
+  footer b{color:var(--muted)}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
-<div class="page">
 
-  <header>
-    <div class="eyebrow">העוזר האישי שלך</div>
-    <h1>בוטי</h1>
-    <p class="lede">
-      עוזר שיושב בתוך הוואטסאפ שלך. כותבים לו כמו לאדם, גם בהודעה קולית, והוא עונה.
-      החיבור הוא חד־פעמי ולוקח דקה.
-    </p>
-  </header>
-
-  <div class="panel" id="panel">
-    <div class="state wait" id="state"><span class="dot"></span><span id="state-text">מתחבר…</span></div>
-    <div class="qr-frame" id="qr-frame">
-      <div class="spinner" id="spinner"></div>
-      <img id="qr-img" alt="קוד QR לחיבור">
-    </div>
-    <p class="msg" id="panel-msg">רגע, מכינים את הקוד…</p>
+<nav>
+  <div class="nav-logo">🤖</div>
+  <div>
+    <div class="nav-title">בוטי</div>
+    <div class="nav-sub">העוזר האישי שלך</div>
   </div>
+  <div class="status-pill" id="pill"><span class="status-dot"></span><span id="pill-text">מתחבר…</span></div>
+</nav>
 
-  <section>
-    <div class="section-head">
-      <h2>לחבר אותו — פעם אחת</h2>
-      <p class="section-note">שלושה שלבים, בסדר הזה, מהטלפון.</p>
-    </div>
-    <ol class="steps">
-      <li class="step">
-        <h3>פתחי וואטסאפ בטלפון</h3>
-        <div class="body">את הדף הזה כדאי להשאיר פתוח על מסך אחר — או במחשב — כדי שתוכלי לצלם את הקוד.</div>
-      </li>
-      <li class="step">
-        <h3>מכשירים מקושרים</h3>
-        <div class="body">שלוש הנקודות למעלה ← <span class="path">מכשירים מקושרים</span> ← <span class="path">קישור מכשיר</span>.</div>
-      </li>
-      <li class="step">
-        <h3>סרקי את הקוד שלמעלה</h3>
-        <div class="body">זהו. הריבוע כאן יתחלף בהודעת אישור.</div>
-      </li>
-    </ol>
-    <div class="callout">
-      <p class="t">איפה כותבים לו?</p>
-      <p>בצ׳אט <strong>"הודעות לעצמי"</strong> שלך — זה שנקרא על שמך ברשימת הצ׳אטים.
-         כל מה שתכתבי שם מגיע אליו, והוא עונה שם. לא צריך להוסיף איש קשר.</p>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <h2>חמש הודעות ראשונות</h2>
-      <p class="section-note">בדיוק מה לשלוח, ומה אמור לחזור.</p>
-    </div>
-    <div class="chat">
-      <div class="pair">
-        <div class="why">לוודא שהוא ער</div>
-        <div class="bub me">היי</div>
-        <div class="bub bot">היי! 😊 מה אני יכול לעזור?</div>
-      </div>
-      <div class="pair">
-        <div class="why">לראות הכל במקום אחד</div>
-        <div class="bub me">תפריט</div>
-        <div class="bub bot">רשימת כל מה שהוא יודע לעשות. <span class="thin">שווה לשמור את ההודעה הזו.</span></div>
-      </div>
-      <div class="pair">
-        <div class="why">הודעה קולית — הכי נוח כשהידיים תפוסות</div>
-        <div class="bub me">🎤 <em>מקליטה:</em> "תזכיר לי בעוד שעתיים להוציא את הכביסה"</div>
-        <div class="bub bot">מתמלל עברית, מבין, וקובע את התזכורת. <span class="thin">אפשר לדבר איתו רק בהקלטות.</span></div>
-      </div>
-      <div class="pair">
-        <div class="why">תמונה — פשוט לשלוח אותה</div>
-        <div class="bub me">📷 <em>תמונה</em> + "מה כתוב פה?"</div>
-        <div class="bub bot">קורא טפסים, שלטים, מתכונים, מכתבים מהגן. <span class="thin">גם PDF.</span></div>
-      </div>
-      <div class="pair">
-        <div class="why">שאלה רגילה, בלי לחפש בגוגל</div>
-        <div class="bub me">כמה זמן לבשל אורז מלא?</div>
-        <div class="bub bot">עונה, ואם צריך מידע עדכני הוא מחפש באינטרנט לבד.</div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <h2>מה הוא יודע לעשות</h2>
-      <p class="section-note">ומה לא — כדי שלא תחכי למשהו שלא יגיע.</p>
-    </div>
-    <div class="caps">
-      <div class="cap yes"><span class="tag">עובד</span><span class="what">שיחה, שאלות וחיפוש באינטרנט</span><span class="how">כותבים בשפה חופשית. הוא מחפש מידע עדכני כשצריך.</span></div>
-      <div class="cap yes"><span class="tag">עובד</span><span class="what">הודעות קוליות בעברית</span><span class="how">מתמלל ומבין. אפשר לנהל איתו שיחה שלמה בהקלטות.</span></div>
-      <div class="cap yes"><span class="tag">עובד</span><span class="what">תמונות ומסמכים</span><span class="how">קריאת טפסים ו-PDF, תיאור תמונות, ומענה על שאלות עליהן.</span></div>
-      <div class="cap yes"><span class="tag">עובד</span><span class="what">זיהוי פנים בתמונות</span><span class="how">שולחים תמונה עם הכיתוב <span class="path">ייחוס דנה</span>, והוא יזהה את דנה בתמונות הבאות. המאגר שלך מתחיל ריק ונבנה ממה שתלמדי אותו.</span></div>
-      <div class="cap yes"><span class="tag">עובד</span><span class="what">תזכורות והודעות מתוזמנות</span><span class="how">"תזכיר לי מחר ב-8 להתקשר לרופאה".</span></div>
-      <div class="cap yes"><span class="tag">עובד</span><span class="what">סרטונים ומצגות</span><span class="how">"תעשה סרטון עם כותרת…" — שווה לנסות, זה מפתיע.</span></div>
-      <div class="cap no"><span class="tag">עדיין לא</span><span class="what">יומן וגימייל</span><span class="how">אפשר לחבר את החשבון שלך בהמשך. כרגע לא מחובר, ולכן שאלות על פגישות או מיילים לא יעבדו.</span></div>
-      <div class="cap no"><span class="tag">לא כאן</span><span class="what">חומרי העבודה של מושיקו</span><span class="how">המוקד, הסריקות והמחשב שלו מופרדים לגמרי. אם תכתבי פקודה כזו הוא יגיד שהיא לא זמינה — זה תקין, לא תקלה.</span></div>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <h2>כשהוא לא מבין</h2>
-      <p class="section-note">קורה. יש לזה שלוש מילים.</p>
-    </div>
-    <div class="rescue">
-      <div class="row"><span class="cmd">למה</span><span class="txt">מסביר בדיוק מה השתבש בפעם האחרונה ומה לעשות עכשיו.</span></div>
-      <div class="row"><span class="cmd">תקלות</span><span class="txt">רשימת התקלות האחרונות — מראה אם משהו חוזר על עצמו.</span></div>
-      <div class="row"><span class="cmd">/נקה</span><span class="txt">מאפס את השיחה. שימושי אם הוא נתקע על נושא ישן.</span></div>
-      <div class="row"><span class="cmd">מה חדש</span><span class="txt">מה נוסף לבוט לאחרונה.</span></div>
-    </div>
-    <div class="callout">
-      <p class="t">טיפ אחד ששווה יותר מכל השאר</p>
-      <p>אם תשובה לא מדויקת — <strong>הגיבי עליה</strong> (לחיצה ארוכה ← "השב") וכתבי מה לא הסתדר.
-         הוא קורא את ההודעה שהגבת עליה ומבין למה התכוונת. זה עובד הרבה יותר טוב מלנסח מחדש מאפס.</p>
-    </div>
-  </section>
-
-  <footer>
-    <p><strong>מה החיבור הזה אומר:</strong> אחרי הסריקה בוטי מקושר לוואטסאפ שלך כמו WhatsApp Web — הוא רואה הודעות ויכול לשלוח בשמך. הזיכרון שלו, ההיסטוריה שלך והתמונות שלך נשמרים בנפרד לגמרי ממושיקו.</p>
-    <p><strong>הכתובת של הדף הזה קבועה</strong> — אפשר לשמור אותה. אם תצטרכי לחבר מחדש אי פעם, זה אותו קישור.</p>
-    <p>אם משהו לא עובד ולא ברור למה — תגידי למושיקו, יש לו יומן שמראה בדיוק מה קרה.</p>
-  </footer>
+<div class="hero">
+  <div class="hero-gradient"></div>
+  <div class="hero-content">
+    <div class="hero-eyebrow"><span class="hero-eyebrow-dot"></span>בוט אישי · וואטסאפ</div>
+    <h1 class="hero-title">שלום, אני <span class="g">בוטי</span></h1>
+    <p class="hero-sub">אני יושב בתוך הוואטסאפ שלך. כותבים לי כמו לאדם — גם בהודעה קולית — ואני עונה. החיבור חד־פעמי ולוקח דקה.</p>
+  </div>
 </div>
 
+<div class="wrap">
+
+  <!-- QR -->
+  <div class="card qr-card">
+    <div class="card-head">
+      <div class="icon">📱</div>
+      <div><h3>חיבור לוואטסאפ</h3><div class="sub">סריקה אחת, ואפשר להתחיל</div></div>
+    </div>
+    <div class="card-body">
+      <div class="qr-area">
+        <div class="qr-frame" id="frame">
+          <div class="spinner" id="spinner"></div>
+          <img id="qr-img" alt="קוד QR לחיבור">
+          <div class="cover" id="cover" hidden>
+            <div>
+              <div style="font-size:34px">🔄</div>
+              <div class="big">הקוד כבר לא תקף</div>
+              <div class="small">הדף איבד את החיבור לשרת,<br>ולכן הקוד שמוצג התיישן.</div>
+              <button class="btn" id="reload">רענני לקוד חדש</button>
+            </div>
+          </div>
+        </div>
+        <p class="qr-msg" id="qr-msg">רגע, מכינים את הקוד…</p>
+        <p class="qr-hint" id="qr-hint">הקוד מתחדש מעצמו כל כמה שניות — אין צורך לרענן.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEPS -->
+  <div class="card">
+    <div class="card-head">
+      <div class="icon">🔗</div>
+      <div><h3>איך מתחברים</h3><div class="sub">שלושה שלבים, בסדר הזה, מהטלפון</div></div>
+    </div>
+    <div class="card-body">
+      <ol class="steps">
+        <li class="step"><b>פתחי וואטסאפ בטלפון</b>
+          <div class="d">את הדף הזה כדאי להשאיר פתוח על מסך אחר, או במחשב, כדי שתוכלי לצלם את הקוד.</div></li>
+        <li class="step"><b>מכשירים מקושרים</b>
+          <div class="d">שלוש הנקודות למעלה ← <span class="kbd">מכשירים מקושרים</span> ← <span class="kbd">קישור מכשיר</span></div></li>
+        <li class="step"><b>סרקי את הקוד שלמעלה</b>
+          <div class="d">הריבוע יתחלף בהודעת אישור, והסימון בראש הדף ידלק בירוק.</div></li>
+      </ol>
+      <div class="tipbox" style="margin-top:14px">
+        <b>איפה כותבים לי?</b>
+        <p>בצ׳אט <b>"הודעות לעצמי"</b> שלך — זה שנקרא על שמך ברשימת הצ׳אטים. כל מה שתכתבי שם מגיע אליי, ואני עונה שם. לא צריך להוסיף איש קשר.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- FIRST MESSAGES -->
+  <div class="card">
+    <div class="card-head">
+      <div class="icon">💬</div>
+      <div><h3>חמש ההודעות הראשונות</h3><div class="sub">בדיוק מה לשלוח, ומה יחזור</div></div>
+    </div>
+    <div class="card-body">
+      <div class="chat">
+        <div class="pair"><div class="why">לוודא שאני ער</div>
+          <div class="bub me">היי</div><div class="bub bot">היי! 😊 מה אני יכול לעזור?</div></div>
+        <div class="pair"><div class="why">לראות הכל במקום אחד</div>
+          <div class="bub me">תפריט</div><div class="bub bot">רשימת כל מה שאני יודע לעשות. שווה לשמור את ההודעה.</div></div>
+        <div class="pair"><div class="why">הודעה קולית — הכי נוח כשהידיים תפוסות</div>
+          <div class="bub me">🎤 "תזכיר לי בעוד שעתיים להוציא את הכביסה"</div>
+          <div class="bub bot">מתמלל עברית, מבין, וקובע תזכורת. אפשר לנהל איתי שיחה שלמה בהקלטות.</div></div>
+        <div class="pair"><div class="why">תמונה — פשוט לשלוח אותה</div>
+          <div class="bub me">📷 תמונה + "מה כתוב פה?"</div>
+          <div class="bub bot">קורא טפסים, שלטים, מתכונים ומכתבים מהגן. גם קובצי PDF.</div></div>
+        <div class="pair"><div class="why">שאלה רגילה, בלי לחפש בגוגל</div>
+          <div class="bub me">כמה זמן לבשל אורז מלא?</div>
+          <div class="bub bot">עונה, ואם צריך מידע עדכני אני מחפש באינטרנט לבד.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CAPABILITIES -->
+  <div class="card">
+    <div class="card-head">
+      <div class="icon">⚡</div>
+      <div><h3>מה אני יודע לעשות</h3><div class="sub">ומה לא — כדי שלא תחכי למשהו שלא יגיע</div></div>
+    </div>
+    <div class="card-body">
+      <div class="caps">
+        <div class="cap"><span class="tag">עובד</span><span class="w">שיחה, שאלות וחיפוש באינטרנט</span><span class="h">כותבים בשפה חופשית. אני מחפש מידע עדכני כשצריך.</span></div>
+        <div class="cap"><span class="tag">עובד</span><span class="w">הודעות קוליות בעברית</span><span class="h">מתמלל ומבין. אפשר לדבר איתי רק בהקלטות.</span></div>
+        <div class="cap"><span class="tag">עובד</span><span class="w">תמונות ומסמכים</span><span class="h">קריאת טפסים ו-PDF, תיאור תמונות, ומענה על שאלות עליהן.</span></div>
+        <div class="cap"><span class="tag">עובד</span><span class="w">זיהוי פנים בתמונות</span><span class="h">שולחים תמונה עם הכיתוב <span class="kbd">ייחוס דנה</span>, ואזהה את דנה בתמונות הבאות. המאגר שלך מתחיל ריק ונבנה ממה שתלמדי אותי.</span></div>
+        <div class="cap"><span class="tag">עובד</span><span class="w">תזכורות והודעות מתוזמנות</span><span class="h">"תזכיר לי מחר ב-8 להתקשר לרופאה".</span></div>
+        <div class="cap"><span class="tag">עובד</span><span class="w">סרטונים ומצגות</span><span class="h">"תעשה סרטון עם כותרת…" — שווה לנסות, זה מפתיע.</span></div>
+        <div class="cap no"><span class="tag">עדיין לא</span><span class="w">יומן וגימייל</span><span class="h">אפשר לחבר את החשבון שלך בהמשך. כרגע לא מחובר, ולכן שאלות על פגישות או מיילים לא יעבדו.</span></div>
+        <div class="cap no"><span class="tag">לא כאן</span><span class="w">חומרי העבודה של מושיקו</span><span class="h">המוקד, הסריקות והמחשב שלו מופרדים לגמרי. אם תכתבי פקודה כזו אענה שהיא לא זמינה — זה תקין, לא תקלה.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESCUE -->
+  <div class="card">
+    <div class="card-head">
+      <div class="icon">🩺</div>
+      <div><h3>כשאני לא מבין</h3><div class="sub">קורה. יש לזה שלוש מילים</div></div>
+    </div>
+    <div class="card-body">
+      <div class="rows">
+        <div class="row"><span class="c">למה</span><span class="t">מסביר בדיוק מה השתבש בפעם האחרונה ומה לעשות עכשיו.</span></div>
+        <div class="row"><span class="c">תקלות</span><span class="t">רשימת התקלות האחרונות — מראה אם משהו חוזר על עצמו.</span></div>
+        <div class="row"><span class="c">/נקה</span><span class="t">מאפס את השיחה. שימושי אם נתקעתי על נושא ישן.</span></div>
+        <div class="row"><span class="c">מה חדש</span><span class="t">מה נוסף לבוט לאחרונה.</span></div>
+      </div>
+      <div class="tipbox" style="margin-top:14px">
+        <b>טיפ אחד ששווה יותר מכל השאר</b>
+        <p>אם תשובה לא מדויקת — <b>הגיבי עליה</b> (לחיצה ארוכה ← "השב") וכתבי מה לא הסתדר. אני קורא את ההודעה שהגבת עליה ומבין למה התכוונת. זה עובד הרבה יותר טוב מלנסח מחדש מאפס.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <p><b>מה החיבור הזה אומר:</b> אחרי הסריקה בוטי מקושר לוואטסאפ שלך כמו WhatsApp Web — הוא רואה הודעות ויכול לשלוח בשמך. הזיכרון שלו, ההיסטוריה שלך והתמונות שלך נשמרים בנפרד לגמרי ממושיקו.</p>
+  <p><b>הכתובת של הדף קבועה</b> ולא תשתנה. אפשר לשמור אותה — אם תצטרכי לחבר מחדש אי פעם, זה אותו קישור.</p>
+  <p>אם משהו לא עובד ולא ברור למה — תגידי למושיקו, יש לו יומן שמראה בדיוק מה קרה.</p>
+</footer>
+
 <script>
-// The page is the QR *and* the guide, so the guide stays readable in every
-// state and only the panel at the top changes.
-(function () {
-  var socket   = io();
-  var img      = document.getElementById('qr-img');
-  var spinner  = document.getElementById('spinner');
-  var frame    = document.getElementById('qr-frame');
-  var stateEl  = document.getElementById('state');
-  var stateTxt = document.getElementById('state-text');
-  var msg      = document.getElementById('panel-msg');
+(function(){
+  var socket=io({reconnectionDelayMax:8000});
+  var img=document.getElementById('qr-img'), spin=document.getElementById('spinner'),
+      cover=document.getElementById('cover'), frame=document.getElementById('frame'),
+      pill=document.getElementById('pill'), pillText=document.getElementById('pill-text'),
+      msg=document.getElementById('qr-msg'), hint=document.getElementById('qr-hint');
+  var connected=false;
 
-  function setState(cls, text) {
-    stateEl.className = 'state ' + cls;
-    stateTxt.textContent = text;
-  }
+  function setPill(cls,txt){ pill.className='status-pill '+cls; pillText.textContent=txt; }
+  function showCover(on){ cover.hidden=!on; }
 
-  socket.on('qr', function (data) {
-    img.src = data;
-    img.style.display = 'block';
-    spinner.style.display = 'none';
-    setState('wait', 'ממתין לסריקה');
-    msg.textContent = 'סרקי את הקוד לפי שלושת השלבים שלמטה.';
+  socket.on('qr',function(data){
+    if(connected) return;
+    img.src=data; img.style.display='block'; spin.style.display='none'; showCover(false);
+    setPill('qr','ממתין לסריקה');
+    msg.textContent='סרקי את הקוד לפי שלושת השלבים שמתחת.';
+    hint.textContent='הקוד מתחדש מעצמו כל כמה שניות — אין צורך לרענן.';
   });
 
-  socket.on('status', function (st) {
-    if (st === 'connected') {
-      // Replace the code with a plain confirmation — a stale QR on a
-      // connected bot is the kind of thing that makes people scan twice.
-      frame.innerHTML = '<div><div class="tick">✅</div><p class="big" style="margin-top:10px">מחובר</p></div>';
-      frame.style.background = 'transparent';
-      frame.style.border = '0';
-      setState('live', 'פעיל');
-      msg.innerHTML = 'אפשר לכתוב לבוטי עכשיו — בצ׳אט <strong>"הודעות לעצמי"</strong> שלך.<br>נסי להתחיל ב־<strong>היי</strong>.';
-    } else if (st === 'authenticated') {
-      setState('wait', 'מתחבר');
-      msg.textContent = 'הקוד התקבל, עוד רגע…';
-    } else if (st === 'qr') {
-      setState('wait', 'ממתין לסריקה');
-    } else if (st === 'disconnected') {
-      setState('wait', 'מתנתק');
-      msg.textContent = 'החיבור נפל. הדף יתעדכן לבד כשיחזור.';
+  socket.on('status',function(st){
+    if(st==='connected'){
+      connected=true;
+      // Replace the code outright. A live-looking QR above a connected bot is
+      // what makes people scan a second time and knock the first one off.
+      frame.style.background='transparent'; frame.style.boxShadow='none';
+      frame.innerHTML='<div style="text-align:center"><div class="tick">✅</div>'+
+                      '<div style="font-weight:800;font-size:1.15rem;margin-top:10px">מחובר</div></div>';
+      setPill('connected','פעיל');
+      msg.innerHTML='אפשר לכתוב לי עכשיו — בצ׳אט <b>"הודעות לעצמי"</b> שלך. נסי להתחיל ב־<b>היי</b>.';
+      hint.textContent='';
+    } else if(st==='authenticated'){
+      setPill('qr','מתחבר'); msg.textContent='הקוד התקבל, עוד רגע…'; showCover(false);
+    } else if(st==='qr'){
+      setPill('qr','ממתין לסריקה');
+    } else if(st==='disconnected'){
+      setPill('disconnected','מנותק');
+      if(!connected) msg.textContent='מתחבר לשרת…';
     }
   });
+
+  // A phone that backgrounds the tab freezes this socket, and the code frozen
+  // on screen stops being valid without looking any different. Cover it.
+  socket.on('disconnect',function(){
+    if(connected) return;
+    setPill('disconnected','אין חיבור לשרת');
+    showCover(true);
+  });
+  socket.on('connect',function(){ if(!connected) showCover(false); });
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden && !connected && !socket.connected) showCover(true);
+  });
+  document.getElementById('reload').onclick=function(){ location.reload(); };
 })();
 </script>
 </body>

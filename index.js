@@ -45,6 +45,30 @@ const { renderVideo, getTemplates } = require('./src/video');
 const { loadConversations, saveConversations, flushConversations, loadScheduledTasks, saveScheduledTasks, loadDailyTasks, saveDailyTasks } = require('./src/persistence');
 const { withCache, cache } = require('./src/cache');
 const logger = require('./src/logger');
+
+// Stamp every console line with the time. pm2 only does this when the process
+// was started with --time, and this one was not — which left its whole log
+// undated and the log viewer unable to say when anything happened. Doing it
+// here works regardless of how pm2 was invoked, and matches the format the
+// reader already parses.
+(() => {
+  const pad = n => String(n).padStart(2, '0');
+  const stamp = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T` +
+           `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}:`;
+  };
+  for (const m of ['log', 'error', 'warn']) {
+    const orig = console[m].bind(console);
+    console[m] = (...args) => {
+      // Never stamp the QR block — the ASCII art has to stay pixel-aligned.
+      const first = typeof args[0] === 'string' ? args[0] : '';
+      if (/^[\s▄▀█░▒▓]/.test(first) || first === '') return orig(...args);
+      orig(stamp(), ...args);
+    };
+  }
+})();
+
 const { appendChatLog } = require('./src/chat-log');
 const { saveScan: saveScanHistory } = require('./src/scan-history');
 const fs = require('fs');
@@ -1456,6 +1480,36 @@ app.get('/', (req, res, next) => {
   if (!profile.isGuest) return next();
   res.sendFile(path.join(__dirname, 'public', 'guest.html'));
 });
+
+// ─── יומן קריא ───────────────────────────────────────────────────
+// The logs already existed; reading them meant SSH plus pm2 plus grep plus
+// knowing which of four files to open. Tonight the bot was down and the
+// reason sat in a log nobody could reach without a terminal.
+//
+// Token-gated because this host is now a stable public name and the logs
+// carry message content. The token lives in .env, never in the page.
+function _logsAuthed(req) {
+  const want = process.env.LOGS_TOKEN || '';
+  if (!want) return false;                       // no token configured → closed
+  const got = req.query.key || req.get('x-logs-key') || '';
+  return got === want;
+}
+// Her page lives on her instance, which is only reachable while her bot runs.
+// This lets the design be reviewed from here meanwhile — no live QR, just the
+// page.
+app.get('/guest-preview', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'guest.html'));
+});
+
+app.get('/logs', (req, res) => {
+  if (!_logsAuthed(req)) return res.status(404).send('Not found');
+  res.sendFile(path.join(__dirname, 'public', 'logs.html'));
+});
+app.get('/api/logs', (req, res) => {
+  if (!_logsAuthed(req)) return res.status(404).json({ error: 'not found' });
+  try { res.json(require('./src/log-reader').snapshot()); }
+  catch (e) { res.status(500).json({ error: (e.message || '').substring(0, 200) }); }
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 let botStatus = 'disconnected';
@@ -1671,12 +1725,24 @@ const client = new Client({
       // releases anything and simply grows until the kernel kills it. dmesg
       // shows exactly that twice: the renderer at 1.9GB, then 3.3GB, both
       // ended by the OOM killer. With it gone Chrome sheds caches instead.
-      '--js-flags=--max-old-space-size=512',   // hard ceiling on the renderer JS heap
-      '--renderer-process-limit=2',
-      '--disable-background-networking',
-      '--disable-sync',
-      '--disable-breakpad',
-      '--disable-component-update',
+      // A --js-flags=--max-old-space-size cap was tried here and reverted. An
+      // established session lives well under it, but the first sync after a
+      // scan loads the whole account history at once and blew straight
+      // through 512MB: the renderer died mid-init with "Execution context was
+      // destroyed", over and over — 56 restarts on a fresh instance while an
+      // already-warm one showed nothing wrong. Capping the heap trades a rare
+      // slow leak for a guaranteed failure at the one moment that matters, so
+      // the ceiling now comes from the memory guard, which restarts a bot
+      // between messages instead of killing it mid-sync.
+      // --disable-background-networking / --disable-sync / --disable-breakpad
+      // / --disable-component-update were added here alongside the memory work
+      // and have been taken out again. They looked harmless, but a fresh link
+      // failed 66 times in a row inside Client.inject while an already-warm
+      // session was unaffected, and these were changed in the same breath as
+      // the flag that mattered. WhatsApp Web leans on Chrome background
+      // machinery during the first login, so the launch flags are back to the
+      // set that has been linking accounts successfully for months, minus
+      // --memory-pressure-off alone.
       // Cap on-disk caches so the session can't balloon to GBs and crash the
       // renderer on load ("Execution context was destroyed"). 100MB HTTP cache,
       // 50MB media cache. (Code Cache isn't capped by these — the pre-launch
