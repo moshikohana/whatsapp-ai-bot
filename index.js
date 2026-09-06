@@ -1474,7 +1474,11 @@ const forwardedPhotos = new Map();   // msgId → photoData
 const lastForwardedPhoto = new Map(); // chatId → photoData (for text-only feedback)
 const MAX_FEEDBACK_STORE = 50;       // don't grow unbounded
 
-const OWNER_ID = '972524243250@c.us';
+// Env-driven so a second instance can run for someone else without touching
+// the 108 places this is compared against. Default is unchanged, so his
+// instance behaves exactly as it did before.
+const OWNER_ID = process.env.OWNER_ID || '972524243250@c.us';
+const profile = require('./src/profile');
 
 // ─── Owner's self-LID (for new "Message Yourself" format) ──────────
 // WhatsApp's new format uses @lid identifiers. The user's own LID is
@@ -1620,7 +1624,8 @@ const _initFailFile = path.join(__dirname, 'data', 'init-fail.json');
 
 // ─── WhatsApp Client ─────────────────────────────────────────────
 const client = new Client({
-  authStrategy: new LocalAuth({ clientId: 'ai-personal-bot', dataPath: path.join(__dirname, '.wwebjs_auth') }),
+  // clientId separates the WhatsApp sessions when more than one instance runs.
+  authStrategy: new LocalAuth({ clientId: process.env.WA_CLIENT_ID || 'ai-personal-bot', dataPath: path.join(__dirname, '.wwebjs_auth') }),
   userAgent: WA_USER_AGENT,
   // Phone-number pairing (instead of QR): the library only wires the
   // pairing-code machinery when this option is present at construction —
@@ -1699,7 +1704,7 @@ client.on('code', (code) => {
 
 client.on('qr', async (qr) => {
   qrcodeTerminal.generate(qr, { small: true });
-  console.log('\n📱 סרוק QR בוואטסאפ, או פתח http://localhost:3000\n');
+  console.log(`\n📱 סרוק QR בוואטסאפ, או פתח http://localhost:${process.env.PORT || 3000}\n`);
   currentQR = await qrcode.toDataURL(qr);
   currentQRRaw = qr;
   qrCount += 1;
@@ -3139,7 +3144,7 @@ async function runGroupSuggestionCheck(opts = {}) {
 }
 
 // Daily at 20:00 (server TZ, same as the other crons).
-try { nodeCron.schedule('0 20 * * *', () => { runGroupSuggestionCheck().catch(() => {}); }); } catch {}
+try { if (profile.jobEnabled('group-suggestion')) nodeCron.schedule('0 20 * * *', () => { runGroupSuggestionCheck().catch(() => {}); }); } catch {}
 
 // ─── Poll vote handler — drives all interactive flows ─────────
 client.on('vote_update', async (vote) => {
@@ -3811,7 +3816,9 @@ ${rawBody}`;
       // Handled here rather than in route(): route only receives text, and
       // the image is the whole point — most of what he reports is a
       // screenshot of the thing that went wrong.
-      const _claudeCap = caption.match(/^(?:קלוד|claude)\s*(?:[:،,]\s*)?([\s\S]*)$/i);
+      // Guarded separately: this path never reaches route(), so the gate at
+      // the top of route() would not cover it.
+      const _claudeCap = profile.isGuest ? null : caption.match(/^(?:קלוד|claude)\s*(?:[:،,]\s*)?([\s\S]*)$/i);
       if (_claudeCap && chatId === OWNER_ID) {
         console.log(`📨 [${ts()}] 🖼️→🧠 קלוד + תמונה: ${caption.substring(0, 60)}`);
         stats.received++;
@@ -5680,6 +5687,19 @@ async function route(chatId, text, chat) {
     if (_canon) { logger.info(`🎯 intent => ${_canon}`); text = _canon; }
   }
 
+  // ─── שכבת הרשאות ─────────────────────────────────────────────────
+  // One gate, checked before anything routes. On the owner's instance this
+  // is a no-op; on a guest instance it is the only thing standing between
+  // her and his work material, which is why it sits here and not scattered
+  // through the handlers.
+  {
+    const _b = profile.blocked(text);
+    if (_b) {
+      logger.info(`🔒 guest blocked [${_b.id}]: ${String(text).substring(0, 40)}`);
+      return profile.refusal(_b);
+    }
+  }
+
   // ─── אבחון עצמי: "למה" / "תקלות" ─────────────────────────────────
   // He kept having to bring every dead end back to a developer to find out
   // what went wrong. These two answer that themselves.
@@ -7099,6 +7119,7 @@ setInterval(() => {
 let _bcBusy = false;
 setInterval(async () => {
   try {
+    if (!profile.jobEnabled('broadcast-monitor')) return;
     if (botStatus !== 'connected' || _bcBusy) return;
     const bm = require('./src/broadcast-monitor');
     if (!bm.isEnabled() || !bm.inActiveHours()) return;
@@ -7119,6 +7140,7 @@ let _bcLast = 0;
 // holds delivery during quiet hours / Shabbat and rate-limits to DIGEST_MINUTES).
 setInterval(async () => {
   try {
+    if (!profile.jobEnabled('alert-hub-digest')) return;
     if (botStatus !== 'connected') return;
     const hub = require('./src/alert-hub');
     if (!hub.dueForDigest()) return;
@@ -7221,7 +7243,7 @@ async function runPendingMediaCheck() {
 // First pass 90s after startup (give bot time to settle)
 setTimeout(runPendingMediaCheck, 90 * 1000);
 // Then every 60 minutes
-setInterval(runPendingMediaCheck, 60 * 60 * 1000);
+if (profile.jobEnabled('media-outreach')) setInterval(runPendingMediaCheck, 60 * 60 * 1000);
 
 // 1.2 Interview brief: every 5 min, find interviews starting in ~30 min and
 //     send a brief (Kellner positions + current news + tip). One alert per event.
@@ -7244,7 +7266,7 @@ async function runInterviewBriefCheck() {
 // First pass 60s after startup
 setTimeout(runInterviewBriefCheck, 60 * 1000);
 // Then every 5 minutes
-setInterval(runInterviewBriefCheck, 5 * 60 * 1000);
+if (profile.jobEnabled('interview-brief')) setInterval(runInterviewBriefCheck, 5 * 60 * 1000);
 
 // 1.3 Waze ETA proactive: every 5 min, find events starting in ~60 min with
 //     a physical location and send a "leave at X" alert with Waze link + ETA.
@@ -7294,7 +7316,7 @@ async function runTrendingKeywordCheck() {
 // First pass 5 min after startup (let the bot accumulate keyword hits)
 setTimeout(runTrendingKeywordCheck, 5 * 60 * 1000);
 // Then every 30 minutes
-setInterval(runTrendingKeywordCheck, 30 * 60 * 1000);
+if (profile.jobEnabled('trending-keywords')) setInterval(runTrendingKeywordCheck, 30 * 60 * 1000);
 
 // ─── Daily 20:00 face-match summary ─────────────────────────────
 nodeCron.schedule('0 20 * * *', async () => {
@@ -7345,6 +7367,7 @@ nodeCron.schedule('0 */3 * * *', async () => {
 // ─── Weekly spokesperson report (Sunday 20:00) ───────────────────
 nodeCron.schedule('0 20 * * 0', async () => {
   try {
+    if (!profile.jobEnabled('weekly-spokesperson')) return;
     const { loadContacts } = require('./src/media-tracker');
     const contacts = loadContacts();
     const oc = await client.getChatById(OWNER_ID);
@@ -8302,6 +8325,7 @@ async function runMediaMonitor(now = new Date()) {
 // ─── Daily Twitter/X + News monitoring (08:00) ───────────────────
 nodeCron.schedule('0 8 * * *', async () => {
   try {
+    if (!profile.jobEnabled('x-monitor')) return;
     const oc = await client.getChatById(OWNER_ID);
     const now = new Date();
     const today = now.toLocaleDateString('he-IL');
@@ -8318,6 +8342,7 @@ nodeCron.schedule('0 8 * * *', async () => {
 // ─── Daily reputation pulse (07:30) — the listening layer ────────
 nodeCron.schedule('30 7 * * *', async () => {
   try {
+    if (!profile.jobEnabled('reputation-pulse')) return;
     if (botStatus !== 'connected') return;
     const oc = await client.getChatById(OWNER_ID);
     const r = await runReputationPulse(1440);
