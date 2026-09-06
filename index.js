@@ -1428,6 +1428,8 @@ registerToolHandlers({
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
+// Desktop-agent bridge rides the same socket.io server (no extra port).
+try { require('./src/desktop-agent').attach(io); } catch (e) { console.warn('desktop-agent attach: ' + e.message); }
 app.use(express.static(path.join(__dirname, 'public')));
 
 let botStatus = 'disconnected';
@@ -5687,6 +5689,60 @@ async function route(chatId, text, chat) {
       }
     })();
     return '🔢 ממספר את הפרצופים בתמונה האחרונה... שנייה.';
+  }
+
+  // ─── 🖥️ סוכן שולחני ──────────────────────────────────────────────
+  if (/^סוכן\b/i.test(text.trim())) {
+    const da = require('./src/desktop-agent');
+    const rest = text.trim().replace(/^סוכן\s*/i, '').trim();
+    if (!rest || /^(סטטוס|מצב)$/i.test(rest)) return da.getStatus();
+    if (/^חשבונות$/i.test(rest)) return da.listAccounts();
+
+    const addM = rest.match(/^הוסף חשבון\s+(.+?)\s*(?:\|\s*(.+))?$/i);
+    if (addM) { da.addAccount(addM[1], addM[2] || 'general'); return `✅ נוסף.\n\n${da.listAccounts()}`; }
+    const rmM = rest.match(/^הסר חשבון\s+(\S+)$/i);
+    if (rmM) { da.removeAccount(rmM[1]); return `🗑️ הוסר.\n\n${da.listAccounts()}`; }
+    const selM = rest.match(/^חשבון\s+(\S+)$/i);
+    if (selM) {
+      const a = da.setActiveAccount(selM[1]);
+      return a ? `✅ חשבון פעיל: *${a.label}* (${a.platform})` : `❌ אין חשבון עם מזהה "${selM[1]}".\n\n${da.listAccounts()}`;
+    }
+    if (/^פרסום הפעל$/i.test(rest)) { da.setPublishing(true); return '⚠️ *פרסום הופעל.* כל פעולת פרסום עדיין תדרוש אישור מפורש ממך.'; }
+    if (/^פרסום כבה$/i.test(rest)) { da.setPublishing(false); return '🔒 פרסום הושבת.'; }
+
+    if (/^(בדיקה|פינג|ping)$/i.test(rest)) {
+      (async () => {
+        const r = await da.run('ping');
+        await botSend(chat, r.ok
+          ? `✅ *הסוכן חי*\n💻 ${r.data.host} · ${r.data.platform}\n⏱️ המחשב דלוק ${Math.round(r.data.uptimeMin / 60)} שעות`
+          : `❌ ${r.error}`);
+      })();
+      return '🖥️ בודק קשר עם המחשב...';
+    }
+
+    if (/^(צלם|צילום|מסך)$/i.test(rest)) {
+      (async () => {
+        const r = await da.run('screenshot', {}, 60000);
+        if (!r.ok) { await botSend(chat, `❌ ${r.error}`); return; }
+        try {
+          const { MessageMedia } = require('whatsapp-web.js');
+          await chat.sendMessage(new MessageMedia('image/png', r.data.image, 'screen.png'),
+            { caption: '🖥️ המסך שלך עכשיו' + BOT_MARKER });
+        } catch (e) { await botSend(chat, '❌ שליחת הצילום נכשלה: ' + (e.message || '').substring(0, 60)); }
+      })();
+      return '📸 מצלם את המסך...';
+    }
+
+    const openM = rest.match(/^פתח\s+(\S+)$/i);
+    if (openM) {
+      (async () => {
+        const r = await da.run('open_url', { url: openM[1] });
+        await botSend(chat, r.ok ? `✅ נפתח במחשב: ${openM[1]}` : `❌ ${r.error}`);
+      })();
+      return '🌐 פותח במחשב...';
+    }
+
+    return da.getStatus();
   }
 
   // ─── 📻 ניטור שידורים חיים ────────────────────────────────────────
