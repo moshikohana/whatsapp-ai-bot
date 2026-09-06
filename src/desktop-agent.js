@@ -34,6 +34,11 @@ const ACTIONS = {
   screenshot: { desc: 'צילום מסך', publicFacing: false },
   open_url:   { desc: 'פתיחת קישור בדפדפן', publicFacing: false },
   notify:     { desc: 'התראה על המסך', publicFacing: false },
+  clip_set:   { desc: 'העתקה ללוח של המחשב', publicFacing: false },
+  clip_get:   { desc: 'קריאת הלוח מהמחשב', publicFacing: false },
+  lock:       { desc: 'נעילת המחשב', publicFacing: false },
+  windows:    { desc: 'מה פתוח עכשיו', publicFacing: false },
+  downloads:  { desc: 'הורדות אחרונות', publicFacing: false },
   // Reserved for when publishing is enabled — declared so the interface can
   // show them, but the handler refuses until `publishing.enabled` is true.
   publish:    { desc: 'פרסום לרשת (מושבת)', publicFacing: true },

@@ -47,9 +47,13 @@ socket.on('connect_error', (e) => console.log('[!] Connection error:', e.message
 
 // Run a PowerShell snippet and resolve when it exits.
 function ps(script, timeout = 30000) {
-  return new Promise((res, rej) =>
-    execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-      { timeout, maxBuffer: 8 * 1024 * 1024 }, (e, so, se) => e ? rej(new Error(se || e.message)) : res(so)));
+  // Force UTF-8 on stdout, otherwise Hebrew comes back as "?????".
+  const wrapped = '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' + script;
+  return new Promise((res, rej) => {
+    execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', wrapped],
+      { timeout, maxBuffer: 8 * 1024 * 1024, encoding: "utf8" },
+      (e, so, se) => e ? rej(new Error(se || e.message)) : res(so));
+  });
 }
 
 // ── Action handlers ──────────────────────────────────────────────
@@ -118,6 +122,44 @@ $n.Icon=[System.Drawing.SystemIcons]::Information; $n.Visible=$true;
 $n.ShowBalloonTip(8000,'${esc(title || 'Boti')}','${esc(message)}',[System.Windows.Forms.ToolTipIcon]::Info);
 Start-Sleep -Seconds 9;`, 15000).catch(() => {});
     return { shown: true };
+  },
+
+  async clip_set({ text }) {
+    if (!text) throw new Error('no text');
+    const f = path.join(os.tmpdir(), `clip-${Date.now()}.txt`);
+    fs.writeFileSync(f, String(text), 'utf8');
+    await ps(`Set-Clipboard -Value (Get-Content -Raw -Encoding UTF8 '${f}')`, 15000);
+    try { fs.unlinkSync(f); } catch {}
+    return { copied: String(text).length };
+  },
+
+  async clip_get() {
+    const out = await ps('Get-Clipboard -Raw', 15000);
+    return { text: (out || '').toString().trim().substring(0, 3000) };
+  },
+
+  async lock() {
+    execFile('rundll32.exe', ['user32.dll,LockWorkStation'], () => {});
+    return { locked: true };
+  },
+
+  async windows() {
+    const out = await ps(`Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | ` +
+      `Select-Object -First 15 ProcessName,MainWindowTitle | ConvertTo-Json -Compress`, 20000);
+    let list = [];
+    try { const j = JSON.parse(out); list = Array.isArray(j) ? j : [j]; } catch {}
+    return { windows: list.map(w => ({ app: w.ProcessName, title: String(w.MainWindowTitle || '').substring(0, 70) })) };
+  },
+
+  async downloads() {
+    const dir = path.join(os.homedir(), 'Downloads');
+    let files = [];
+    try {
+      files = fs.readdirSync(dir)
+        .map(n => { try { const s = fs.statSync(path.join(dir, n)); return { name: n, mtime: s.mtimeMs, kb: Math.round(s.size / 1024) }; } catch { return null; } })
+        .filter(Boolean).sort((a, b) => b.mtime - a.mtime).slice(0, 10);
+    } catch {}
+    return { files };
   },
 
   // Deliberately not implemented — the server also refuses it while

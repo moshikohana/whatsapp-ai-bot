@@ -5733,11 +5733,76 @@ async function route(chatId, text, chat) {
       return '📸 מצלם את המסך...';
     }
 
+    if (/^(נעל|נעילה|lock)$/i.test(rest)) {
+      (async () => {
+        const r = await da.run('lock');
+        await botSend(chat, r.ok ? '🔒 המחשב ננעל.' : `❌ ${r.error}`);
+      })();
+      return '🔒 נועל את המחשב...';
+    }
+
+    if (/^(חלונות|מה פתוח|windows)$/i.test(rest)) {
+      (async () => {
+        const r = await da.run('windows');
+        if (!r.ok) { await botSend(chat, `❌ ${r.error}`); return; }
+        const w = r.data.windows || [];
+        await botSend(chat, w.length
+          ? `🪟 *פתוח עכשיו במחשב* (${w.length})\n\n` + w.map(x => `• *${x.app}* — ${x.title}`).join('\n')
+          : '🪟 לא נמצאו חלונות פתוחים.');
+      })();
+      return '🪟 בודק מה פתוח...';
+    }
+
+    if (/^(הורדות|downloads)$/i.test(rest)) {
+      (async () => {
+        const r = await da.run('downloads');
+        if (!r.ok) { await botSend(chat, `❌ ${r.error}`); return; }
+        const f = r.data.files || [];
+        await botSend(chat, f.length
+          ? `📥 *הורדות אחרונות*\n\n` + f.map(x => `• ${x.name} _(${x.kb}KB · ${new Date(x.mtime).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })})_`).join('\n')
+          : '📥 תיקיית ההורדות ריקה.');
+      })();
+      return '📥 בודק הורדות...';
+    }
+
+    if (/^(לוח|קליפבורד|clipboard|הדבק)$/i.test(rest)) {
+      (async () => {
+        const r = await da.run('clip_get');
+        await botSend(chat, r.ok
+          ? (r.data.text ? `📋 *הלוח במחשב:*\n\n${r.data.text}` : '📋 הלוח ריק.')
+          : `❌ ${r.error}`);
+      })();
+      return '📋 קורא את הלוח מהמחשב...';
+    }
+
+    const copyM = rest.match(/^(?:העתק|copy)\s+([\s\S]+)$/i);
+    if (copyM) {
+      (async () => {
+        const r = await da.run('clip_set', { text: copyM[1] });
+        await botSend(chat, r.ok
+          ? `📋 *הועתק ללוח של המחשב* (${r.data.copied} תווים)\n\n_עכשיו פשוט Ctrl+V איפה שצריך._`
+          : `❌ ${r.error}`);
+      })();
+      return '📋 מעתיק למחשב...';
+    }
+
+    const notifyM = rest.match(/^(?:התראה|notify|הודעה)(?:\s+([\s\S]+))?$/i);
+    if (notifyM) {
+      const msg = (notifyM[1] || '').trim();
+      if (!msg) return '📢 מה להציג? לדוגמה: *סוכן התראה פגישה בעוד 10 דקות*';
+      (async () => {
+        const r = await da.run('notify', { title: 'בוטי', message: msg });
+        await botSend(chat, r.ok ? '📢 ההתראה מוצגת על המסך.' : `❌ ${r.error}`);
+      })();
+      return '📢 שולח התראה למחשב...';
+    }
+
     const openM = rest.match(/^פתח\s+(\S+)$/i);
     if (openM) {
       (async () => {
-        const r = await da.run('open_url', { url: openM[1] });
-        await botSend(chat, r.ok ? `✅ נפתח במחשב: ${openM[1]}` : `❌ ${r.error}`);
+      const _url = /^https?:\/\//i.test(openM[1]) ? openM[1] : 'https://' + openM[1];
+        const r = await da.run('open_url', { url: _url });
+        await botSend(chat, r.ok ? `✅ נפתח במחשב: ${_url}` : `❌ ${r.error}`);
       })();
       return '🌐 פותח במחשב...';
     }
