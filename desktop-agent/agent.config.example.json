@@ -1,0 +1,5 @@
+{
+  "botUrl": "https://<the bot tunnel url>.trycloudflare.com",
+  "secret": "<same AGENT_SECRET as the server .env>",
+  "name": "my-pc"
+}

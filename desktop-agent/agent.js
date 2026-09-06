@@ -15,14 +15,22 @@ const os = require('os');
 const { execFile } = require('child_process');
 const { io } = require('socket.io-client');
 
-const BOT_URL = process.env.BOT_URL || 'http://localhost:3000';
-const SECRET = process.env.AGENT_SECRET || '';
-const NAME = process.env.AGENT_NAME || os.hostname();
+// Settings come from agent.config.json next to this file, so nothing depends
+// on shell syntax (PowerShell's `set X=Y` silently does nothing, which is
+// exactly how the first run failed). Environment variables still win if set.
+let fileCfg = {};
+try { fileCfg = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, 'agent.config.json'), 'utf8')); } catch {}
+
+const BOT_URL = process.env.BOT_URL || fileCfg.botUrl || 'http://localhost:3000';
+const SECRET = process.env.AGENT_SECRET || fileCfg.secret || '';
+const NAME = process.env.AGENT_NAME || fileCfg.name || os.hostname();
 
 if (!SECRET) {
-  console.error('❌ AGENT_SECRET חסר. הגדר את אותו סוד שנמצא ב-.env של השרת.');
+  console.error('❌ חסר AGENT_SECRET.');
+  console.error('   ערוך את agent.config.json שליד הקובץ הזה, או הרץ את start-agent.bat.');
   process.exit(1);
 }
+console.log(`🔗 מתחבר אל ${BOT_URL} בשם "${NAME}"...`);
 
 const socket = io(BOT_URL, { transports: ['websocket', 'polling'], reconnection: true });
 

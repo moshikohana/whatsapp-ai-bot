@@ -21,3 +21,6 @@ data/blocked-groups.json
 data/bot-down-notify.json
 data/command-center-state.json
 data/user-location.json
+
+# desktop agent local settings (contains the shared secret)
+desktop-agent/agent.config.json
