@@ -464,10 +464,10 @@ function shouldShowMenu(text) {
   if (/^(?:תסרוק|תסרוק לי)\s*[\?\.!]?$/i.test(t)) return true;
 
   // Has "סקירה/סריקה" but missing BOTH platform AND specific source-type
-  const hasScan = /\b(?:סריקה|סקירה|תסרוק)\b/i.test(t);
+  const hasScan = /(?<![א-תA-Za-z0-9_])(?:סריקה|סקירה|תסרוק)(?![א-תA-Za-z0-9_])/i.test(t);
   if (!hasScan) return false;
-  const mentionsPlatform = /\b(טלגרם|telegram|וואטסאפ|whatsapp|וואטסטפ)\b/i.test(t);
-  const mentionsType = /\b(קבוצות|ערוצים|הקבוצות|הערוצים)\b/i.test(t);
+  const mentionsPlatform = /(?<![א-תA-Za-z0-9_])(טלגרם|telegram|וואטסאפ|whatsapp|וואטסטפ)(?![א-תA-Za-z0-9_])/i.test(t);
+  const mentionsType = /(?<![א-תA-Za-z0-9_])(קבוצות|ערוצים|הקבוצות|הערוצים)(?![א-תA-Za-z0-9_])/i.test(t);
   if (!mentionsPlatform && !mentionsType) return true;
 
   return false;

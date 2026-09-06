@@ -3940,7 +3940,7 @@ ${rawBody}`;
         }
         // Which candidates did they pick?
         let chosen = [];
-        if (/\b(הכל|כולם|all)\b/i.test(t)) {
+        if (/(?<![א-תA-Za-z0-9_])(הכל|כולם|all)(?![א-תA-Za-z0-9_])/i.test(t)) {
           chosen = gp.candidates.slice();
         } else {
           const nums = t.match(/\d+/g);
@@ -4299,9 +4299,9 @@ ${rawBody}`;
       /סכם\s+(?:לי\s+)?(?:את\s+)?ה?קבוצ[הת]/i.test(text);
     if (!_isSchedCmd && !_mentionsSingleGroup && (
       // user says "תעשה/עשה/תריץ/תן לי/רוצה... סריקה/סקירה" — bare, no specific group
-      /(?:תעשה|עשה|תריץ|הרץ|תן לי|תוציא|רוצה|צריך|אפשר|בצע|תפעיל|תשלח|הפעל)\s+(?:לי\s+)?(?:סריקה|סקירה)\b/i.test(text) ||
+      /(?:תעשה|עשה|תריץ|הרץ|תן לי|תוציא|רוצה|צריך|אפשר|בצע|תפעיל|תשלח|הפעל)\s+(?:לי\s+)?(?:סריקה|סקירה)(?![א-תA-Za-z0-9_])/i.test(text) ||
       // starts with סריקה/סקירה (any suffix: יומית, עכשיו, ידנית, מהירה...)
-      /^(?:סריקה|סקירה)\b/i.test(text) ||
+      /^(?:סריקה|סקירה)(?![א-תA-Za-z0-9_])/i.test(text) ||
       // classic exact phrases — explicit multi-group wording
       /סריקת קבוצות|סקירת קבוצות|תסרוק קבוצות|תסרוק לי את הקבוצות/i.test(text) ||
       // "תסרוק לי" alone — only when followed by time-window or nothing (not by a specific target)
@@ -4315,7 +4315,7 @@ ${rawBody}`;
     // ── Negative guard: explicit Telegram mention → route to Claude ──
     // Telegram has its own tool (different platform). Without this guard,
     // "סריקה של הערוצים בטלגרם" was hijacked to the WhatsApp scanner.
-    !/\b(טלגרם|telegram|טלי?גראם)\b/i.test(text)
+    !/(?<![א-תA-Za-z0-9_])(טלגרם|telegram|טלי?גראם)(?![א-תA-Za-z0-9_])/i.test(text)
     ) {
       // ── Hot-reload daily.json so edits without restart take effect ──
       // The in-memory dailyTasks Map can drift from disk (user edits file
@@ -5659,7 +5659,7 @@ async function route(chatId, text, chat) {
   // Anchored to the START of the message + specific phrases only. Previously
   // the bare "עדכונים" matched ANYWHERE, so a distribution message containing
   // "קבוצת העדכונים" wrongly triggered the changelog dump.
-  if (/^(מה חדש|מה יש חדש|מה נשתנה|מה השתנה בבוט|מה הוסף לבוט|עדכוני בוט|changelog|פיצ'רים חדשים|מה בוצע בבוט)\b/i.test(text.trim())) {
+  if (/^(מה חדש|מה יש חדש|מה נשתנה|מה השתנה בבוט|מה הוסף לבוט|עדכוני בוט|changelog|פיצ'רים חדשים|מה בוצע בבוט)(?![א-תA-Za-z0-9_])/i.test(text.trim())) {
     const { formatChangelog } = require('./src/changelog');
     return formatChangelog(3);
   }
