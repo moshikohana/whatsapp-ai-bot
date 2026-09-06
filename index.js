@@ -5445,6 +5445,23 @@ async function handleDocument(msg, caption, fileName, chatId) {
   }
 }
 
+
+// Recent group traffic for the מוקד digest — everything the bot cached since
+// the last digest, so the summary reflects what HAPPENED, not just keyword hits.
+function _digestPool(sinceMs) {
+  const cutoff = Math.floor((sinceMs || (Date.now() - 6 * 3600 * 1000)) / 1000);
+  const out = [];
+  for (const [cid, msgs] of Object.entries(_msgCache || {})) {
+    const name = _jidNames.get(cid) || cid;
+    for (const m of msgs) {
+      if (m && m.ts > cutoff && m.body && m.body.length > 25) {
+        out.push({ group: name, sender: m.sender || '', body: m.body, ts: m.ts });
+      }
+    }
+  }
+  return out.sort((a, b) => a.ts - b.ts).slice(-400);
+}
+
 // ─── Targeted per-group analytics ──────────────────────────────────────
 // "נתח קבוצה <שם> [שבועיים/שבוע/חודש]" → top posters, busiest hours, volume
 // over a DEEP window (up to 30 days, from the counts-only group-stats rollup),
@@ -5667,13 +5684,20 @@ async function route(chatId, text) {
   }
 
   // ─── "מוקד" — pull the digest on demand ──────────────────────────
-  if (/^(מוקד|דייג'סט|דיגסט|מה חדש היום|סיכום התראות)\s*[?!.]?$/i.test(text.trim())) {
+  if (/^(מוקד|דייג'סט|דיגסט|מה חדש היום|מה קרה|סיכום התראות)\s*[?!.]?$/i.test(text.trim())) {
     const _hub = require('./src/alert-hub');
-    const _d = _hub.buildDigest();
-    if (!_d) return `📭 *מוקד ריק* — אין התראות ממתינות.${_hub.inQuietHours() ? '\n_(כרגע שעות שקט — התראות נאספות ויגיעו אחר כך.)_' : ''}`;
-    pendingHubActions = new Map((_d.actions || []).map(a => [String(a.n), a]));
-    _hub.markDigestSent(_d.actions || []);
-    return _d.text;
+    (async () => {
+      try {
+        const _d = await _hub.buildDigest(_digestPool(_hub.getLastDigestAt()));
+        if (!_d) { await botSend(chat, '📭 *מוקד ריק* — לא נאספו הודעות חדשות מהקבוצות.'); return; }
+        pendingHubActions = new Map((_d.actions || []).map(a => [String(a.n), a]));
+        _hub.markDigestSent(_d.actions || []);
+        await botSend(chat, _d.text);
+      } catch (e) {
+        try { await botSend(chat, '❌ בניית המוקד נכשלה: ' + (e.message || '').substring(0, 60)); } catch {}
+      }
+    })();
+    return '📬 מרכיב את המוקד — סוקר מה קרה בקבוצות... שנייה.';
   }
 
   // ─── מוקד quick actions — "1 הצג", "הצג 1", or just "הצג" ────────
@@ -6578,7 +6602,7 @@ setInterval(async () => {
     if (botStatus !== 'connected') return;
     const hub = require('./src/alert-hub');
     if (!hub.dueForDigest()) return;
-    const d = hub.buildDigest();
+    const d = await hub.buildDigest(_digestPool(hub.getLastDigestAt()));
     if (!d) return;
     const oc = await client.getChatById(OWNER_ID);
     await botSend(oc, d.text);

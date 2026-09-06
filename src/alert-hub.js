@@ -124,54 +124,91 @@ function _snip(str, max) {
 }
 
 function pendingCount() { return pending.length; }
+function getLastDigestAt() { return lastDigestAt; }
 function dueForDigest() {
-  if (!pending.length) return false;
   if (inQuietHours()) return false;
   return (Date.now() - lastDigestAt) >= DIGEST_MINUTES * 60 * 1000;
 }
 
 const MAX_DIGEST_ITEMS = 8;
+const MAX_POOL_CHARS = 9000;
+
+// Summarize what actually HAPPENED in the monitored groups since the last
+// digest. The keyword list only covers 17 Kellner/בג"ץ terms, so the original
+// digest was blind to everything else — it missed a whole night of political
+// drama and the morning's IDF strikes (2026-09-06). This reads the real group
+// traffic instead of a keyword filter.
+async function _extractStories(pool) {
+  if (!pool || pool.length < 5) return [];
+  const byGroup = {};
+  for (const m of pool) (byGroup[m.group] = byGroup[m.group] || []).push(m);
+  let corpus = '';
+  for (const [grp, msgs] of Object.entries(byGroup)) {
+    for (const m of msgs.slice(-25)) {
+      const line = `[${grp}] ${(m.body || '').replace(/\s+/g, ' ').substring(0, 180)}\n`;
+      if (corpus.length + line.length > MAX_POOL_CHARS) break;
+      corpus += line;
+    }
+    if (corpus.length >= MAX_POOL_CHARS) break;
+  }
+  if (!corpus.trim()) return [];
+  try {
+    const j = await require('./claude').classifyJSON(corpus, {
+      system: 'אתה עורך חדשות שמסכם שיח בקבוצות וואטסאפ פוליטיות/חדשותיות ישראליות. ' +
+        'קבל אוסף הודעות והחזר JSON בלבד: {"stories":[{"title":"כותרת קצרה","summary":"משפט אחד עובדתי","importance":1-5}]}. ' +
+        'עד 6 סיפורים, מהחשוב לפחות. אל תמציא — רק מה שמופיע בהודעות. בעברית.',
+      maxTokens: 900,
+    });
+    const st = (j && Array.isArray(j.stories)) ? j.stories : [];
+    return st.filter(s => s && s.title).sort((a, b) => (b.importance || 0) - (a.importance || 0)).slice(0, 6);
+  } catch (e) { return []; }
+}
 
 // ── Build the digest ─────────────────────────────────────────────
 // Returns null when there's nothing to send, else { text, actions }.
-// EVERY item is numbered and the available actions are spelled out once, so
-// the owner always knows what the message is asking of him. `actions` carries
-// the source message ids so "<n> הצג" can pull the original back.
-function buildDigest() {
-  if (!pending.length) return null;
+// `pool` = recent group messages (from index.js's _msgCache) so the digest
+// reports what happened, not just what tripped a keyword.
+async function buildDigest(pool) {
   const items = pending.slice();
   const clusters = _cluster(items);
-  const shown = clusters.slice(0, MAX_DIGEST_ITEMS);
+  const stories = await _extractStories(pool);
+  if (!clusters.length && !stories.length) return null;
 
   const hhmm = ts => {
     try { return new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' }); }
     catch { return ''; }
   };
-  const now = hhmm(Date.now());
-  let out = `📬 *מוקד* · ${now}\n_${items.length} עדכונים · ${clusters.length} נושאים_\n${'━'.repeat(18)}`;
+  const sinceTxt = lastDigestAt ? `מאז ${hhmm(lastDigestAt)}` : 'מהתקופה האחרונה';
+  let out = `📬 *מוקד* · ${hhmm(Date.now())}\n_${sinceTxt} · ${(pool || []).length} הודעות נסרקו_\n${'━'.repeat(18)}`;
 
-  const actions = [];
-  shown.forEach((c, i) => {
-    const n = i + 1;
-    const where = c.groups.length > 1 ? `📍 ${c.groups.length} קבוצות` : `📍 ${_snip(c.groups[0] || c.rep.group || '', 24)}`;
-    const hot = c.groups.length >= 2 ? '🔥 ' : '';
-    actions.push({
-      n,
-      topic: _snip(c.rep.preview || c.rep.keyword || '', 80),
-      keyword: c.rep.keyword,
-      msgIds: c.items.map(it => ({ msgId: it.msgId, chatId: it.chatId })).filter(x => x.msgId).slice(0, 3),
+  // 1) What actually happened
+  if (stories.length) {
+    out += `\n\n📰 *מה קרה*`;
+    stories.forEach(s => {
+      const dot = (s.importance || 0) >= 4 ? '🔴' : (s.importance || 0) >= 3 ? '🟠' : '⚪';
+      out += `\n\n${dot} *${_snip(s.title, 70)}*\n${_snip(s.summary || '', 150)}`;
     });
-    out += `\n\n*${n}.* ${hot}🔑 ${c.rep.keyword} · ${where} · 🕐 ${hhmm(c.rep.ts)}\n${_snip(c.rep.preview, 140)}`;
-  });
+  }
 
-  if (clusters.length > shown.length) out += `\n\n_+${clusters.length - shown.length} נושאים נוספים_`;
-
-  out += `\n${'━'.repeat(18)}\n*מה לעשות?* ענה במספר + פעולה:\n` +
-    `📄 *הצג* — שולח לך את ההודעה המקורית\n` +
-    `✍️ *תגובה* — מנסח טיוטת תגובה\n` +
-    `📤 *הפצה* — פותח הכנת הפצה\n` +
-    `🔕 *שקט* — משתיק את הנושא ל-12 שעות\n\n` +
-    `_לדוגמה:_ *1 הצג*`;
+  // 2) Keyword-flagged items — these keep the numbered actions
+  const actions = [];
+  const shown = clusters.slice(0, MAX_DIGEST_ITEMS);
+  if (shown.length) {
+    out += `\n${'━'.repeat(18)}\n🔑 *סומן עבורך (${clusters.length})*`;
+    shown.forEach((c, i) => {
+      const n = i + 1;
+      const where = c.groups.length > 1 ? `${c.groups.length} קבוצות` : _snip(c.groups[0] || c.rep.group || '', 22);
+      actions.push({
+        n,
+        topic: _snip(c.rep.preview || c.rep.keyword || '', 80),
+        keyword: c.rep.keyword,
+        msgIds: c.items.map(it => ({ msgId: it.msgId, chatId: it.chatId })).filter(x => x.msgId).slice(0, 3),
+      });
+      out += `\n\n*${n}.* ${c.groups.length >= 2 ? '🔥 ' : ''}${c.rep.keyword} · 📍 ${where} · 🕐 ${hhmm(c.rep.ts)}\n${_snip(c.rep.preview, 130)}`;
+    });
+    if (clusters.length > shown.length) out += `\n\n_+${clusters.length - shown.length} נוספים_`;
+    out += `\n${'━'.repeat(18)}\n*פעולות:* ענה במספר + \n📄 *הצג* · ✍️ *תגובה* · 📤 *הפצה* · 🔕 *שקט*\n_לדוגמה:_ *1 הצג*`;
+  }
 
   return { text: out.trim(), actions };
 }
@@ -187,5 +224,5 @@ function getLastActions() { return lastActions; }
 
 module.exports = {
   queueAlert, buildDigest, markDigestSent, dueForDigest, pendingCount,
-  muteTopic, isMuted, inQuietHours, DIGEST_MINUTES, getLastActions,
+  muteTopic, isMuted, inQuietHours, DIGEST_MINUTES, getLastActions, getLastDigestAt,
 };
