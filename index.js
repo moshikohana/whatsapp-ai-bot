@@ -6877,27 +6877,31 @@ function buildMediaMonitorPrompt(now = new Date()) {
   const todayISO = now.toISOString().slice(0, 10);
   const twoWeeksAgoISO = new Date(now.getTime() - 14 * 86400000).toISOString().slice(0, 10);
   const todayHe = now.toLocaleDateString('he-IL', { day: 'numeric', month: 'long', year: 'numeric' });
-  return `חפש אזכורים ופרסומים אחרונים של ח"כ אריאל קלנר (הליכוד) — גם *מאת* קלנר (ציוצים/פוסטים) וגם *עליו* (כתבות/חדשות). המטרה: תמונה עדכנית של מה שמתפרסם.
+  return `חפש כתבות וחדשות אחרונות *על* ח"כ אריאל קלנר (הליכוד). המטרה: תמונה עדכנית של הסיקור התקשורתי.
 
 📅 היום: ${todayHe} (${todayISO}).
 טווח מועדף: 14 הימים האחרונים (${twoWeeksAgoISO} → ${todayISO}).
 - דרג מהחדש לישן, וציין לכל פריט את *תאריך הפרסום*.
-- אם אין כלום מ-14 הימים — הצג את האזכורים העדכניים ביותר שכן מצאת (עד ~חודש אחורה) וסמן במפורש "(ישן יותר)". *אל תחזיר "אין" כשקיים תוכן* — תמיד הראה מה הכי עדכני שקיים.
-- אל תמציא תאריכים. אם תאריך לא ודאי — כתוב "תאריך משוער".
+- אם אין כלום מ-14 הימים — הצג את הפריטים העדכניים ביותר שמצאת (עד ~חודש אחורה) וסמן "(ישן יותר)". אל תחזיר "אין" כשקיים תוכן.
+
+🚫 *אסור בהחלט — ציוצים ופוסטים ב-X/טוויטר:*
+web_search *לא* מסוגל לראות את X — אין לך שום גישה לציוצים.
+הציוצים של קלנר כבר צורפו לדוח הזה מ-API אמיתי, לפני החלק שלך.
+לכן: *אל תדווח על אף ציוץ*, אל תכתוב "לפני X שעות", ואל תמציא קישורי x.com.
+אם חיפוש מחזיר משהו שנראה כמו ציוץ — התעלם ממנו לחלוטין.
+
+⛔ אל תמציא תאריכים או ציטוטים. כל פריט חייב להגיע מתוצאת חיפוש אמיתית עם קישור לכתבה.
+אם לא מצאת כלום — כתוב "לא נמצא סיקור חדש".
 
 🔍 חיפושים (web_search — בצע כמה, בעברית):
 1. "אריאל קלנר"
-2. אריאל קלנר קלנר ציוץ X (site:x.com OR site:twitter.com) — כולל החשבון @ArielKallner
-3. "אריאל קלנר" חדשות (ynet, maariv, walla, ערוץ 7, כיכר השבת, סרוגים, כנסת)
-4. אריאל קלנר ועדה / חקיקה / הצעת חוק כנסת
+2. "אריאל קלנר" חדשות (ynet, maariv, walla, ערוץ 7, כיכר השבת, סרוגים, כנסת)
+3. אריאל קלנר ועדה / חקיקה / הצעת חוק כנסת
 
 📋 פורמט:
 
-🐦 *רשתות (X / פייסבוק):*
-[מצייץ · תאריך · שורה · קישור] — או "לא נמצאו אזכורים ברשתות לאחרונה"
-
 📰 *חדשות / כתבות:*
-[כותרת · מקור · תאריך · קישור]
+[כותרת · מקור · תאריך · קישור] — או "לא נמצא סיקור חדש"
 
 ⚡ *דורש תשומת לב / פעולה:*
 [רק אם יש אזכור שמצריך תגובה או הזדמנות תקשורתית — אחרת "אין"]`;
@@ -7709,12 +7713,46 @@ async function runReputationPulse(sinceMinutes = 1440) {
 // Full media monitor: his own Telegram + WhatsApp posts (reliable, exact
 // timestamps) + web_search for news/other mentions. Shared by the 08:00
 // cron and the manual endpoint.
+// Kellner's REAL recent tweets, straight from twitterapi.io — never from the
+// LLM. web_search cannot see X at all, and on 2026-09-06 the model filled that
+// gap by INVENTING tweets ("לפני ~55 דקות") with fake generic links, while his
+// actual latest tweet was two days old. Deterministic data only.
+async function getKallnerXSection(maxTweets = 5) {
+  try {
+    const tweets = await require('./src/twitter-intel').getHisTweets(maxTweets);
+    if (!tweets || !tweets.length) {
+      return '🐦 *X (@ArielKallner):* לא הצלחתי למשוך ציוצים כרגע.\n\n';
+    }
+    const fmt = iso => {
+      try {
+        return new Date(iso).toLocaleString('he-IL', {
+          timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+        });
+      } catch { return '?'; }
+    };
+    const now = Date.now();
+    const lines = tweets.slice(0, maxTweets).map(t => {
+      const ageH = Math.round((now - new Date(t.date).getTime()) / 3600000);
+      const age = ageH < 24 ? `לפני ${ageH}ש׳` : `לפני ${Math.round(ageH / 24)} ימים`;
+      return `• *${fmt(t.date)}* _(${age})_\n  "${(t.text || '').replace(/\s+/g, ' ').substring(0, 120)}"` +
+        (t.url ? `\n  🔗 ${t.url}` : '');
+    }).join('\n');
+    const newest = Math.round((now - new Date(tweets[0].date).getTime()) / 3600000);
+    const staleNote = newest > 30 ? `\n_ℹ️ אין ציוצים חדשים ב-${Math.round(newest / 24)} הימים האחרונים._` : '';
+    return `🐦 *X (@ArielKallner)* — ${tweets.length} אחרונים:\n${lines}${staleNote}\n\n`;
+  } catch (e) {
+    logger.warn('getKallnerXSection: ' + (e.message || '').substring(0, 70));
+    return '';
+  }
+}
+
 async function runMediaMonitor(now = new Date()) {
   const { smartChat: _sc } = require('./src/claude');
   const tgSection = await getKallnerTelegramSection(24);
   const waSection = await getKallnerWhatsAppSection(24);
+  const xSection = await getKallnerXSection(5);
   const web = await _sc(buildMediaMonitorPrompt(now), [], { webSearchMaxUses: 6, timeoutMs: 180000, prefill: '🔍 *' });
-  return `${tgSection}${waSection}\n${web}`;
+  return `${tgSection}${waSection}${xSection}\n${web}`;
 }
 
 // ─── Daily Twitter/X + News monitoring (08:00) ───────────────────
