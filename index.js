@@ -1447,6 +1447,15 @@ try {
     } catch (e) { logger.warn('claude push failed: ' + (e.message || '').substring(0, 80)); }
   });
 } catch (e) { console.warn('desktop-agent attach: ' + e.message); }
+// A guest instance gets a different front page: the QR to scan and the guide
+// for using the bot, in one place. The owner's page is an operator dashboard
+// — restart buttons, logs, diagnostics — which is the wrong thing to hand
+// someone whose first question is "what do I do now?".
+// Registered before express.static so it wins for "/".
+app.get('/', (req, res, next) => {
+  if (!profile.isGuest) return next();
+  res.sendFile(path.join(__dirname, 'public', 'guest.html'));
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 let botStatus = 'disconnected';
