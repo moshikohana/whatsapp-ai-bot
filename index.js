@@ -3628,7 +3628,16 @@ client.on('message_create', async (msg) => {
         // Not a photo — prepend quoted text as context so Claude understands the reply
         const quotedText = (quotedMsg?.body || '').replace(BOT_MARKER, '').trim();
         if (quotedText) {
-          rawBody = `[בתגובה ל: "${quotedText.substring(0, 300)}"]\n${rawBody}`;
+          // Replying "תפעיל" to the broadcast status should RUN the command,
+          // not become prose the LLM has to guess at.
+          const canon = _canonicalizeCommand(rawBody, quotedText);
+          if (canon) {
+            logger.info(`🎯 quoted reply => ${canon}`);
+            rawBody = canon;
+          } else {
+            rawBody = `[בתגובה ל: "${quotedText.substring(0, 300)}"]
+${rawBody}`;
+          }
         }
       } catch (quotedErr) {
         console.warn('Quoted msg lookup failed:', quotedErr.message?.substring(0, 60));
@@ -5533,7 +5542,68 @@ async function analyzeGroupActivity(groupQuery, sinceDays = 7) {
 }
 
 // ─── Router ──────────────────────────────────────────────────────
+// ─── Intent resolver ─────────────────────────────────────────────
+// Commands are prefix-matched (/^שידורים/ etc.), which breaks the two most
+// natural ways to talk to the bot:
+//   1. a sentence — "למה הניטור שידורים כבוי? תפעיל" answered about GROUPS,
+//      because it didn't start with the command word and fell to the LLM;
+//   2. a quoted reply — replying "תפעיל" to the broadcast status message,
+//      where the quoted-context prefix pushes the verb away from the start.
+// This maps both back onto the canonical command before routing.
+function _canonicalizeCommand(text, quotedText = '') {
+  const t = (text || '').trim();
+  if (!t || t.length > 120) return null;
+
+  // Hebrew-safe "contains this word": JS \b is ASCII-only, so \bתפעיל\b never
+  // matches. Use explicit separators instead.
+  // Hebrew-safe "contains this word": JS  is ASCII-only (תפעיל never
+  // matches), and building the class inside a single-quoted string silently
+  // turned s into a literal "s". Normalise punctuation to spaces instead.
+  const padded = " " + t.replace(/[?!.,:;"״׳–—-]/g, " ").replace(/s+/g, " ") + " ";
+  const has = (alts) => alts.split("|").some(w => padded.includes(" " + w + " "));
+
+  // Which feature is being discussed — from the message, else from what he replied to.
+  const featureOf = (s) => {
+    if (/שידור|רדיו|האזנ|תחנ(ה|ות)|גלי צה|103FM|גלגלצ/i.test(s || '')) return 'broadcast';
+    if (/סוכן|מחשב שלי|במחשב|צילום מסך|צלם|הלוח של המחשב/i.test(s || '')) return 'agent';
+    if (/מוקד|דייג׳סט|דיגסט/i.test(s || '')) return 'hub';
+    return null;
+  };
+  const feature = featureOf(t) || featureOf(quotedText);
+  if (!feature) return null;
+
+  // Already a proper command — leave it alone.
+  if (/^(שידורים|סוכן|מוקד)(\s|$)/i.test(t)) return null;
+
+  const on = has('תפעיל|להפעיל|הפעל|תדליק|פעיל|תתחיל|הדלק');
+  const off = has('תכבה|לכבות|כבה|תעצור|עצור|תפסיק|כבוי');
+  const check = has('בדוק|תבדוק|עכשיו|דגום|תדגום');
+  const status = has('סטטוס|מצב|למה') || /\?/.test(t);
+
+  if (feature === 'broadcast') {
+    if (on) return 'שידורים הפעל';
+    if (off && !on) return 'שידורים כבה';
+    if (check) return 'שידורים בדוק';
+    if (status) return 'שידורים';
+  }
+  if (feature === 'agent') {
+    if (has('צלם|תצלם|צילום|מסך')) return 'סוכן צלם';
+    if (has('חלונות') || /מה פתוח/i.test(t)) return 'סוכן חלונות';
+    if (has('נעל|נעילה|תנעל')) return 'סוכן נעל';
+    if (has('לוח|קליפבורד')) return 'סוכן לוח';
+    if (has('הורדות')) return 'סוכן הורדות';
+    if (status || check) return 'סוכן';
+  }
+  if (feature === 'hub' && (status || check || on)) return 'מוקד';
+  return null;
+}
+
 async function route(chatId, text, chat) {
+  // "למה הניטור שידורים כבוי? תפעיל" => "שידורים הפעל" (see _canonicalizeCommand).
+  {
+    const _canon = _canonicalizeCommand(text);
+    if (_canon) { logger.info(`🎯 intent => ${_canon}`); text = _canon; }
+  }
   // `chat` is the live, already-resolved Chat handed over by the message
   // handlers. 22 call sites inside this function use botSend(chat, …); before
   // this parameter existed `chat` was undefined here and every one of them
