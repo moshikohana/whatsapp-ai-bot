@@ -295,7 +295,12 @@ function getSystemPromptArray() {
   const time = now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
 
   // Stable: changes only when memories change (rarely)
-  const stablePart = BASE_SYSTEM_PROMPT + getMemoriesForPrompt() + getContextForPrompt();
+  // Shared with JARVIS on the phone: whatever he taught either assistant is
+  // known to both. Part of the cached block because it changes rarely.
+  let _shared = "";
+  try { _shared = require("./jarvis-api").memoryForPrompt(); } catch (_) {}
+  const stablePart = BASE_SYSTEM_PROMPT + getMemoriesForPrompt() + getContextForPrompt()
+    + (_shared ? `\n\n${_shared}` : '');
 
   // Dynamic: changes every call (date/time) or on tool failure
   const dynamicPart = `\n\n📅 היום: ${today}, השעה: ${time}` + getFailedToolsNote();

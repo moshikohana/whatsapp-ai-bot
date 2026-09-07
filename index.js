@@ -1510,6 +1510,44 @@ app.get('/api/logs', (req, res) => {
   try { res.json(require('./src/log-reader').snapshot()); }
   catch (e) { res.status(500).json({ error: (e.message || '').substring(0, 200) }); }
 });
+app.use(express.json({ limit: '1mb' }));            // JARVIS posts JSON bodies
+
+// ─── גשר JARVIS ──────────────────────────────────────────────────
+// The phone app and this bot were two assistants that shared nothing — two
+// Claude keys, two memories, neither aware of what the other was told. These
+// endpoints are the seam: alerts out to the phone, commands in from it, and
+// one memory both of them read.
+try {
+  require('./src/jarvis-api').attach(app, {
+    botName: () => botName,
+    // Commands run through route() rather than a parallel implementation, so
+    // JARVIS inherits the entire command surface. route() writes some of its
+    // output through botSend(chat, …) instead of returning it, so it gets a
+    // stand-in chat that collects those sends and hands them back with the
+    // return value — otherwise half the commands would answer with silence.
+    runCommand: async (text) => {
+      const collected = [];
+      const stubChat = {
+        id: { _serialized: OWNER_ID },
+        isGroup: false,
+        async sendMessage(content, opts) {
+          if (typeof content === 'string') collected.push(content);
+          else if (opts && opts.caption) collected.push(opts.caption);
+          else collected.push('[מדיה]');
+          return { id: { _serialized: 'jarvis-stub' } };
+        },
+        async sendStateTyping() {},
+        async clearState() {},
+      };
+      const direct = await route(OWNER_ID, text, stubChat);
+      const parts = [];
+      if (typeof direct === 'string' && direct.trim()) parts.push(direct.trim());
+      for (const c of collected) if (c && c.trim()) parts.push(c.trim());
+      return parts.join('\n\n') || 'בוצע.';
+    },
+  });
+} catch (e) { console.warn('jarvis bridge: ' + e.message); }
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 let botStatus = 'disconnected';
@@ -1673,9 +1711,14 @@ const _initFailFile = path.join(__dirname, 'data', 'init-fail.json');
   try {
     let st = {}; try { st = JSON.parse(fs.readFileSync(_initFailFile, 'utf8')); } catch {}
     if ((st.count || 0) >= 6) {
-      const sessDir = path.join(__dirname, '.wwebjs_auth', 'session-ai-personal-bot');
+      // Follows WA_CLIENT_ID. This was hardcoded to session-ai-personal-bot,
+      // so on any second instance it looked for a directory that does not
+      // exist and healed nothing — the one instance that crash-looped was the
+      // one the repair could never reach.
+      const _cid = process.env.WA_CLIENT_ID || 'ai-personal-bot';
+      const sessDir = path.join(__dirname, '.wwebjs_auth', `session-${_cid}`);
       if (fs.existsSync(sessDir)) {
-        const bak = path.join(__dirname, '.wwebjs_auth', `session-ai-personal-bot.crashbak-${Date.now()}`);
+        const bak = path.join(__dirname, '.wwebjs_auth', `session-${_cid}.crashbak-${Date.now()}`);
         try { fs.renameSync(sessDir, bak); } catch { try { fs.rmSync(sessDir, { recursive: true, force: true }); } catch {} }
         console.log(`🩹 Self-heal: init crash-looped ${st.count}× — session reset (backup ${path.basename(bak)}); showing QR.`);
       }
@@ -7214,6 +7257,16 @@ setInterval(async () => {
     const hits = await bm.checkOnce();
     for (const h of hits) {
       try { await botSend(await client.getChatById(OWNER_ID), bm.formatHit(h)); } catch {}
+      // Also to the phone. A name said on air is the case where WhatsApp is
+      // the wrong channel — it lands among everything else, and by the time
+      // he sees it the moment to respond has passed.
+      try {
+        require('./src/jarvis-api').pushAlert({
+          title: `📻 ${h.station || 'שידור'} — הוזכר קלנר`,
+          body: (h.sentence || h.text || '').substring(0, 400),
+          kind: 'broadcast', urgency: 'high',
+        });
+      } catch {}
     }
     if (hits.length) logger.info(`📻 broadcast: ${hits.length} mention(s) alerted`);
   } catch (e) { logger.warn('broadcast loop: ' + (e.message || '').substring(0, 70)); }
@@ -7235,6 +7288,14 @@ setInterval(async () => {
     await botSend(oc, d.text);
     pendingHubActions = new Map((d.actions || []).map(a => [String(a.n), a]));
     hub.markDigestSent(d.actions || []);
+    try {
+      const _n = (d.actions || []).length;
+      require('./src/jarvis-api').pushAlert({
+        title: `🎯 מוקד — ${_n ? `${_n} דברים שדורשים אותך` : 'עדכון'}`,
+        body: String(d.text || '').replace(/\*/g, '').substring(0, 500),
+        kind: 'hub', urgency: _n ? 'high' : 'normal',
+      });
+    } catch {}
     logger.info(`📬 מוקד digest sent (${(d.actions || []).length} actionable)`);
   } catch (e) { logger.warn('digest flush failed: ' + (e.message || '').substring(0, 80)); }
 }, 5 * 60 * 1000);
