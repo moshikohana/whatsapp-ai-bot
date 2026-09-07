@@ -152,6 +152,27 @@ const ACTION_CATALOGUE = [
   },
 ];
 
+// Today's keyword hits as structured records, newest first.
+function _todayHits(limit = 120) {
+  try {
+    const log = JSON.parse(fs.readFileSync(path.join(DATA, 'keyword-alerts-log.json'), 'utf8'));
+    const today = new Date().toLocaleDateString('he-IL');
+    return (log.entries || [])
+      .filter(e => e.date === today)
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      .slice(0, limit)
+      .map(e => ({
+        keyword: e.keyword || '',
+        group: e.group || '',
+        sender: e.sender || '',
+        preview: e.preview || '',
+        time: e.time || '',
+        date: e.date || '',
+        ts: e.timestamp || 0,
+      }));
+  } catch { return []; }
+}
+
 // ── HTTP surface ─────────────────────────────────────────────────
 function attach(app, deps = {}) {
   const secret = () => process.env.JARVIS_SECRET || '';
@@ -219,8 +240,18 @@ function attach(app, deps = {}) {
       // later as "your last scan" and be worse than nothing.
       if (/סרוק|סריקה|סקירה/.test(text) && reply && reply.length > 400 && !/^אילו|כמה זמן אחורה/.test(reply.trim())) {
         try {
-          fs.writeFileSync(path.join(DATA, 'jarvis-last-scan.json'),
-            JSON.stringify({ ts: Date.now(), request: text, text: reply }, null, 2));
+          // The window is recorded separately from the run time. "Scanned 20
+          // minutes ago" and "covers the last 24 hours" are different facts,
+          // and without the second one there is no way to tell how old the
+          // news inside actually is.
+          const wm = text.match(/(\d+)\s*שעות/);
+          fs.writeFileSync(path.join(DATA, 'jarvis-last-scan.json'), JSON.stringify({
+            ts: Date.now(),
+            request: text,
+            windowHours: wm ? parseInt(wm[1], 10) : null,
+            coversFrom: wm ? Date.now() - parseInt(wm[1], 10) * 3600 * 1000 : null,
+            text: reply,
+          }, null, 2));
         } catch {}
       }
       res.json({ ok: true, text: reply });
@@ -335,7 +366,12 @@ function attach(app, deps = {}) {
         ok: true,
         enabled: st.enabled !== false,
         keywords: st.keywords || [],
-        today: (ka.getTodayAlerts ? ka.getTodayAlerts() : []) || [],
+        // Read from the log file rather than getTodayAlerts(), which returns
+        // a formatted Hebrew string for WhatsApp — mapping over it yielded
+        // 1,910 single characters instead of hits. The app needs structure:
+        // the clock time for "when did this happen" and the epoch for "how
+        // long ago", without reparsing a localised string.
+        today: _todayHits(),
         stats: ka.getStats ? ka.getStats() : null,
       });
     } catch (e) {
