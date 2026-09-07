@@ -124,8 +124,11 @@ const ACTION_CATALOGUE = [
   {
     title: 'סריקות', icon: '🔍',
     items: [
-      { label: 'סריקת קבוצות', cmd: 'סריקה', hint: 'מה קרה בקבוצות מאז אתמול' },
-      { label: 'סקירה', cmd: 'סקירה', hint: 'סקירה מרוכזת' },
+      // Fully specified in one line on purpose. /command is stateless, so a
+      // scan that answers with "which groups?" and then "how far back?" can
+      // never be completed from the app — there is nobody to reply.
+      { label: 'סריקת 11 הקבוצות', cmd: 'סרוק את 11 הקבוצות הפוליטיות 24 שעות אחרונות', hint: '24 שעות אחרונות' },
+      { label: 'סריקה — 6 שעות', cmd: 'סרוק את 11 הקבוצות הפוליטיות 6 שעות אחרונות', hint: 'חלון קצר' },
       { label: 'מוקד', cmd: 'מוקד', hint: 'מה דורש אותך עכשיו' },
       { label: 'נרטיבים', cmd: 'נרטיבים', hint: 'איך הנושא מסופר ברשת' },
     ],
@@ -191,6 +194,17 @@ function attach(app, deps = {}) {
     res.json({ ok: true, now: Date.now(), count: list.length, alerts: list });
   });
 
+  // ── הסריקה האחרונה ─────────────────────────────────────────────
+  // Kept here rather than read from scan-history, because the path that
+  // actually answers a scan request through the API never writes there —
+  // history stayed empty while real scans were being produced. Storing the
+  // result as it passes through is the only place that sees all of them.
+  app.get('/api/jarvis/scan/last', guard, (_req, res) => {
+    let last = null;
+    try { last = JSON.parse(fs.readFileSync(path.join(DATA, 'jarvis-last-scan.json'), 'utf8')); } catch {}
+    res.json({ ok: true, scan: last });
+  });
+
   // 2. Run a bot command as the owner and return what it would have replied.
   //    Reuses route() rather than reimplementing anything: JARVIS gets the
   //    whole command surface — scans, digests, reports — for free.
@@ -200,6 +214,15 @@ function attach(app, deps = {}) {
     if (!deps.runCommand) return res.status(503).json({ error: 'command bridge not wired' });
     try {
       const reply = await deps.runCommand(text);
+      // A scan is expensive and worth keeping. Menu replies ("אילו קבוצות
+      // לסרוק?") are explicitly not stored — a stored prompt would show up
+      // later as "your last scan" and be worse than nothing.
+      if (/סרוק|סריקה|סקירה/.test(text) && reply && reply.length > 400 && !/^אילו|כמה זמן אחורה/.test(reply.trim())) {
+        try {
+          fs.writeFileSync(path.join(DATA, 'jarvis-last-scan.json'),
+            JSON.stringify({ ts: Date.now(), request: text, text: reply }, null, 2));
+        } catch {}
+      }
       res.json({ ok: true, text: reply });
     } catch (e) {
       logger.warn('jarvis command failed: ' + (e.message || '').substring(0, 80));
