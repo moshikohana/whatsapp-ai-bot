@@ -118,6 +118,37 @@ function status() {
   };
 }
 
+// The buttons the app shows. Kept here, next to the bot, so renaming a
+// command updates the app without shipping a new APK.
+const ACTION_CATALOGUE = [
+  {
+    title: 'סריקות', icon: '🔍',
+    items: [
+      { label: 'סריקת קבוצות', cmd: 'סריקה', hint: 'מה קרה בקבוצות מאז אתמול' },
+      { label: 'סקירה', cmd: 'סקירה', hint: 'סקירה מרוכזת' },
+      { label: 'מוקד', cmd: 'מוקד', hint: 'מה דורש אותך עכשיו' },
+      { label: 'נרטיבים', cmd: 'נרטיבים', hint: 'איך הנושא מסופר ברשת' },
+    ],
+  },
+  {
+    title: 'קלנר', icon: '🎙️',
+    items: [
+      { label: 'סטטוס שידורים', cmd: 'שידורים', hint: 'ניטור רדיו חי' },
+      { label: 'בדוק שידורים עכשיו', cmd: 'שידורים בדוק', hint: 'דגימה מיידית' },
+      { label: 'יריבים', cmd: 'יריבים', hint: 'מה הצד השני אומר' },
+    ],
+  },
+  {
+    title: 'מצב הבוט', icon: '🩺',
+    items: [
+      { label: 'מה חדש', cmd: 'מה חדש', hint: 'עדכוני גרסה' },
+      { label: 'למה נכשל', cmd: 'למה', hint: 'הסבר על התקלה האחרונה' },
+      { label: 'תקלות', cmd: 'תקלות', hint: 'היסטוריית תקלות' },
+      { label: 'סטטוס', cmd: 'סטטוס', hint: 'מצב כללי' },
+    ],
+  },
+];
+
 // ── HTTP surface ─────────────────────────────────────────────────
 function attach(app, deps = {}) {
   const secret = () => process.env.JARVIS_SECRET || '';
@@ -162,6 +193,80 @@ function attach(app, deps = {}) {
       logger.warn('jarvis command failed: ' + (e.message || '').substring(0, 80));
       res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
     }
+  });
+
+  // ── Faces ──────────────────────────────────────────────────────
+  // The phone is where the photos already are, so making him route them
+  // through WhatsApp to reach the recogniser was the long way round.
+  app.post('/api/jarvis/face/reference', guard, async (req, res) => {
+    const { name, image, force, chooseIndex } = req.body || {};
+    if (!name || !image) return res.status(400).json({ error: 'צריך שם ותמונה' });
+    try {
+      const fr = require('./face-recognition');
+      const buf = Buffer.from(String(image), 'base64');
+      const r = await fr.addReference(String(name).trim(), buf, {
+        force: !!force,
+        chooseIndex: chooseIndex != null ? parseInt(chooseIndex, 10) : null,
+      });
+      res.json({ ok: true, result: r, total: fr.getReferenceCount(String(name).trim()) });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+
+  app.post('/api/jarvis/face/identify', guard, async (req, res) => {
+    const { image } = req.body || {};
+    if (!image) return res.status(400).json({ error: 'צריך תמונה' });
+    try {
+      const fr = require('./face-recognition');
+      const buf = Buffer.from(String(image), 'base64');
+      const matches = await fr.findMatches(buf);
+      // The array carries extra properties (detections, frameBuffer) that must
+      // not be serialised — frameBuffer alone is the whole image again.
+      res.json({
+        ok: true,
+        faces: (matches.detections || []).length,
+        matches: Array.from(matches).map(m => ({
+          name: m.name,
+          confidence: m.confidence != null ? Math.round(m.confidence * 100) / 100 : null,
+          distance: m.distance != null ? Math.round(m.distance * 1000) / 1000 : null,
+        })),
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+
+  // Numbered overlay, so the app can show which face is which before he
+  // picks one to attach a name to.
+  app.post('/api/jarvis/face/number', guard, async (req, res) => {
+    const { image } = req.body || {};
+    if (!image) return res.status(400).json({ error: 'צריך תמונה' });
+    try {
+      const fr = require('./face-recognition');
+      const out = await fr.numberFaces(Buffer.from(String(image), 'base64'));
+      if (!out || !out.buffer) return res.json({ ok: true, faces: 0, image: null });
+      res.json({ ok: true, faces: out.count != null ? out.count : 0, image: out.buffer.toString('base64') });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+
+  app.get('/api/jarvis/face/people', guard, (_req, res) => {
+    try {
+      const fr = require('./face-recognition');
+      const st = fr.getStatus ? fr.getStatus() : {};
+      res.json({ ok: true, status: st });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 120) });
+    }
+  });
+
+  // ── The command catalogue ──────────────────────────────────────
+  // Sent to the app so its buttons come from the bot rather than from a list
+  // hardcoded in the app that drifts the moment a command is renamed.
+  app.get('/api/jarvis/actions', guard, (_req, res) => {
+    res.json({ ok: true, groups: ACTION_CATALOGUE });
   });
 
   // 3. Shared memory, both directions.
