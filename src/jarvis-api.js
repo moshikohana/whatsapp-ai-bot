@@ -162,7 +162,19 @@ function attach(app, deps = {}) {
   // whether this endpoint exists.
   const guard = (req, res, next) => (authed(req) ? next() : res.status(404).json({ error: 'not found' }));
 
-  app.use('/api/jarvis', (req, res, next) => { if (authed(req)) _lastSeen = Date.now(); next(); });
+  // Every call from the phone is logged, authenticated or not. Without this
+  // there was no way to answer "is the app even reaching the bot?" — the
+  // first thing asked when the buttons appeared to do nothing.
+  app.use('/api/jarvis', (req, res, next) => {
+    const ok = authed(req);
+    if (ok) _lastSeen = Date.now();
+    const started = Date.now();
+    res.on('finish', () => {
+      logger.info(`📱 JARVIS ${req.method} ${req.path} → ${res.statusCode} ` +
+        `(${Date.now() - started}ms${ok ? '' : ', BAD KEY'})`);
+    });
+    next();
+  });
 
   app.get('/api/jarvis/hello', guard, (req, res) => {
     res.json({
@@ -260,6 +272,129 @@ function attach(app, deps = {}) {
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 120) });
     }
+  });
+
+  // ── מעקב תמונות: מי במעקב, ומה נשלח עליו לאחרונה ───────────────
+  app.get('/api/jarvis/faces/tracked', guard, (_req, res) => {
+    try {
+      const arch = require('./face-archive');
+      const fr = require('./face-recognition');
+      const st = fr.getStatus ? fr.getStatus() : {};
+      res.json({
+        ok: true,
+        people: arch.people(),
+        totalPhotos: arch.totalCount(),
+        groups: st.monitoredGroups || [],
+        enabled: st.enabled !== false,
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  app.get('/api/jarvis/faces/photos', guard, (req, res) => {
+    const name = String(req.query.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'צריך שם' });
+    const limit = Math.min(parseInt(req.query.limit, 10) || 12, 30);
+    try {
+      res.json({ ok: true, name, photos: require('./face-archive').photos(name, limit, true) });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // ── מילות מפתח ─────────────────────────────────────────────────
+  app.get('/api/jarvis/keywords', guard, (_req, res) => {
+    try {
+      const ka = require('./keyword-alerts');
+      const st = ka.getStatus();
+      res.json({
+        ok: true,
+        enabled: st.enabled !== false,
+        keywords: st.keywords || [],
+        today: (ka.getTodayAlerts ? ka.getTodayAlerts() : []) || [],
+        stats: ka.getStats ? ka.getStats() : null,
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  app.post('/api/jarvis/keywords', guard, (req, res) => {
+    const { add, remove, enabled } = req.body || {};
+    try {
+      const ka = require('./keyword-alerts');
+      if (add) ka.addKeyword(String(add).trim());
+      if (remove) ka.removeKeyword(String(remove).trim());
+      if (enabled != null) ka.setEnabled(!!enabled);
+      const st = ka.getStatus();
+      res.json({ ok: true, enabled: st.enabled !== false, keywords: st.keywords || [] });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // ── קבוצות ─────────────────────────────────────────────────────
+  app.get('/api/jarvis/groups', guard, (_req, res) => {
+    try {
+      const fr = require('./face-recognition');
+      const st = fr.getStatus ? fr.getStatus() : {};
+      // The scan list is not the file's top level — it lives inside the
+      // group_summary task's params, which is why reading daily.json
+      // directly came back empty.
+      let scanList = [];
+      try {
+        const daily = JSON.parse(fs.readFileSync(path.join(DATA, 'daily.json'), 'utf8'));
+        const gs = (Array.isArray(daily) ? daily : []).find(t => t.action === 'group_summary');
+        scanList = (gs && gs.params && gs.params.groups) || [];
+      } catch {}
+      res.json({
+        ok: true,
+        scanList,
+        photoMonitored: st.monitoredGroups || [],
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // The live chat list, which is what a scan actually picks from — the
+  // configured daily list is empty on this server, so showing it would have
+  // meant an empty tab on a bot that scans a dozen groups every morning.
+  app.get('/api/jarvis/groups/live', guard, async (_req, res) => {
+    if (!deps.listGroups) return res.status(503).json({ error: 'not wired' });
+    try {
+      res.json({ ok: true, groups: await deps.listGroups() });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // ── שיחה ───────────────────────────────────────────────────────
+  // Separate from /command because a conversation needs the previous turns.
+  // /command is stateless on purpose — a button press should not inherit
+  // whatever was said before it.
+  const _chats = new Map();     // deviceId → [{role, content}]
+  app.post('/api/jarvis/chat', guard, async (req, res) => {
+    const text = String((req.body && req.body.text) || '').trim();
+    const device = String((req.body && req.body.device) || 'phone').substring(0, 40);
+    if (!text) return res.status(400).json({ error: 'no text' });
+    if (!deps.chat) return res.status(503).json({ error: 'chat not wired' });
+    try {
+      const history = _chats.get(device) || [];
+      const reply = await deps.chat(text, history);
+      history.push({ role: 'user', content: text });
+      history.push({ role: 'assistant', content: reply });
+      while (history.length > 12) history.shift();
+      _chats.set(device, history);
+      res.json({ ok: true, text: reply });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+  app.post('/api/jarvis/chat/reset', guard, (req, res) => {
+    _chats.delete(String((req.body && req.body.device) || 'phone'));
+    res.json({ ok: true });
   });
 
   // ── The command catalogue ──────────────────────────────────────

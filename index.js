@@ -1545,6 +1545,27 @@ try {
       for (const c of collected) if (c && c.trim()) parts.push(c.trim());
       return parts.join('\n\n') || 'בוצע.';
     },
+    // Conversation keeps its own history so a follow-up like "ומה לגבי
+    // אתמול?" means something. Separate from runCommand, which stays
+    // stateless — a button press should not inherit the last thing said.
+    chat: async (text, history) => {
+      const { smartChat } = require('./src/claude');
+      return smartChat(text, Array.isArray(history) ? history.slice() : []);
+    },
+    // Live groups, sorted by unread — the app shows what is actually busy
+    // rather than an alphabetical wall of names.
+    listGroups: async () => {
+      const chats = await client.getChats();
+      return chats
+        .filter(c => c.isGroup)
+        .map(c => ({
+          name: c.name || '',
+          unread: c.unreadCount || 0,
+          lastTs: (c.timestamp || 0) * 1000,
+        }))
+        .sort((a, b) => b.unread - a.unread || b.lastTs - a.lastTs)
+        .slice(0, 80);
+    },
   });
 } catch (e) { console.warn('jarvis bridge: ' + e.message); }
 
@@ -5350,6 +5371,21 @@ client.on('message', async (msg) => {
       const match = matches[0];
       console.log(`🎀 Match: ${match.name} (${match.confidence}%) from "${groupName}"`);
       _trackFaceMatch(match.name, groupName);
+
+      // Keep the photo itself, not just the tally. Until now only counts were
+      // stored, so "show me the recent photos of מיה" had no answer — the
+      // images had already been thrown away. Every matched person in the frame
+      // is recorded, not only the first, or a group shot of both children
+      // would only ever file under one of them.
+      try {
+        const _arch = require('./src/face-archive');
+        for (const m of matches) {
+          _arch.record({
+            name: m.name, buffer: imageBuffer, group: groupName,
+            confidence: m.confidence,
+          });
+        }
+      } catch (_) {}
 
       // Save for weekly album
       if (_weeklyFacePhotos.length < MAX_WEEKLY_PHOTOS) {
