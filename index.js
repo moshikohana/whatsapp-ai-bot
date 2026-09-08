@@ -3623,6 +3623,34 @@ client.on('message_create', async (msg) => {
                   }
                 } catch (e) { console.warn(`face owner-DM send failed: ${e.message?.substring(0, 60)}`); }
                 console.log(`🎀 Test match: ${allNames} in "${groupName}"`);
+                // This path handles photos the owner sends himself, and it was
+                // never wired to the app or the archive — a test photo in
+                // "קניות" recognised שי at 29%, said so in WhatsApp, and left
+                // nothing behind. Same treatment as a group match now:
+                // archived so it is visible, and mirrored so it arrives.
+                try {
+                  const _arch = require('./src/face-archive');
+                  // markedBuf is already computed for the WhatsApp reply here.
+                  const _ob = (typeof markedBuf !== 'undefined' && markedBuf && markedBuf.length) ? markedBuf : imageBuffer;
+                  for (const m of matches) {
+                    _arch.record({
+                      name: m.name, buffer: _ob, group: groupName,
+                      confidence: m.confidence,
+                      // Below the floor it is a candidate, not a confirmation.
+                      candidate: (m.confidence || 0) < 50,
+                    });
+                  }
+                  require('./src/jarvis-api').mirrorAlert({
+                    title: `🎀 ${allNames} — זוהה בתמונה`,
+                    summary: `${groupName} · ${allNames}`,
+                    body: matches.map(m => `${m.name} · ${m.confidence}% ביטחון`).join('\n')
+                      + `\n\nהתמונה נשמרה — אפשר לראות אותה בטאב "פרצופים".`,
+                    kind: 'face',
+                    urgency: 'normal',
+                    group: groupName,
+                    msgTs: (msg.timestamp || 0) * 1000 || Date.now(),
+                  });
+                } catch (_) {}
               } else {
                 console.log(`📷 No match in owner test photo from "${groupName}"`);
                 // Quoted reply on the photo itself so it's clear WHICH image
@@ -3632,6 +3660,18 @@ client.on('message_create', async (msg) => {
                   ? `🔍 לא זוהה בוודאות — אבל הכי קרוב ל-*${nm.name}* (קרבה ~${nm.closeness}%). אם זו באמת ${nm.name}, שלח עוד תמונת ייחוס שלה 💡`
                   : `🔍 לא זוהו פנים מוכרים`;
                 try { await msg.reply(noMatchMsg + BOT_MARKER); } catch (e) { /* silent */ }
+                // A near miss is the most useful photo there is: the bot came
+                // close and could not commit. Archived under that name as a
+                // candidate so it can be confirmed in one tap, which is
+                // exactly the reference it was missing.
+                if (nm && nm.name) {
+                  try {
+                    require('./src/face-archive').record({
+                      name: nm.name, buffer: imageBuffer, group: groupName,
+                      confidence: nm.closeness, candidate: true,
+                    });
+                  } catch (_) {}
+                }
               }
             }
           }
@@ -5427,9 +5467,18 @@ client.on('message', async (msg) => {
       // score says is missing.
       try {
         const _arch = require('./src/face-archive');
+        // Marked as well — a rejected guess is only reviewable if you can see
+        // which face was guessed.
+        let _cbuf = imageBuffer;
+        try {
+          const { buffer: _cm } = await highlightMatchingFaces(imageBuffer, {
+            blurOthers: false, preDetected: allMatches.detections, matchedOnly: true,
+          });
+          if (_cm && _cm.length) _cbuf = _cm;
+        } catch (_) {}
         for (const m of allMatches) {
           _arch.record({
-            name: m.name, buffer: imageBuffer, group: groupName,
+            name: m.name, buffer: _cbuf, group: groupName,
             confidence: m.confidence, candidate: true,
           });
         }
@@ -5448,9 +5497,20 @@ client.on('message', async (msg) => {
       // would only ever file under one of them.
       try {
         const _arch = require('./src/face-archive');
+        // The marked frame, with the box drawn round the face that matched.
+        // The whole point is scanning thirty kindergarten photos at a glance —
+        // an unmarked group shot of twelve children answers nothing. Computed
+        // here regardless of the WhatsApp highlight setting, which is off.
+        let _buf = imageBuffer;
+        try {
+          const { buffer: _marked } = await highlightMatchingFaces(imageBuffer, {
+            blurOthers: false, preDetected: matches.detections, matchedOnly: true,
+          });
+          if (_marked && _marked.length) _buf = _marked;
+        } catch (_) { /* fall back to the original frame */ }
         for (const m of matches) {
           _arch.record({
-            name: m.name, buffer: imageBuffer, group: groupName,
+            name: m.name, buffer: _buf, group: groupName,
             confidence: m.confidence,
           });
         }
