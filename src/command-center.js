@@ -656,6 +656,60 @@ async function applyCallAnalysis(analysis) {
  * with the spokesperson context (Kellner's positions/legislation/voice).
  * Returns a 2-3 sentence draft tweet/statement, or null on failure.
  */
+/**
+ * "מה קרה בפועל" — 2-3 משפטים עובדתיים לפני כל זווית מוצעת.
+ *
+ * ההתראה קפצה עד היום ישר מ"מילה חמה" ל"ניסוח מוצע", בלי לומר מה קרה. ב-7.9
+ * זה הוביל לקריאה שגויה: בג"ץ הוציא *צו על תנאי* (בקשה לנמק, שלב מקדמי) ובמקביל
+ * *בית הדין של הליכוד* קיבל החלטה על הרשימה — שני גופים שונים, שני עניינים
+ * שונים — וההצעה שנבנתה מהם נקראה כאילו בג"ץ כבר פסל והתערב בבחירות.
+ *
+ * המודל מתבקש במפורש להבחין בין שלב מקדמי להכרעה, ולנקוב בשם הגוף שפעל.
+ * כשהדגימות לא מספיקות הוא אמור לומר זאת ולא להשלים פערים.
+ */
+async function summarizeWhatHappened(keyword, samplePreviews = []) {
+  let Anthropic;
+  try { Anthropic = require('@anthropic-ai/sdk'); } catch { return null; }
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+
+  const samples = samplePreviews.slice(0, 8).map((s, i) => `${i + 1}. ${s}`).join('\n');
+  if (!samples) return null;
+
+  const prompt = `להלן הודעות אמיתיות מקבוצות וואטסאפ פוליטיות שבהן עלתה המילה "${keyword}".
+
+${samples}
+
+כתוב 2-3 משפטים עובדתיים בלבד: מה קרה בפועל, לפי ההודעות האלה.
+
+כללים מחייבים:
+• נקוב בשם הגוף שפעל. "בג"ץ", "בית הדין של הליכוד", "ועדת הבחירות" ו"בית המשפט המחוזי" הם גופים שונים — אל תמזג ביניהם ואל תכתוב "בית המשפט" סתם.
+• הבחן בין שלב מקדמי להכרעה. צו על תנאי, בקשה לתגובה, דיון שנקבע או ערעור שהוגש — אינם פסיקה. אם זה שלב מקדמי, אמור זאת במפורש.
+• אל תוסיף שום דבר שלא מופיע בהודעות. אם המידע חלקי, כתוב "לא ברור מההודעות" ותעצור.
+• בלי פרשנות, בלי זוויות, בלי המלצות.
+
+סווג בשורה אחרונה נפרדת, בפורמט "סוג: X", כאשר X הוא אחד מ:
+אירוע משפטי / מהלך פוליטי / מגמה תקשורתית / לא ברור`;
+
+  try {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const r = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 400,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = (r.content || []).map(b => b.text || '').join('').trim();
+    if (!text) return null;
+    const m = text.match(/סוג:\s*(.+)$/m);
+    return {
+      facts: text.replace(/סוג:\s*.+$/m, '').trim(),
+      kind: m ? m[1].trim() : null,
+    };
+  } catch (e) {
+    console.warn('⚠️ summarizeWhatHappened failed:', e.message?.substring(0, 70));
+    return null;
+  }
+}
+
 async function draftKellnerStatement(keyword, samplePreviews = []) {
   let Anthropic;
   try {
@@ -751,10 +805,19 @@ async function checkTrendingKeywords({ minGroups = 5, minHits = 3, minRatio = 1.
     // Only alert once per keyword per day
     if (slot && slot.alertedAt && slot.alertedAt.slice(0, 10) === today) continue;
 
-    const samples = (recentPreviewsByKw[t.keyword] || []).slice(-5);
+    const samples = (recentPreviewsByKw[t.keyword] || []).slice(-8);
+    // Facts first, and they are computed before the draft on purpose: the
+    // suggested angle is the thing most likely to be read as established
+    // fact, so it must never appear above what actually happened.
+    let happened = null;
+    try {
+      happened = await summarizeWhatHappened(t.keyword, samples);
+    } catch (e) {
+      console.warn('⚠️ summarizeWhatHappened threw:', e.message);
+    }
     let draft = null;
     try {
-      draft = await draftKellnerStatement(t.keyword, samples);
+      draft = await draftKellnerStatement(t.keyword, samples.slice(-5));
     } catch (e) {
       console.warn('⚠️ draftKellnerStatement threw:', e.message);
     }
@@ -775,8 +838,18 @@ async function checkTrendingKeywords({ minGroups = 5, minHits = 3, minRatio = 1.
       lines.push(`📍 ${shown}${more}`);
     }
     lines.push(``);
+    if (happened && happened.facts) {
+      const badge = happened.kind === 'אירוע משפטי' ? '⚖️'
+        : happened.kind === 'מהלך פוליטי' ? '🏛️'
+        : happened.kind === 'מגמה תקשורתית' ? '📣' : '❔';
+      lines.push(`${badge} *מה קרה בפועל${happened.kind ? ` — ${happened.kind}` : ''}:*`);
+      lines.push(happened.facts);
+      lines.push(``);
+    }
     if (draft) {
-      lines.push(`📝 *ניסוח מוצע בסגנון קלנר:*`);
+      // Labelled as a proposal, not as reporting. Without the facts above it,
+      // this block was being read as a description of events.
+      lines.push(`📝 *זווית מוצעת לקלנר* _(הצעה — לא דיווח)_:`);
       lines.push(draft);
       lines.push(``);
     }
@@ -845,6 +918,7 @@ module.exports = {
   // Capability #1.4
   draftKellnerStatement,
   checkTrendingKeywords,
+  summarizeWhatHappened,
   getKeywordDraft,
   ignoreKeywordAlert,
 

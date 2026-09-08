@@ -1761,6 +1761,20 @@ const client = new Client({
   ...(process.env.PAIR_PHONE ? {
     pairWithPhoneNumber: { phoneNumber: process.env.PAIR_PHONE, showNotification: true },
   } : {}),
+  // Pin the WhatsApp Web build when WA_WEB_VERSION is set.
+  //
+  // Left unset, whatsapp-web.js fetches whatever build is newest at launch.
+  // The owner's instance has a cache full of builds it has run successfully;
+  // the second instance started with an empty cache and pulled a fresh one
+  // every time — and on that build its page stopped progressing: the QR was
+  // emitted once and never refreshed (measured frozen for three minutes),
+  // and phone pairing reached "connecting" on the handset and then nothing
+  // arrived at the server at all. Pinning it to a build known to work here
+  // removes the one variable that actually differed between the two.
+  ...(process.env.WA_WEB_VERSION ? {
+    webVersion: process.env.WA_WEB_VERSION,
+    webVersionCache: { type: 'local', path: path.join(__dirname, '.wwebjs_cache') },
+  } : {}),
   puppeteer: {
     headless: true,
     executablePath: process.env.CHROMIUM_PATH || undefined,
@@ -1772,7 +1786,20 @@ const client = new Client({
     // in distant regions like Singapore can be slow under load — 5 min
     // headroom prevents Runtime.callFunctionOn timeouts during warm-up).
     protocolTimeout: 300000, // 5 minutes (default is 30s)
-    args: [
+    // CHROME_MINIMAL_ARGS=1 launches with only the four flags that a bare
+    // whatsapp-web.js probe was measured working with on this machine:
+    // 9 Chromium processes and a QR that refreshed three times. The full flag
+    // list on the second instance produced one process, no renderers, and a
+    // frozen QR, with "Failed global descriptor lookup: 7" for every child
+    // that failed to start. Rather than keep bisecting flags against a
+    // symptom that takes a minute to reproduce, this runs the configuration
+    // that is known to work here.
+    args: process.env.CHROME_MINIMAL_ARGS === '1' ? [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+    ] : [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
@@ -1783,7 +1810,17 @@ const client = new Client({
       '--no-first-run',
       '--disable-software-rasterizer',
       '--disable-blink-features=AutomationControlled',
-      '--no-zygote',
+      // --no-zygote is skipped when CHROME_ZYGOTE=1.
+      //
+      // Under systemd, every Chromium child died at launch with
+      // "Failed global descriptor lookup: 7" — without the zygote, the child
+      // processes inherit the shared-memory descriptor directly, and that
+      // inheritance does not survive the way systemd sets up the service.
+      // The result was a browser with no renderers at all: the QR was emitted
+      // once and then frozen, and pairing reached "connecting" on the handset
+      // and never came back. The owner's instance runs under pm2, where the
+      // same flag is harmless, which is why only the second one broke.
+      ...(process.env.CHROME_ZYGOTE === '1' ? [] : ['--no-zygote']),
       // --memory-pressure-off was here and has been removed deliberately. It
       // tells Chrome to ignore system memory pressure, so the renderer never
       // releases anything and simply grows until the kernel kills it. dmesg
