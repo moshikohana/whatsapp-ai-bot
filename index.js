@@ -7363,10 +7363,22 @@ setInterval(async () => {
     hub.markDigestSent(d.actions || []);
     try {
       const _n = (d.actions || []).length;
+      // Urgency reflects what is actually in the digest. Every one of these
+      // was going out as "high", including a digest with a single item — and
+      // a phone that buzzes urgently every 90 minutes trains you to ignore
+      // it, which is the opposite of what the hub is for.
+      const _urgent = _n >= 3 || /קלנר/.test(String(d.text || ''));
+      const _title = _n === 0 ? '🎯 מוקד — עדכון'
+        : _n === 1 ? '🎯 מוקד — דבר אחד דורש אותך'
+        : `🎯 מוקד — ${_n} דברים דורשים אותך`;
       require('./src/jarvis-api').pushAlert({
-        title: `🎯 מוקד — ${_n ? `${_n} דברים שדורשים אותך` : 'עדכון'}`,
+        title: _title,
         body: String(d.text || '').replace(/\*/g, '').substring(0, 500),
-        kind: 'hub', urgency: _n ? 'high' : 'normal',
+        kind: 'hub',
+        urgency: _urgent ? 'high' : 'normal',
+        // Each digest replaces the last undelivered one: it is a snapshot of
+        // now, not an event, so nine stale copies help nobody.
+        supersedes: 'hub',
       });
     } catch {}
     logger.info(`📬 מוקד digest sent (${(d.actions || []).length} actionable)`);

@@ -48,8 +48,22 @@ function memory() { if (!_mem) _mem = _load(MEM_FILE, { facts: [], updated: 0 })
 // Called from wherever the bot already decides something is worth the owner's
 // attention. Queued rather than sent, because the phone may be asleep; it
 // collects whatever accumulated the next time it polls.
-function pushAlert({ title, body, kind = 'info', urgency = 'normal', link = null }) {
-  const list = alerts();
+function pushAlert({ title, body, kind = 'info', urgency = 'normal', link = null, supersedes = null }) {
+  let list = alerts();
+
+  // A digest is a snapshot of "what needs you right now", not an event that
+  // happened. Nine of them queued overnight would buzz the phone nine times
+  // to say eight things, eight of those descriptions already stale. When a
+  // new one arrives, undelivered older ones of the same kind are dropped —
+  // the phone gets the current picture, once.
+  if (supersedes) {
+    const before = list.length;
+    list = list.filter(a => a.delivered || a.kind !== supersedes);
+    if (list.length !== before) {
+      logger.info(`🔕 JARVIS: superseded ${before - list.length} undelivered "${supersedes}" alert(s)`);
+    }
+  }
+
   const item = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     ts: Date.now(),
