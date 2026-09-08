@@ -7403,9 +7403,20 @@ setInterval(async () => {
       const _title = _n === 0 ? '🎯 מוקד — עדכון'
         : _n === 1 ? '🎯 מוקד — דבר אחד דורש אותך'
         : `🎯 מוקד — ${_n} דברים דורשים אותך`;
+      // The notification gets the headlines only. The digest runs to hundreds
+      // of characters, and a notification shade full of prose is one you
+      // swipe away without reading.
+      const _heads = (d.actions || [])
+        .map(a => String(a.topic || a.keyword || '').replace(/[*_]/g, '').trim())
+        .filter(Boolean).slice(0, 3);
+      const _summary = _heads.length
+        ? _heads.map(h => `• ${h.substring(0, 60)}`).join('\n') + (_n > 3 ? `\n• ועוד ${_n - 3}` : '')
+        : 'אין פריטים חדשים לטיפול.';
+
       require('./src/jarvis-api').pushAlert({
         title: _title,
-        body: String(d.text || '').replace(/\*/g, '').substring(0, 500),
+        summary: _summary,
+        body: String(d.text || '').replace(/\*/g, '').substring(0, 1500),
         kind: 'hub',
         urgency: _urgent ? 'high' : 'normal',
         // Each digest replaces the last undelivered one: it is a snapshot of

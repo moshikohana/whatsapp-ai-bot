@@ -48,7 +48,7 @@ function memory() { if (!_mem) _mem = _load(MEM_FILE, { facts: [], updated: 0 })
 // Called from wherever the bot already decides something is worth the owner's
 // attention. Queued rather than sent, because the phone may be asleep; it
 // collects whatever accumulated the next time it polls.
-function pushAlert({ title, body, kind = 'info', urgency = 'normal', link = null, supersedes = null }) {
+function pushAlert({ title, body, summary = '', kind = 'info', urgency = 'normal', link = null, supersedes = null }) {
   let list = alerts();
 
   // A digest is a snapshot of "what needs you right now", not an event that
@@ -70,6 +70,9 @@ function pushAlert({ title, body, kind = 'info', urgency = 'normal', link = null
     title: String(title || '').substring(0, 120),
     // Room for the surrounding messages; 600 cut the context off mid-quote.
     body: String(body || '').substring(0, 1800),
+    // The one-line form for the notification shade. The full body, with
+    // its surrounding messages, stays for the app to render.
+    summary: String(summary || '').substring(0, 200),
     kind, urgency, link,
     delivered: false,
   };
@@ -91,7 +94,7 @@ function pushAlert({ title, body, kind = 'info', urgency = 'normal', link = null
  * ואת ההודעות שמסביב — כי "מישהו כתב משהו על קלנר" בלי מה שנאמר לפני ואחרי
  * הוא בדיוק סוג ההתראה שגורמת לפתוח את וואטסאפ ולחפש ידנית.
  */
-function mirrorAlert({ title, body, kind = 'info', urgency = 'normal', group, sender, msgTs, context, link }) {
+function mirrorAlert({ title, body, summary = '', kind = 'info', urgency = 'normal', group, sender, msgTs, context, link }) {
   const parts = [];
   if (group) parts.push(`📍 ${group}`);
   if (sender) parts.push(`👤 ${sender}`);
@@ -111,7 +114,11 @@ function mirrorAlert({ title, body, kind = 'info', urgency = 'normal', group, se
       return `${t} ${c.from || ''}: ${String(c.text || '').substring(0, 140)}`.trim();
     }).join('\n');
   }
-  return pushAlert({ title, body: full, kind, urgency, link: link || null });
+  // Falls back to group + the first line of the body — enough to know
+  // whether it is worth opening, which is all a notification must do.
+  const short = summary
+    || [group, String(body || '').split(/\n/).find(Boolean)].filter(Boolean).join(' · ');
+  return pushAlert({ title, body: full, summary: short, kind, urgency, link: link || null });
 }
 
 /**
