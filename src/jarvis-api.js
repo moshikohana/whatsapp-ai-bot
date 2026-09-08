@@ -68,7 +68,8 @@ function pushAlert({ title, body, kind = 'info', urgency = 'normal', link = null
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     ts: Date.now(),
     title: String(title || '').substring(0, 120),
-    body: String(body || '').substring(0, 600),
+    // Room for the surrounding messages; 600 cut the context off mid-quote.
+    body: String(body || '').substring(0, 1800),
     kind, urgency, link,
     delivered: false,
   };
@@ -78,6 +79,62 @@ function pushAlert({ title, body, kind = 'info', urgency = 'normal', link = null
   _alerts = list.filter(a => a.ts >= cutoff).slice(-MAX_ALERTS);
   _save(ALERT_FILE, _alerts);
   return item;
+}
+
+/**
+ * מראה: כל התראה שהבוט שולח בוואטסאפ מגיעה גם לאפליקציה.
+ *
+ * הצ׳אט הפרטי בוואטסאפ לא מצפצף אצלו, ולכן ההתראות שנשלחו לשם היו בפועל
+ * בלתי־נראות. אותו תוכן נשלח לכאן במקביל — בלי לשנות דבר בצד של וואטסאפ.
+ *
+ * כל התראה נושאת מאיפה, ממי, ומתי *ההודעה נשלחה* (לא מתי הבוט הבחין בה),
+ * ואת ההודעות שמסביב — כי "מישהו כתב משהו על קלנר" בלי מה שנאמר לפני ואחרי
+ * הוא בדיוק סוג ההתראה שגורמת לפתוח את וואטסאפ ולחפש ידנית.
+ */
+function mirrorAlert({ title, body, kind = 'info', urgency = 'normal', group, sender, msgTs, context, link }) {
+  const parts = [];
+  if (group) parts.push(`📍 ${group}`);
+  if (sender) parts.push(`👤 ${sender}`);
+  if (msgTs) {
+    try {
+      parts.push(`🕐 ${new Date(msgTs).toLocaleString('he-IL', {
+        timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit',
+        hour: '2-digit', minute: '2-digit',
+      })}`);
+    } catch {}
+  }
+  let full = String(body || '');
+  if (parts.length) full = `${parts.join('  ·  ')}\n\n${full}`;
+  if (context && context.length) {
+    full += `\n\n— מה נאמר סביב —\n` + context.map(c => {
+      const t = c.ts ? new Date(c.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' }) : '';
+      return `${t} ${c.from || ''}: ${String(c.text || '').substring(0, 140)}`.trim();
+    }).join('\n');
+  }
+  return pushAlert({ title, body: full, kind, urgency, link: link || null });
+}
+
+/**
+ * ההודעות שמסביב להודעה שהפעילה התראה.
+ * קריאה בלבד — fetchMessages לא מסמן כנקרא ולא נוגע במצב הצ׳אט שלו.
+ */
+async function fetchContext(chat, msgId, span = 3) {
+  try {
+    const msgs = await chat.fetchMessages({ limit: 25 });
+    const idx = msgs.findIndex(m => (m.id && m.id._serialized) === msgId);
+    const slice = idx >= 0
+      ? msgs.slice(Math.max(0, idx - span), idx + span + 1)
+      : msgs.slice(-span * 2);
+    return slice
+      .filter(m => m.body && m.body.trim())
+      .map(m => ({
+        ts: (m.timestamp || 0) * 1000,
+        from: m._data?.notifyName || (m.fromMe ? 'אתה' : ''),
+        text: m.body,
+      }));
+  } catch {
+    return [];
+  }
 }
 
 function pullAlerts(sinceTs = 0, markDelivered = true) {
@@ -490,4 +547,4 @@ function attach(app, deps = {}) {
   logger.info(`🤝 JARVIS bridge ${secret() ? 'ready' : 'DISABLED (no JARVIS_SECRET)'}`);
 }
 
-module.exports = { attach, pushAlert, pullAlerts, addFact, removeFact, memory, memoryForPrompt, status };
+module.exports = { attach, pushAlert, mirrorAlert, fetchContext, pullAlerts, addFact, removeFact, memory, memoryForPrompt, status };

@@ -5315,6 +5315,23 @@ client.on('message', async (msg) => {
                 `👤 ${_sender}\n` +
                 `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
               );
+              // Same alert to the phone. His WhatsApp self-chat is silent, so
+              // everything sent there has effectively been invisible. Nothing
+              // about the WhatsApp side changes — this is an addition.
+              try {
+                const _j = require('./src/jarvis-api');
+                const _ctx = await _j.fetchContext(_alertChat, msg.id?._serialized || '', 3);
+                _j.mirrorAlert({
+                  title: `🚨 מילת מפתח: "${_matchedKw}"`,
+                  body: `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`,
+                  kind: 'keyword', urgency: 'high',
+                  group: _groupNameForAlert, sender: _sender,
+                  // The message's own timestamp, not now — by the time this
+                  // is read, "when did it happen" is the useful fact.
+                  msgTs: (msg.timestamp || 0) * 1000 || Date.now(),
+                  context: _ctx,
+                });
+              } catch (_) {}
             }
           }
           // Always log to keyword-alerts journal (whether war-room or solo alert)
@@ -5439,6 +5456,21 @@ client.on('message', async (msg) => {
       const ownerChat = await client.getChatById(OWNER_ID);
       const sender = msg._data?.notifyName || 'מישהו';
       const time = new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+
+      // Mirrored to the phone alongside the WhatsApp message. The photo itself
+      // is already in the archive, so the alert points at it rather than
+      // carrying a second copy of the image.
+      try {
+        require('./src/jarvis-api').mirrorAlert({
+          title: `🎀 ${matches.map(m => m.name).join(', ')} — זוהה בתמונה`,
+          body: matches.map(m => `${m.name} · ${m.confidence}% ביטחון`).join('\n')
+            + `\n\nהתמונה נשמרה — אפשר לראות אותה בטאב "פרצופים".`,
+          kind: 'face',
+          urgency: 'normal',
+          group: groupName, sender,
+          msgTs: (msg.timestamp || 0) * 1000 || Date.now(),
+        });
+      } catch (_) {}
 
       const photoData = { name: match.name, imageBuffer, confidence: match.confidence, groupName, sentAt: Date.now() };
       lastForwardedPhoto.set(OWNER_ID, photoData); // for text-only "פידבק כן/לא"
