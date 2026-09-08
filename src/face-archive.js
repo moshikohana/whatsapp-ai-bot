@@ -37,7 +37,7 @@ const _safe = s => String(s || 'unknown').replace(/[^\p{L}\p{N}_-]/gu, '_').subs
  * שומר תמונה שבה זוהה אדם.
  * buffer — עדיף המסומנת (עם המסגרות), כי זה מה שמעניין להסתכל עליו אחר כך.
  */
-function record({ name, buffer, group, confidence, ts = Date.now() }) {
+function record({ name, buffer, group, confidence, candidate = false, ts = Date.now() }) {
   if (!name || !buffer || !buffer.length) return null;
   if (buffer.length > MAX_BYTES) return null;
   try {
@@ -55,6 +55,9 @@ function record({ name, buffer, group, confidence, ts = Date.now() }) {
       file, ts,
       group: String(group || '').substring(0, 80),
       confidence: confidence != null ? Math.round(confidence) : null,
+      // A candidate scored below the group floor — shown separately so a
+      // rejected guess can be confirmed instead of silently discarded.
+      candidate: !!candidate,
       kb: Math.round(buffer.length / 1024),
     });
 
@@ -84,7 +87,8 @@ function people() {
   return Object.entries(idx).map(([key, v]) => ({
     key,
     name: v.name || key,
-    count: (v.photos || []).length,
+    count: (v.photos || []).filter(p => !p.candidate).length,
+    candidates: (v.photos || []).filter(p => p.candidate).length,
     lastSeen: (v.photos || []).length ? Math.max(...v.photos.map(p => p.ts)) : null,
     lastGroup: (v.photos && v.photos[0]) ? v.photos[0].group : null,
   })).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
@@ -97,7 +101,7 @@ function photos(name, limit = 20, withData = true) {
   const entry = idx[key];
   if (!entry) return [];
   return (entry.photos || []).slice(0, limit).map(p => {
-    const out = { ts: p.ts, group: p.group, confidence: p.confidence, kb: p.kb };
+    const out = { ts: p.ts, group: p.group, confidence: p.confidence, kb: p.kb, candidate: !!p.candidate };
     if (withData) {
       try { out.image = fs.readFileSync(path.join(ROOT, key, p.file)).toString('base64'); }
       catch { out.image = null; }

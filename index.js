@@ -5419,6 +5419,21 @@ client.on('message', async (msg) => {
     if (allMatches.length > 0 && matches.length === 0) {
       const skipped = allMatches.map(m => `${m.name} ${m.confidence}%`).join(', ');
       console.log(`🚫 "${groupName}": [${skipped}] filtered out (whitelist / min-confidence) — skipping alert`);
+      // Archived as a candidate rather than discarded. 39 photos from the
+      // kindergarten were processed and every match was filtered — מיה at 25%
+      // against a 45% floor — so nothing reached him and there was no way to
+      // see what had been rejected. These are shown separately in the app, and
+      // confirming one turns it into a reference, which is exactly what a 25%
+      // score says is missing.
+      try {
+        const _arch = require('./src/face-archive');
+        for (const m of allMatches) {
+          _arch.record({
+            name: m.name, buffer: imageBuffer, group: groupName,
+            confidence: m.confidence, candidate: true,
+          });
+        }
+      } catch (_) {}
     }
 
     if (matches.length > 0) {
@@ -5886,6 +5901,12 @@ function _canonicalizeCommand(text, quotedText = '') {
   };
   const feature = featureOf(t) || featureOf(quotedText);
   if (!feature) return null;
+
+  // A question *about* a feature is not a command *to* it. "האם הסוכן יכול
+  // להעביר תמונה למחשב?" was being resolved to the agent status command and
+  // answered with a menu, because it mentions the agent and ends in a question
+  // mark. Capability questions go to the AI, which can actually answer them.
+  if (/(^|\s)(האם|אפשר|יכול|יודע|אפשרי|כדאי|מה ההבדל|איך אפשר)(\s|$)/.test(t)) return null;
 
   // Already a proper command — leave it alone.
   if (/^(שידורים|סוכן|מוקד)(\s|$)/i.test(t)) return null;
