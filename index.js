@@ -1641,7 +1641,10 @@ try {
       // So when the reply is an acknowledgement, wait for what follows.
       const ack = typeof direct === 'string'
         && direct.length < 300
-        && /שנייה|רגע|\.\.\.|…/.test(direct);
+        // Whole words only. "רגע" also matched inside "כרגע", so a finished
+        // answer like "אין מצב חירום פעיל כרגע." was taken for a holding
+        // message and the app waited out the full 150 seconds for nothing.
+        && /(^|[\s(_*])(שנייה|רגע)(?=[\s.,!…_*)]|$)|\.\.\.|…/.test(direct);
       if (ack) {
         const DEADLINE = Date.now() + 150000;   // the app allows 180s
         const QUIET_MS = 6000;                  // output stopped → it is done
