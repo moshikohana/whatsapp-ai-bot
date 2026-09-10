@@ -1827,6 +1827,66 @@ function _logFaceCheck(buffer, groupName, outcome, detail, faces) {
   } catch (_) {}
 }
 
+// ── 🟡 "אולי" — התאמה חלשה לילד הנכון, בצרור אחד לכל אצווה ──────
+// Below this it is noise (a random child scores 10–15%); above the group
+// floor it is a regular alert. In between, he is asked instead of told.
+const MAYBE_MIN_CONFIDENCE = 20;
+const MAYBE_QUIET_MS = 3 * 60 * 1000;     // a kindergarten batch arrives over ~3 min
+const MAYBE_MAX_WAIT_MS = 10 * 60 * 1000;
+const _maybeBatches = new Map();
+
+function _queueMaybe(groupName, match, raw, marked, floor) {
+  const key = `${groupName}|${match.name}`;
+  let b = _maybeBatches.get(key);
+  if (!b) {
+    b = { groupName, name: match.name, floor, items: [], first: Date.now(), timer: null };
+    _maybeBatches.set(key, b);
+  }
+  b.items.push({ confidence: match.confidence, raw, marked });
+  clearTimeout(b.timer);
+  const wait = Math.max(0, Math.min(MAYBE_QUIET_MS, b.first + MAYBE_MAX_WAIT_MS - Date.now()));
+  b.timer = setTimeout(() => _flushMaybe(key).catch(e => logger.warn('maybe flush: ' + (e.message || '').substring(0, 60))), wait);
+}
+
+async function _flushMaybe(key) {
+  const b = _maybeBatches.get(key);
+  _maybeBatches.delete(key);
+  if (!b || !b.items.length) return;
+  const best = b.items.reduce((x, y) => (y.confidence > x.confidence ? y : x));
+  const confs = b.items.map(i => i.confidence);
+  const range = Math.min(...confs) === Math.max(...confs) ? `${best.confidence}%` : `${Math.min(...confs)}–${Math.max(...confs)}%`;
+  const n = b.items.length;
+  const text =
+    `🟡 *אולי ${b.name}* · ${b.groupName}\n` +
+    `${n === 1 ? 'בתמונה אחת' : `ב-${n} תמונות`} בוטי חושב שהוא רואה את ${b.name}, אבל לא בטוח מספיק ` +
+    `(${range}${b.floor ? `, הסף בקבוצה ${b.floor}%` : ''}). מצורפת הכי סבירה.\n\n` +
+    `📱 לאישור: אפליקציה ← פרצופים ← ⚠️ חשודים ← "✅ זו ${b.name}". כל אישור מעלה את הביטחון בפעם הבאה.`;
+  try {
+    const { MessageMedia } = require('whatsapp-web.js');
+    const ownerChat = await client.getChatById(OWNER_ID);
+    const sent = await ownerChat.sendMessage(
+      new MessageMedia('image/jpeg', (best.marked || best.raw).toString('base64'), 'maybe.jpg'),
+      { caption: text + `\n💬 _או הגב "כן" / "לא" על התמונה_` + BOT_MARKER }
+    );
+    // The same reply-feedback path as a regular match alert.
+    if (sent?.id?._serialized) {
+      if (forwardedPhotos.size >= MAX_FEEDBACK_STORE) forwardedPhotos.delete([...forwardedPhotos.keys()][0]);
+      forwardedPhotos.set(sent.id._serialized, {
+        name: b.name, imageBuffer: best.raw, confidence: best.confidence, groupName: b.groupName, sentAt: Date.now(),
+      });
+    }
+  } catch (e) { logger.warn('maybe send: ' + (e.message || '').substring(0, 60)); }
+  try {
+    require('./src/jarvis-api').pushAlert({
+      title: `🟡 אולי ${b.name} · ${n === 1 ? 'תמונה אחת' : `${n} תמונות`}`,
+      summary: `${b.groupName} · ${range}`,
+      body: text.replace(/\*/g, ''),
+      kind: 'face-maybe', urgency: 'normal',
+    });
+  } catch (_) {}
+  logger.info(`🟡 maybe ${b.name} in "${b.groupName}": ${n} photo(s), ${range}`);
+}
+
 function _queueFaceDoubts(ambiguous, buffer, groupName) {
   try {
     if (!ambiguous || !ambiguous.length) return;
@@ -5837,6 +5897,17 @@ client.on('message', async (msg) => {
           allMatches.map(m => `${m.name} ${m.confidence}% — נפסל בסינון`).join(", "),
           (allMatches.detections || []).length);
         _checkLogged = true;
+        // 🟡 "Maybe": the right child for this group, under its floor but
+        // not noise. On 10.9 שי was in the kindergarten photos at 22–32%
+        // against a 45% floor, and he heard nothing. One bundled "maybe"
+        // per batch instead — the floor for a real alert stays where it is.
+        const _maybe = whitelisted.filter(m => m.confidence >= MAYBE_MIN_CONFIDENCE)
+          .sort((a, b) => b.confidence - a.confidence)[0];
+        if (_maybe) {
+          const _floor = Object.entries(status.groupMinConfidence || {})
+            .find(([g]) => groupName.includes(g) || g.includes(groupName))?.[1];
+          _queueMaybe(groupName, _maybe, imageBuffer, _cbuf, _floor);
+        }
       } catch (_) {}
     }
 
