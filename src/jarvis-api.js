@@ -679,6 +679,27 @@ function attach(app, deps = {}) {
     res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'התמונה לא נמצאה' });
   });
 
+  // ── 📌 דורש התייחסות ─────────────────────────────────────────────
+  app.get('/api/jarvis/attention', guard, (req, res) => {
+    try { res.json({ ok: true, open: require('./attention').open(), recent: require('./attention').recent(20) }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.post('/api/jarvis/attention/done', guard, (req, res) => {
+    const ok = require('./attention').markDone(String((req.body || {}).id || ''));
+    res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'הפריט לא נמצא' });
+  });
+  app.post('/api/jarvis/attention/calendar', guard, async (req, res) => {
+    try {
+      const att = require('./attention');
+      const id = String((req.body || {}).id || '');
+      const r = await att.toCalendar(id);
+      att.markDone(id);
+      res.json({ ok: true, text: `נוסף ליומן: ${r.summary} · ${r.when}` });
+    } catch (e) {
+      res.status(e.code === 'NOT_FOUND' ? 404 : 400).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
   // ── 📲 התראות מאפליקציות החדשות — מהטלפון, מול הרדיו ─────────────
   app.post('/api/jarvis/news-push', guard, (req, res) => {
     try {

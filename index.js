@@ -4143,6 +4143,42 @@ client.on('message_create', async (msg) => {
       await botSend(_sleepChat, 'בוטי הולך לישון... 💤 שלח "היי בוטי" כדי להעיר אותי.');
       return;
     }
+    // ── 📌 "טופל" / "ליומן" on a "דורש התייחסות" message ─────────────
+    // Only when it is clearly about one: a reply to that message, or the
+    // single open item from the last day. Otherwise it falls through.
+    if (/^(טופל|בוצע|ליומן|תוסיף ליומן|הוסף ליומן)[.!]?$/.test(rawBody.trim())) {
+      const att = require('./src/attention');
+      let item = null;
+      if (msg.hasQuotedMsg) {
+        try {
+          const q = (await msg.getQuotedMessage())?.body || '';
+          if (q.includes('דורש התייחסות')) item = att.open().find(i => q.includes(i.what.substring(0, 30))) || null;
+        } catch (_) {}
+      }
+      if (!item) {
+        const fresh = att.open().filter(i => Date.now() - i.ts < 24 * 3600000);
+        if (fresh.length === 1) item = fresh[0];
+      }
+      if (item) {
+        const _ac = await client.getChatById(OWNER_ID);
+        if (/יומן/.test(rawBody)) {
+          try {
+            const r = await att.toCalendar(item.id);
+            att.markDone(item.id);
+            await botSend(_ac, `📅 נוסף ליומן: *${r.summary}* · ${r.when}`);
+          } catch (e) {
+            await botSend(_ac, e.code === 'NO_DATE'
+              ? '📅 אין בהודעה תאריך ושעה מדויקים — לא הוספתי כדי לא לנחש. אפשר "פגישה חדשה" ולהזין ידנית.'
+              : `❌ ההוספה ליומן נכשלה: ${(e.message || '').substring(0, 80)}`);
+          }
+        } else {
+          att.markDone(item.id);
+          await botSend(_ac, `✔️ סומן כטופל: ${item.what}`);
+        }
+        return;
+      }
+    }
+
     // ── "הרחב" on a radio headline ───────────────────────────────
     // The headline arrives as one line. "הרחב" answers with who said what,
     // from the transcript around it. Replying to a specific headline expands
@@ -5847,6 +5883,38 @@ client.on('message', async (msg) => {
   }
   // Persist group text messages to disk — survives bot restarts for scan resilience
   _cacheGroupMsg(msg);
+  // 📌 דורש התייחסות — a request in a personal group (family, kindergarten,
+  // work, reserve duty), including an invitation sent as a picture.
+  (async () => {
+    try {
+      const _from = msg.from || '';
+      if (!_from.endsWith('@g.us')) return;
+      if (msg.type !== 'chat' && msg.type !== 'image') return;
+      const att = require('./src/attention');
+      const _chat = await msg.getChat();
+      const _gname = _chat?.name || '';
+      if (!att.isPersonal(_from, _gname)) return;
+      let media = null;
+      if (msg.type === 'image') {
+        const m = await msg.downloadMedia().catch(() => null);
+        if (m?.data) media = { buffer: Buffer.from(m.data, 'base64') };
+      }
+      const item = await att.check({
+        msgId: msg.id?._serialized, chatId: _from, group: _gname,
+        sender: msg._data?.notifyName || '', text: msg.body || '',
+        isImage: msg.type === 'image', media, ts: (msg.timestamp || 0) * 1000 || Date.now(),
+      });
+      if (!item) return;
+      const txt = att.format(item);
+      await botSend(await client.getChatById(OWNER_ID), txt);
+      require('./src/jarvis-api').pushAlert({
+        title: `📌 ${item.what}`,
+        summary: [item.group, item.when].filter(Boolean).join(' · '),
+        body: txt.replace(/\*/g, ''),
+        kind: 'attention', urgency: 'high',
+      });
+    } catch (e) { logger.warn('attention: ' + (e.message || '').substring(0, 60)); }
+  })();
   // Queue — share the same face-detection queue to avoid concurrent TF.js
   if (msg.type !== 'image' && msg.type !== 'album') return;
   _queueFace(async () => {
