@@ -832,11 +832,20 @@ function attach(app, deps = {}) {
   app.get('/api/jarvis/faces/checks', guard, (req, res) => {
     try {
       const arch = require('./face-archive');
-      const limit = Math.min(parseInt(req.query.limit, 10) || 20, 40);
+      const limit = Math.min(parseInt(req.query.limit, 10) || 20, 80);
       res.json({ ok: true, checks: arch.checks(limit), stats: arch.checkStats() });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }
+  });
+
+  // תמונה שנבדקה — בגודל מלא, לצופה ולמספור.
+  app.get('/api/jarvis/faces/check/full', guard, (req, res) => {
+    const ts = parseInt(req.query.ts, 10);
+    if (!ts) return res.status(400).json({ error: 'צריך זמן' });
+    const r = require('./face-archive').checkFull(ts);
+    if (!r) return res.status(404).json({ error: 'התמונה כבר לא שמורה' });
+    res.json({ ok: true, ...r });
   });
 
   // תמונות הייחוס עצמן — מה שהמזהה בנוי עליו.

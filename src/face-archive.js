@@ -190,8 +190,9 @@ function removePerson(name) {
  * פשוט נעלמה, ולכן על השאלה "שלחו 40 תמונות בגן, הבוט בכלל הסתכל?" לא הייתה
  * שום דרך לענות — לא היה הבדל נראה לעין בין "בדק ולא מצא" לבין "לא בדק".
  *
- * נשמרת תמונה ממוזערת ולא המקור: זה יומן, לא ארכיון. 400 פיקסל מספיקים כדי
- * לזהות איזו תמונה זו, ועולים כ-25KB במקום 300.
+ * נשמרות שתי גרסאות: ממוזערת (400px) לרצועה, ומלאה (עד 1600px) לצופה.
+ * הממוזערת לבדה הספיקה כדי לדעת איזו תמונה זו, אבל לא כדי למספר 13 פרצופים
+ * בתמונת גן ולהחליט אם אחד מהם הוא שי — ובשביל זה בדיוק פותחים אותה.
  */
 const CHECK_ROOT = path.join(__dirname, '..', 'data', 'face-checks');
 const CHECK_INDEX = path.join(CHECK_ROOT, 'index.json');
@@ -211,21 +212,34 @@ function _saveChecks(list) {
 /**
  * @param outcome match | candidate | ambiguous | nomatch | nofaces
  */
+function _thumbOf(buffer) {
+  return require('sharp')(buffer).rotate()
+    .resize(400, 400, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 70 }).toBuffer();
+}
+function _fullOf(buffer) {
+  return require('sharp')(buffer).rotate()
+    .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 85 }).toBuffer();
+}
+
 async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts = Date.now() }) {
   if (!buffer || !buffer.length) return null;
   try {
-    const sharp = require('sharp');
     fs.mkdirSync(CHECK_ROOT, { recursive: true });
-    const thumb = await sharp(buffer).rotate()
-      .resize(400, 400, { fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 70 }).toBuffer();
+    const thumb = await _thumbOf(buffer);
 
     const file = `${ts}-${Math.random().toString(36).slice(2, 6)}.jpg`;
     fs.writeFileSync(path.join(CHECK_ROOT, file), thumb);
+    let full = null;
+    try {
+      full = file.replace(/\.jpg$/, '-full.jpg');
+      fs.writeFileSync(path.join(CHECK_ROOT, full), await _fullOf(buffer));
+    } catch { full = null; }
 
     let list = _loadChecks();
     list.unshift({
-      ts, file,
+      ts, file, full,
       group: String(group || '').substring(0, 80),
       outcome, detail: String(detail || '').substring(0, 120),
       faces,
@@ -236,7 +250,10 @@ async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts 
     const cutoff = Date.now() - CHECK_TTL_MS;
     const keep = [], drop = [];
     for (const c of list) ((c.ts >= cutoff && keep.length < MAX_CHECKS) ? keep : drop).push(c);
-    for (const d of drop) { try { fs.unlinkSync(path.join(CHECK_ROOT, d.file)); } catch {} }
+    for (const d of drop) {
+      try { fs.unlinkSync(path.join(CHECK_ROOT, d.file)); } catch {}
+      if (d.full) { try { fs.unlinkSync(path.join(CHECK_ROOT, d.full)); } catch {} }
+    }
     _saveChecks(keep);
     return { file };
   } catch (e) {
@@ -247,13 +264,47 @@ async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts 
 
 function checks(limit = 30, withData = true) {
   return _loadChecks().slice(0, limit).map(c => {
-    const out = { ts: c.ts, group: c.group, outcome: c.outcome, detail: c.detail, faces: c.faces };
+    const out = { ts: c.ts, group: c.group, outcome: c.outcome, detail: c.detail, faces: c.faces, hasFull: !!c.full };
     if (withData) {
       try { out.image = fs.readFileSync(path.join(CHECK_ROOT, c.file)).toString('base64'); }
       catch { out.image = null; }
     }
     return out;
   });
+}
+
+/**
+ * התמונה בגודל מלא, לצופה. לבדיקות מלפני שהגרסה המלאה נשמרה — הממוזערת,
+ * עם סימון, כדי שהאפליקציה תגיד את זה במקום להציג תמונה קטנה כאילו היא המקור.
+ */
+function checkFull(ts) {
+  const c = _loadChecks().find(x => x.ts === ts);
+  if (!c) return null;
+  if (c.full) {
+    try { return { image: fs.readFileSync(path.join(CHECK_ROOT, c.full)).toString('base64'), full: true }; } catch {}
+  }
+  // Checks from before full copies were kept: a filtered-out candidate was
+  // also filed, full size and with its face marked, under the person it was
+  // suspected to be — within moments of the check. Those are exactly the
+  // photos worth a second look.
+  // Both are written in the same synchronous step, so they sit milliseconds
+  // apart; photos arrive about one a second, so a looser window would hand
+  // back the neighbouring photo (a 5s window returned one photo for twelve).
+  if (c.outcome === 'candidate') {
+    let best = null;
+    for (const [key, v] of Object.entries(_load())) {
+      for (const x of v.photos || []) {
+        if (!x.candidate || (c.group && x.group !== c.group)) continue;
+        const d = Math.abs(x.ts - c.ts);
+        if (d < 1000 && (!best || d < best.d)) best = { d, key, file: x.file };
+      }
+    }
+    if (best) {
+      try { return { image: fs.readFileSync(path.join(ROOT, best.key, best.file)).toString('base64'), full: true }; } catch {}
+    }
+  }
+  try { return { image: fs.readFileSync(path.join(CHECK_ROOT, c.file)).toString('base64'), full: false }; } catch {}
+  return null;
 }
 
 /** כמה נבדקו ומה יצא — לשורת סיכום. */
@@ -391,5 +442,5 @@ module.exports = {
   record, people, photos, totalCount,
   recordReference, references, referenceCount, removeReferenceAt,
   removePhoto, removePerson,
-  recordCheck, checks, checkStats,
+  recordCheck, checks, checkStats, checkFull,
 };

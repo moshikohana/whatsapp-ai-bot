@@ -5802,6 +5802,10 @@ client.on('message', async (msg) => {
     // 0.35-0.45 distance band as the real child.
     const matches = applyGroupMinConfidence(whitelisted, groupName, status.groupMinConfidence);
 
+    // One entry per photo in the check log: a filtered-out candidate used to be
+    // logged here and then again below as "no match", so the kindergarten
+    // batch showed ten photos twice.
+    let _checkLogged = false;
     if (allMatches.length > 0 && matches.length === 0) {
       const skipped = allMatches.map(m => `${m.name} ${m.confidence}%`).join(', ');
       console.log(`🚫 "${groupName}": [${skipped}] filtered out (whitelist / min-confidence) — skipping alert`);
@@ -5832,6 +5836,7 @@ client.on('message', async (msg) => {
         _logFaceCheck(_cbuf, groupName, "candidate",
           allMatches.map(m => `${m.name} ${m.confidence}% — נפסל בסינון`).join(", "),
           (allMatches.detections || []).length);
+        _checkLogged = true;
       } catch (_) {}
     }
 
@@ -5985,7 +5990,7 @@ client.on('message', async (msg) => {
       console.log(`📷 No match in "${groupName}" photo`);
       // Logged even though nothing matched — this is the case that was
       // invisible, and the one he asked about.
-      _logFaceCheck(imageBuffer, groupName,
+      if (!_checkLogged) _logFaceCheck(imageBuffer, groupName,
         (allMatches.detections || []).length ? "nomatch" : "nofaces",
         allMatches.nearMiss ? `הכי קרוב ל-${allMatches.nearMiss.name} (~${allMatches.nearMiss.closeness}%)` : "",
         (allMatches.detections || []).length);
