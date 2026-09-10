@@ -512,6 +512,54 @@ function snippetAround(body, keyword, radius = 110) {
   return (start > 0 ? '…' : '') + text.substring(start, end).trim() + (end < text.length ? '…' : '');
 }
 
+/**
+ * Where a keyword sits in a message: the message's headline, which part of
+ * the message it is in, and the whole sentence around it.
+ *
+ * A bare snippet answered "was it said"; he needs "in what story, and what
+ * exactly was said about it" — the headline for the story, the sentence for
+ * the context, and the position to know if it is the subject or a passing
+ * mention in paragraph five.
+ */
+function keywordContext(body, keyword) {
+  const raw = stripUrls(String(body || '')).replace(/\r/g, '');
+  const paras = raw.split(/\n\s*\n|\n/).map(p => p.replace(/[*_~`]/g, '').trim()).filter(Boolean);
+  if (!paras.length) return { title: '', where: '', sentence: '' };
+  const lower = s => s.toLowerCase();
+  const kw = lower(String(keyword || ''));
+  // The first line is the headline when the message has more than one line
+  // and that line is short; a one-paragraph message has no headline of its own.
+  const title = paras.length > 1 && paras[0].length <= 140 ? paras[0] : '';
+  const pIdx = kw ? paras.findIndex(p => lower(p).includes(kw)) : -1;
+
+  let where = '';
+  if (pIdx === 0 && title) where = 'בכותרת';
+  else if (pIdx >= 0) {
+    const bodyParas = title ? paras.length - 1 : paras.length;
+    const n = title ? pIdx : pIdx + 1;
+    where = bodyParas > 1 ? `בפסקה ${n} מתוך ${bodyParas}` : 'בגוף ההודעה';
+  }
+
+  let sentence = '';
+  if (pIdx >= 0) {
+    const sentences = paras[pIdx].split(/(?<=[.!?…])\s+/);
+    sentence = sentences.find(s => lower(s).includes(kw)) || paras[pIdx];
+    // A 600-character "sentence" is a paragraph with no full stops.
+    if (sentence.length > 300) sentence = snippetAround(sentence, keyword, 140);
+  } else {
+    sentence = snippetAround(raw, keyword);
+  }
+  return { title, where, sentence };
+}
+
+/** The sentence with the keyword in bold, for WhatsApp. */
+function boldKeyword(text, keyword) {
+  if (!keyword) return text;
+  const i = text.toLowerCase().indexOf(String(keyword).toLowerCase());
+  if (i < 0) return text;
+  return text.substring(0, i) + '*' + text.substring(i, i + keyword.length) + '*' + text.substring(i + keyword.length);
+}
+
 function findChatByName(chats, query) {
   const q = normalizeHe(query);
   if (!q) return undefined;
@@ -3906,12 +3954,14 @@ client.on('message_create', async (msg) => {
         try {
           const _grpCht = await msg.getChat();
           const _ownerC = await client.getChatById(OWNER_ID);
-          const _preview = snippetAround(stripUrls(msg.body), _matchOwner);
+          const _okc = keywordContext(msg.body, _matchOwner);
+          const _preview = _okc.sentence || snippetAround(stripUrls(msg.body), _matchOwner);
           await botSend(_ownerC,
             `🚨 *התראה — מילת מפתח: "${_matchOwner}"*\n` +
-            `📍 *${_grpCht.name || msg.to}*\n` +
-            `👤 אתה\n` +
-            `💬 "${_preview}"`
+            `📍 *${_grpCht.name || msg.to}* · 👤 אתה\n` +
+            (_okc.title ? `\n📰 *${_okc.title}*\n` : '\n') +
+            (_okc.where ? `🔎 המילה מופיעה ${_okc.where}:\n` : '') +
+            `💬 "${boldKeyword(_preview, _matchOwner)}"`
           );
           require('./src/keyword-alerts').logAlert(_matchOwner, _grpCht.name || msg.to, 'אתה', _preview);
         } catch (_oe) { /* silent */ }
@@ -3974,6 +4024,37 @@ client.on('message_create', async (msg) => {
       await botSend(_sleepChat, 'בוטי הולך לישון... 💤 שלח "היי בוטי" כדי להעיר אותי.');
       return;
     }
+    // ── "הרחב" on a radio headline ───────────────────────────────
+    // The headline arrives as one line. "הרחב" answers with who said what,
+    // from the transcript around it. Replying to a specific headline expands
+    // that one; otherwise the newest from the last three hours.
+    if (/^(הרחב|הרחבה|פרט|מי אמר מה)[.!?]?$/.test(rawBody.trim())) {
+      const hl = require('./src/broadcast-headlines');
+      let pool = hl.recent(20).filter(h => Date.now() - h.ts < 3 * 60 * 60 * 1000);
+      if (msg.hasQuotedMsg) {
+        try {
+          const q = (await msg.getQuotedMessage())?.body || '';
+          const hit = hl.recent(40).find(h => q.includes(h.headline.substring(0, 30)));
+          if (hit) pool = [hit];
+        } catch (_) {}
+      }
+      const _hc = await client.getChatById(OWNER_ID);
+      if (!pool.length) {
+        await botSend(_hc, 'אין כותרת מהשידור מהשעות האחרונות להרחיב.');
+        return;
+      }
+      try { await msg.react('🔎'); } catch (_) {}
+      try {
+        const x = await hl.expand(pool[0].id);
+        await botSend(_hc, hl.formatExpansion(pool[0], x));
+      } catch (e) {
+        await botSend(_hc, e.code === 'NO_TRANSCRIPT'
+          ? 'אין מספיק תמלול סביב הכותרת הזו כדי להרחיב.'
+          : '❌ ההרחבה לא הצליחה — נסה שוב בעוד רגע.');
+      }
+      return;
+    }
+
     // ── Crisis mode commands ─────────────────────────────────────
     const _trim = rawBody.trim();
     if (_trim === 'סיים חירום' || _trim === 'סיום חירום' || _trim === 'בטל חירום') {
@@ -5590,7 +5671,8 @@ client.on('message', async (msg) => {
           const _alertChat = await msg.getChat();
           const _groupNameForAlert = _alertChat.name || _kFromJid;
           const _sender = msg._data?.notifyName || 'מישהו';
-          const _preview = snippetAround(stripUrls(msg.body), _matchedKw);
+          const _kc = keywordContext(msg.body, _matchedKw);
+          const _preview = _kc.sentence || snippetAround(stripUrls(msg.body), _matchedKw);
           // Crisis mode check — if this critical alert pushes us over the
           // war-room threshold, suppress this individual alert and trigger
           // the consolidated war-room flow instead.
@@ -5610,9 +5692,10 @@ client.on('message', async (msg) => {
               const _ownerC = await client.getChatById(OWNER_ID);
               await botSend(_ownerC,
                 `🚨 *התראה — מילת מפתח: "${_matchedKw}"*\n` +
-                `📍 *${_groupNameForAlert}*\n` +
-                `👤 ${_sender}\n` +
-                `💬 "${_preview}"`
+                `📍 *${_groupNameForAlert}* · 👤 ${_sender}\n` +
+                (_kc.title ? `\n📰 *${_kc.title}*\n` : '\n') +
+                (_kc.where ? `🔎 המילה מופיעה ${_kc.where}:\n` : '') +
+                `💬 "${boldKeyword(_preview, _matchedKw)}"`
               );
               // Same alert to the phone. His WhatsApp self-chat is silent, so
               // everything sent there has effectively been invisible. Nothing
@@ -5622,7 +5705,11 @@ client.on('message', async (msg) => {
                 const _ctx = await _j.fetchContext(_alertChat, msg.id?._serialized || '', 3);
                 _j.mirrorAlert({
                   title: `🚨 מילת מפתח: "${_matchedKw}"`,
-                  body: `💬 "${_preview}"`,
+                  body: [
+                    _kc.title && `📰 ${_kc.title}`,
+                    _kc.where && `🔎 המילה מופיעה ${_kc.where}:`,
+                    `💬 "${_preview}"`,
+                  ].filter(Boolean).join('\n'),
                   kind: 'keyword', urgency: 'high',
                   group: _groupNameForAlert, sender: _sender,
                   // The message's own timestamp, not now — by the time this
@@ -7744,7 +7831,7 @@ setInterval(async () => {
         `*${h.headline}*` +
         (who ? `\n🎙️ ${who}` : '') +
         (h.quote ? `\n\n"${h.quote}"` : '') +
-        `\n\n_נקלט באוויר — לפני שפורסם._`;
+        `\n\n_נקלט באוויר — לפני שפורסם._\n↩️ ענה *הרחב* — מי אמר מה`;
       try { await botSend(await client.getChatById(OWNER_ID), wa); } catch {}
       try {
         require('./src/jarvis-api').pushAlert({
@@ -7807,6 +7894,10 @@ setInterval(async () => {
     const bd = require('./src/broadcast-digest');
     const to = new Date(now); to.setMinutes(0, 0, 0);
     const from = new Date(to.getTime() - 60 * 60 * 1000);
+    // _digestHour lives in memory, so every restart treated the hour as not
+    // yet done — on 10.9 the 09:00–10:00 digest was analysed and pushed to his
+    // phone five times in half an hour. The stored digests are the record.
+    if (bd.recentDigests(6).some(x => x.from === from.getTime() && (x.to || 0) - x.from <= 60 * 60 * 1000)) return;
     let d = null;
     try { d = await bd.analyseHour({ fromTs: from.getTime(), toTs: to.getTime() }); }
     catch (err) { logger.warn("broadcast digest: " + (err.code || err.message)); }

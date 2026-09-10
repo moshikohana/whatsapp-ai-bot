@@ -712,6 +712,23 @@ function attach(app, deps = {}) {
     }
   });
 
+  // "הרחב" על כותרת — מי אמר מה, מתוך התמלול סביבה.
+  app.post('/api/jarvis/broadcast/expand', guard, async (req, res) => {
+    const id = String((req.body || {}).id || '');
+    if (!id) return res.status(400).json({ error: 'צריך כותרת' });
+    try {
+      const expansion = await require('./broadcast-headlines').expand(id);
+      res.json({ ok: true, expansion });
+    } catch (e) {
+      const msg = {
+        NOT_FOUND: 'הכותרת כבר לא שמורה',
+        NO_TRANSCRIPT: 'אין מספיק תמלול סביב הרגע הזה',
+        ANALYSIS_FAILED: 'הניתוח לא הצליח — נסה שוב',
+      }[e.code] || (e.message || 'failed').substring(0, 150);
+      res.status(e.code === 'NOT_FOUND' ? 404 : 500).json({ error: msg });
+    }
+  });
+
   // מריץ ניתוח על טווח שהאפליקציה מבקשת — בלי לחכות לשעה העגולה.
   app.post('/api/jarvis/broadcast/analyse', guard, async (req, res) => {
     try {

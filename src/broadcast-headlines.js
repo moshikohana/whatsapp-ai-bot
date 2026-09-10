@@ -106,6 +106,9 @@ async function onChunk({ station, text, ts = Date.now() }) {
       `תחנה: ${station}\n\nתמלול:\n${window}`,
       { system: SYSTEM, maxTokens: 400, model: 'claude-haiku-4-5-20251001' }
     );
+    // One line per check. Without it a quiet hour and a broken detector look
+    // the same in the log.
+    logger.info(`📻 headline check [${station}] → ${r && r.headline ? `★${r.score || 0} ${String(r.headline).substring(0, 50)}` : 'nothing'}`);
     if (!r || !r.headline || (r.score || 0) < MIN_SCORE) return null;
 
     // Verified against the transcript, exactly as the hourly digest does. A
@@ -155,6 +158,13 @@ async function onChunk({ station, text, ts = Date.now() }) {
       if (ts - h.ts > DEDUPE_MS) return false;
       if (h.key === key) return true;
       if (h.station !== station || ts - h.ts > 45 * 60 * 1000) return false;
+      // The same quote is the same story, however differently it was
+      // headlined: 09:23 "נתניהו התעלם מהתראות" and 09:31 "נתניהו תעד התראות
+      // וזלזל בהן" carried one identical quote and shared only one word.
+      if (quote && h.quote) {
+        const a = norm(quote), b = norm(h.quote);
+        if (a === b || a.includes(b) || b.includes(a)) return true;
+      }
       let shared = 0;
       for (const w of words(h.headline)) if (mine.has(w)) shared++;
       return shared >= 3 || (shared >= 2 && mine.size <= 4);
@@ -205,4 +215,88 @@ function contextAround(ts, station, minutes = 12) {
     .map(c => ({ ts: c.ts, station: c.station, text: c.text, ad: isAd(c.text) }));
 }
 
-module.exports = { onChunk, recent, contextAround, isAd };
+const EXPAND_SYSTEM = `אתה עורך חדשות. קיבלת כותרת שנקלטה ברדיו, ואת התמלול סביבה.
+התמלול הוא דגימות של 55 שניות כל 4 דקות — יש חורים, ומשפטים נחתכים.
+
+החזר JSON בלבד:
+{"story":"2-4 משפטים: מה קרה או מה נטען, בעברית עיתונאית",
+ "who":[{"name":"שם כפי שנאמר בתמלול","role":"תפקיד אם נאמר, אחרת null","said":"מה אמר — פרפרזה קצרה"}],
+ "quotes":["ציטוט מדויק, מילה במילה מהתמלול, 8-30 מילים"],
+ "background":"הקשר שעולה מהתמלול, או null",
+ "unclear":"מה לא ברור בגלל החורים בדגימה, או null"}
+
+⛔ שם אדם רק אם הוא מופיע בתמלול. אסור להשלים ממה שאתה יודע מבחוץ.
+⛔ ציטוט רק אם הוא מופיע בתמלול כלשונו. עדיף פחות ציטוטים מציטוט לא מדויק.
+⛔ מראיין ששואל שאלה אינו "אמר" את תוכן השאלה.`;
+
+/**
+ * "הרחב" — מי אמר מה, סביב כותרת.
+ *
+ * הכותרת היא שורה אחת; מאחוריה יש ראיון של כמה דקות. כאן נקרא כל התמלול
+ * שנשמר סביב הרגע (רבע שעה לכל כיוון, כולל מה שנקלט אחריו) ומסוכם לסיפור,
+ * לאנשים ולמה שכל אחד אמר. אותם כללי אימות כמו בכותרת: שם שלא נאמר באוויר
+ * יורד, וציטוט שלא נמצא בתמלול יורד.
+ */
+async function expand(id) {
+  const list = _load();
+  const h = list.find(x => x.id === id);
+  if (!h) { const e = new Error('headline not found'); e.code = 'NOT_FOUND'; throw e; }
+  // The interview may have gone on after the headline was sent; a cached
+  // answer from the first minutes is refreshed once more has been recorded.
+  if (h.expansion && h.expansion.ts - h.ts > 20 * 60 * 1000) return h.expansion;
+
+  const chunks = contextAround(h.ts, h.station, 15).filter(c => !c.ad);
+  const text = chunks.map(c => c.text).join('\n');
+  if (text.length < 80) { const e = new Error('no transcript'); e.code = 'NO_TRANSCRIPT'; throw e; }
+
+  const claude = require('./claude');
+  const r = await claude.classifyJSON(
+    `כותרת: ${h.headline}\nתחנה: ${h.station}\n\nתמלול:\n${text.substring(0, 9000)}`,
+    { system: EXPAND_SYSTEM, maxTokens: 1800 }
+  );
+  if (!r || !r.story) { const e = new Error('analysis failed'); e.code = 'ANALYSIS_FAILED'; throw e; }
+
+  const norm = s => String(s || '').replace(/["'״׳.,!?:;\-–—]/g, ' ').replace(/\s+/g, ' ').trim();
+  const hay = norm(text);
+  const surname = n => norm(n).split(' ').filter(w => w.length >= 2).pop() || '';
+  const x = {
+    ts: Date.now(),
+    story: String(r.story).substring(0, 700),
+    who: (Array.isArray(r.who) ? r.who : [])
+      .filter(w => w && w.name && surname(w.name) && hay.includes(surname(w.name)))
+      .slice(0, 6)
+      .map(w => ({ name: String(w.name).substring(0, 40), role: w.role ? String(w.role).substring(0, 60) : null, said: String(w.said || '').substring(0, 240) })),
+    quotes: (Array.isArray(r.quotes) ? r.quotes : [])
+      .filter(q => q && norm(q).length >= 12 && hay.includes(norm(q)))
+      .slice(0, 4),
+    background: r.background ? String(r.background).substring(0, 400) : null,
+    unclear: r.unclear ? String(r.unclear).substring(0, 300) : null,
+    span: chunks.length ? { from: chunks[0].ts, to: chunks[chunks.length - 1].ts, samples: chunks.length } : null,
+  };
+  const dropped = (r.who || []).length - x.who.length + (r.quotes || []).length - x.quotes.length;
+  if (dropped > 0) logger.info(`📻 expand: dropped ${dropped} unverified name/quote(s)`);
+
+  h.expansion = x;
+  _save(list);
+  return x;
+}
+
+/** הפירוט כהודעת וואטסאפ. */
+function formatExpansion(h, x) {
+  const t = ts => new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+  const parts = [`🔎 *${h.headline}*`, `_${h.station} · ${t(h.ts)}_`, '', x.story];
+  if (x.who.length) {
+    parts.push('', '*מי אמר מה:*');
+    for (const w of x.who) parts.push(`• *${w.name}*${w.role ? ` (${w.role})` : ''} — ${w.said}`);
+  }
+  if (x.quotes.length) {
+    parts.push('', '*ציטוטים מהאוויר:*');
+    for (const q of x.quotes) parts.push(`"${q}"`);
+  }
+  if (x.background) parts.push('', `📌 ${x.background}`);
+  if (x.unclear) parts.push('', `⚠️ ${x.unclear}`);
+  if (x.span) parts.push('', `_מבוסס על ${x.span.samples} דגימות, ${t(x.span.from)}–${t(x.span.to)}_`);
+  return parts.join('\n');
+}
+
+module.exports = { onChunk, recent, contextAround, isAd, expand, formatExpansion };
