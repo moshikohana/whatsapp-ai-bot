@@ -73,4 +73,4 @@ function formatChangelog(limit = 3) {
   return out;
 }
 
-module.exports = { formatChangelog };
+module.exports = { formatChangelog, loadChangelog };

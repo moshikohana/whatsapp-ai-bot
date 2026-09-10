@@ -610,6 +610,16 @@ function attach(app, deps = {}) {
     }
   });
 
+  // ── "מה חדש" — לכרטיס בדף הבית של האפליקציה ─────────────────────
+  app.get('/api/jarvis/changelog', guard, (req, res) => {
+    try {
+      const n = Math.min(Math.max(parseInt(req.query.n, 10) || 2, 1), 6);
+      res.json({ ok: true, versions: require('./changelog').loadChangelog().slice(0, n) });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
   // ── השיחה בוואטסאפ, לטאב השיחה באפליקציה ────────────────────────
   app.get('/api/jarvis/wa-thread', guard, (req, res) => {
     try {
