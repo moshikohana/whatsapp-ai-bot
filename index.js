@@ -150,6 +150,9 @@ function _cacheGroupMsg(msg) {
   const _mTs = msg.timestamp || Math.floor(Date.now() / 1000);
   const _mSender = (msg._data?.notifyName || msg._data?.pushName || '').substring(0, 30);
   _msgCache[cid].push({ id, ts: _mTs, sender: _mSender, body: (msg.body || '').substring(0, 500) });
+  // מד היתרון: did a radio headline just reach the groups? Word match only;
+  // the model is asked only when a message looks like the same story.
+  try { require('./src/lead-radar').onGroupText({ text: msg.body, group: _jidNames.get(cid) || '', ts: _mTs * 1000 }); } catch {}
   // Long-horizon rollup (counts only, 30-day retention) for deep group analytics.
   try { require('./src/group-stats').record(cid, _jidNames.get(cid) || '', _mTs, _mSender); } catch {}
   if (_msgCache[cid].length > 250) {
@@ -8010,12 +8013,48 @@ setInterval(async () => {
           urgency: h.score >= 5 ? 'high' : 'normal',
         });
       } catch {}
+      // ⚡ If it touches Kellner: the response package, before anyone calls.
+      (async () => {
+        try {
+          const lr = require('./src/lead-radar');
+          const pkg = await lr.onHeadline(h);
+          if (!pkg) return;
+          const text = lr.formatPackage(h, pkg);
+          await botSend(await client.getChatById(OWNER_ID), text);
+          require('./src/jarvis-api').pushAlert({
+            title: `⚡ תגובה מוכנה · ${h.headline}`,
+            summary: pkg.why,
+            body: text.replace(/\*/g, ''),
+            kind: 'ready-response', urgency: 'high',
+          });
+        } catch (e) { logger.warn('ready-response: ' + (e.message || '').substring(0, 60)); }
+      })();
     }
     if ((hits.headlines || []).length) logger.info(`🗞️ broadcast: ${hits.headlines.length} headline(s) sent`);
   } catch (e) { logger.warn('broadcast loop: ' + (e.message || '').substring(0, 70)); }
   finally { _bcBusy = false; }
 }, 60 * 1000);
 let _bcLast = 0;
+
+// ─── ⏱️ מד היתרון — סיכום שבועי, ראשון 08:30 ──────────────────────
+// The sent-week marker lives on disk: an in-memory flag is what made the
+// hourly radio digest go out five times in one morning of restarts.
+setInterval(async () => {
+  try {
+    const il = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+    if (il.getDay() !== 0 || il.getHours() !== 8 || il.getMinutes() < 30) return;
+    const weekKey = `${il.getFullYear()}-${il.getMonth() + 1}-${il.getDate()}`;
+    const f = path.join(__dirname, 'data', 'lead-weekly.json');
+    let last = null; try { last = JSON.parse(fs.readFileSync(f, 'utf8')).week; } catch (_) {}
+    if (last === weekKey) return;
+    fs.writeFileSync(f, JSON.stringify({ week: weekKey, at: Date.now() }));
+    const lr = require('./src/lead-radar');
+    const text = lr.formatWeekly(lr.stats(7));
+    if (!text) return;
+    await botSend(await client.getChatById(OWNER_ID), text);
+    require('./src/jarvis-api').pushAlert({ title: '⏱️ מד היתרון — השבוע', summary: text.split('\n')[3] || '', body: text.replace(/\*/g, ''), kind: 'lead-weekly' });
+  } catch (e) { logger.warn('lead weekly: ' + (e.message || '').substring(0, 60)); }
+}, 60 * 1000);
 
 // ─── 🐞 Relay queued app error reports ───────────────────────────
 // A report that arrived while the desktop agent was offline is not lost; it

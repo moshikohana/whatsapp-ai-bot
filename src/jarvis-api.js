@@ -651,6 +651,16 @@ function attach(app, deps = {}) {
     }
   });
 
+  // ── מד היתרון — כמה הקדמנו את הקבוצות ──────────────────────────
+  app.get('/api/jarvis/lead-radar', guard, (req, res) => {
+    try {
+      const lr = require('./lead-radar');
+      res.json({ ok: true, week: lr.stats(7), today: lr.stats(1) });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
   // ── "מה חדש" — לכרטיס בדף הבית של האפליקציה ─────────────────────
   app.get('/api/jarvis/changelog', guard, (req, res) => {
     try {
