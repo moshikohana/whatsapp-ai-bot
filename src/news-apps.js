@@ -224,6 +224,40 @@ function recent(n = 30) {
     .map(x => ({ id: x.id, source: x.source, text: x.text, ts: x.ts, radio: x.radio || null }));
 }
 
+/**
+ * סיפורים — שורה לכל סיפור, ומתי כל מקור היה איתו: הרדיו, ynet, ערוץ 14, כאן.
+ * התראות על אותו סיפור מאפליקציות שונות מקובצות לפי מילים משותפות בחלון של
+ * שלוש שעות. זו הטבלה שבה רואים מי הקדים את מי.
+ */
+function stories(hours = 24, limit = 15) {
+  const since = Date.now() - hours * 3600000;
+  const pushes = _load().filter(x => !x.skip && x.ts >= since).sort((a, b) => a.ts - b.ts);
+  const out = [];
+  for (const p of pushes) {
+    const s = out.find(st => Math.abs(st.last - p.ts) < 3 * 3600000 && st.members.some(m => _overlap(m.text, p.text) >= 3.5));
+    if (s) { s.members.push(p); s.last = Math.max(s.last, p.ts); }
+    else out.push({ members: [p], last: p.ts });
+  }
+  return out.map(st => {
+    const apps = {};
+    for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) apps[m.source] = m.ts;
+    const r = st.members.map(m => m.radio).filter(Boolean).sort((a, b) => a.ts - b.ts)[0] || null;
+    const times = [...Object.entries(apps).map(([k, t]) => [k, t]), ...(r ? [['רדיו', r.ts]] : [])];
+    const first = times.sort((a, b) => a[1] - b[1])[0];
+    return {
+      title: st.members[0].text.substring(0, 140),
+      apps,
+      radio: r ? { ts: r.ts, station: r.station } : null,
+      first: first ? first[0] : null,
+      last: st.last,
+      sources: Object.keys(apps).length + (r ? 1 : 0),
+    };
+  })
+    // A story more than one source had is the interesting row; then the latest.
+    .sort((a, b) => (b.sources > 1) - (a.sources > 1) || b.last - a.last)
+    .slice(0, limit);
+}
+
 /** לכל אפליקציה: בכמה סיפורים הרדיו הקדים אותה, ובכמה דקות בממוצע. */
 function stats(days = 7) {
   const since = Date.now() - days * 86400000;
@@ -246,4 +280,4 @@ function idle() {
   return new Promise(r => { const t = setInterval(() => { if (!_busy && !_queue.length) { clearInterval(t); r(); } }, 100); });
 }
 
-module.exports = { addMany, onHeadline, recent, stats, idle, tick };
+module.exports = { addMany, onHeadline, recent, stats, stories, idle, tick };

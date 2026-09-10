@@ -691,7 +691,7 @@ function attach(app, deps = {}) {
   app.get('/api/jarvis/news-compare', guard, (req, res) => {
     try {
       const na = require('./news-apps');
-      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7) });
+      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7), stories: na.stories(24, 15) });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }
