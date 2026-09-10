@@ -1901,9 +1901,12 @@ function _queueFaceDoubts(ambiguous, buffer, groupName, raw = null, detections =
   if (!ambiguous || !ambiguous.length) return;
   (async () => {
     const dec = require('./src/decisions');
+    const fr = require('./src/face-recognition');
     for (const a of ambiguous) {
-      const between = a.between || [];
-      if (between.length < 2) continue;
+      // Only names allowed in this group. In שי's kindergarten "מיה או שי?"
+      // offers a child who cannot be there; it becomes "זו שי?".
+      const between = (a.between || []).filter(n => fr.isAllowed(n, groupName));
+      if (!between.length) continue;
       // The face in question, boxed in orange with a "?", and where it is.
       // On 10.9 the question "מיה או שי?" came over a photo with שי framed
       // in green — it was about a boy in the back row, and it read as a
@@ -1920,15 +1923,19 @@ function _queueFaceDoubts(ambiguous, buffer, groupName, raw = null, detections =
           face = { cx: (g.x + g.w / 2) / g.width, cy: (g.y + g.h / 2) / g.height };
         } catch (_) {}
       }
+      const one = between.length === 1;
       dec.ask({
         kind: 'face',
-        question: `מי זה בתמונה${where ? ` (${where}, מסומן ב-?)` : ''} — ${between[0]} או ${between[1]}?`,
-        hint: `הפרש של ${a.distance != null ? a.distance.toFixed(3) : '?'} בלבד בין השתיים. ` +
-          `אם זה ילד אחר — "אף אחת". התשובה תיכנס לייחוס ותשפר את ההכרעה הבאה.`,
-        options: [
-          ...between.slice(0, 2).map(n => ({ label: n, value: n })),
-          { label: 'אף אחת', value: '__none__' },
-        ],
+        question: one
+          ? `זו ${between[0]}?${where ? ` (${where}, מסומן ב-?)` : ''}`
+          : `מי זה בתמונה${where ? ` (${where}, מסומן ב-?)` : ''} — ${between[0]} או ${between[1]}?`,
+        hint: one
+          ? `בוטי לא בטוח. אם זו ${between[0]} — התשובה תיכנס לייחוס ותשפר את ההכרעה הבאה.`
+          : `הפרש של ${a.distance != null ? a.distance.toFixed(3) : '?'} בלבד בין השתיים. ` +
+            `אם זה ילד אחר — "אף אחת". התשובה תיכנס לייחוס ותשפר את ההכרעה הבאה.`,
+        options: one
+          ? [{ label: `כן, זו ${between[0]}`, value: between[0] }, { label: 'לא', value: '__none__' }]
+          : [...between.slice(0, 2).map(n => ({ label: n, value: n })), { label: 'אף אחת', value: '__none__' }],
         context: { group: groupName || '', distance: a.distance, between, face },
         image,
         // One question per pair per group per hour. The kindergarten sends
@@ -3994,6 +4001,9 @@ client.on('message_create', async (msg) => {
                       // Below the floor it is a candidate, not a confirmation.
                       candidate: (m.confidence || 0) < 50,
                     });
+                    if ((m.confidence || 0) >= 50) {
+                      require('./src/album').add({ name: m.name, buffer: imageBuffer, group: groupName, confidence: m.confidence, source: 'alert' }).catch(() => {});
+                    }
                   }
                   require('./src/jarvis-api').mirrorAlert({
                     title: `🎀 ${allNames} — זוהה בתמונה`,
@@ -5924,18 +5934,22 @@ client.on('message', async (msg) => {
       // see what had been rejected. These are shown separately in the app, and
       // confirming one turns it into a reference, which is exactly what a 25%
       // score says is missing.
-      try {
+      // Only people allowed in this group are candidates at all. מיה matched
+      // in שי's kindergarten was archived under her name, framed in green, and
+      // shown in the app — a child who cannot be in that photo.
+      const _allowed = require('./src/face-recognition').allowedNames(groupName);
+      if (whitelisted.length) try {
         const _arch = require('./src/face-archive');
         // Marked as well — a rejected guess is only reviewable if you can see
         // which face was guessed.
         let _cbuf = imageBuffer;
         try {
           const { buffer: _cm } = await highlightMatchingFaces(imageBuffer, {
-            blurOthers: false, preDetected: allMatches.detections, matchedOnly: true,
+            blurOthers: false, preDetected: allMatches.detections, matchedOnly: true, allowed: _allowed,
           });
           if (_cm && _cm.length) _cbuf = _cm;
         } catch (_) {}
-        for (const m of allMatches) {
+        for (const m of whitelisted) {
           _arch.record({
             name: m.name, buffer: _cbuf, group: groupName,
             confidence: m.confidence, candidate: true,
@@ -5943,7 +5957,7 @@ client.on('message', async (msg) => {
         }
         _queueFaceDoubts(allMatches.ambiguous, _cbuf, groupName, imageBuffer, allMatches.detections);
         _logFaceCheck(_cbuf, groupName, "candidate",
-          allMatches.map(m => `${m.name} ${m.confidence}% — נפסל בסינון`).join(", "),
+          whitelisted.map(m => `${m.name} ${m.confidence}% — נפסל בסינון`).join(", "),
           (allMatches.detections || []).length);
         _checkLogged = true;
         // 🟡 "Maybe": the right child for this group, under its floor but
@@ -5988,6 +6002,9 @@ client.on('message', async (msg) => {
             name: m.name, buffer: _buf, group: groupName,
             confidence: m.confidence,
           });
+          // The album keeps the clean photo, forever — the archive above keeps
+          // the framed one, and only the last 40.
+          require('./src/album').add({ name: m.name, buffer: imageBuffer, group: groupName, confidence: m.confidence, source: 'alert' }).catch(() => {});
         }
         // A named match and an unresolved face can sit in the same photo — the
         // kindergarten shot that started this had both. Ask about the second.
@@ -8035,6 +8052,24 @@ setInterval(async () => {
   finally { _bcBusy = false; }
 }, 60 * 1000);
 let _bcLast = 0;
+
+// ─── 🎞️ כרטיס האלבום החודשי — ב-1 לחודש, 09:00 ──────────────────
+setInterval(async () => {
+  try {
+    const il = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+    if (il.getDate() !== 1 || il.getHours() !== 9) return;
+    const prev = new Date(il.getFullYear(), il.getMonth() - 1, 15);
+    const key = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+    const f = path.join(__dirname, 'data', 'album-month-sent.json');
+    let last = null; try { last = JSON.parse(fs.readFileSync(f, 'utf8')).month; } catch (_) {}
+    if (last === key) return;
+    fs.writeFileSync(f, JSON.stringify({ month: key, at: Date.now() }));
+    const text = require('./src/album').monthCard(key);
+    if (!text) return;
+    await botSend(await client.getChatById(OWNER_ID), text);
+    require('./src/jarvis-api').pushAlert({ title: '🎞️ האלבום של החודש', summary: key, body: text.replace(/\*/g, ''), kind: 'album-month' });
+  } catch (e) { logger.warn('album month: ' + (e.message || '').substring(0, 60)); }
+}, 60 * 1000);
 
 // ─── ⏱️ מד היתרון — סיכום שבועי, ראשון 08:30 ──────────────────────
 // The sent-week marker lives on disk: an in-memory flag is what made the

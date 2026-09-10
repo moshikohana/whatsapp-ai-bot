@@ -352,7 +352,7 @@ function attach(app, deps = {}) {
   // The phone is where the photos already are, so making him route them
   // through WhatsApp to reach the recogniser was the long way round.
   app.post('/api/jarvis/face/reference', guard, async (req, res) => {
-    const { name, image, force, chooseIndex } = req.body || {};
+    const { name, image, force, chooseIndex, album } = req.body || {};
     if (!name || !image) return res.status(400).json({ error: 'צריך שם ותמונה' });
     try {
       const fr = require('./face-recognition');
@@ -361,6 +361,10 @@ function attach(app, deps = {}) {
         force: !!force,
         chooseIndex: chooseIndex != null ? parseInt(chooseIndex, 10) : null,
       });
+      // "✅ זו שי" on a checked photo is also "keep this one" — the album.
+      if (album && r && r.success) {
+        require('./album').add({ name: String(name).trim(), buffer: buf, group: String(req.body.group || ''), source: 'confirm' }).catch(() => {});
+      }
       res.json({ ok: true, result: r, total: fr.getReferenceCount(String(name).trim()) });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
@@ -393,11 +397,13 @@ function attach(app, deps = {}) {
   // Numbered overlay, so the app can show which face is which before he
   // picks one to attach a name to.
   app.post('/api/jarvis/face/number', guard, async (req, res) => {
-    const { image } = req.body || {};
+    const { image, group } = req.body || {};
     if (!image) return res.status(400).json({ error: 'צריך תמונה' });
     try {
       const fr = require('./face-recognition');
-      const out = await fr.numberFaces(Buffer.from(String(image), 'base64'));
+      // The photo's group, when the app knows it: only the people allowed
+      // there are offered as names.
+      const out = await fr.numberFaces(Buffer.from(String(image), 'base64'), null, fr.allowedNames(String(group || '')));
       if (!out || !out.buffer) return res.json({ ok: true, faces: 0, image: null, details: [] });
       res.json({
         ok: true,
@@ -649,6 +655,28 @@ function attach(app, deps = {}) {
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }
+  });
+
+  // ── 🎞️ אלבום — לפי אדם וחודש ─────────────────────────────────
+  app.get('/api/jarvis/album', guard, (req, res) => {
+    try { res.json({ ok: true, people: require('./album').summary() }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.get('/api/jarvis/album/month', guard, (req, res) => {
+    const name = String(req.query.name || ''), month = String(req.query.month || '');
+    if (!name || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'צריך שם וחודש' });
+    try { res.json({ ok: true, photos: require('./album').month(name, month) }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.get('/api/jarvis/album/photo', guard, (req, res) => {
+    const img = require('./album').photo(String(req.query.name || ''), parseInt(req.query.ts, 10));
+    if (!img) return res.status(404).json({ error: 'התמונה לא נמצאה' });
+    res.json({ ok: true, image: img });
+  });
+  app.post('/api/jarvis/album/remove', guard, (req, res) => {
+    const { name, ts } = req.body || {};
+    const ok = require('./album').remove(String(name || ''), parseInt(ts, 10));
+    res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'התמונה לא נמצאה' });
   });
 
   // ── מד היתרון — כמה הקדמנו את הקבוצות ──────────────────────────

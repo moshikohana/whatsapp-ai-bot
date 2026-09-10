@@ -55,6 +55,8 @@ const _safe = s => String(s || 'unknown').replace(/[^\p{L}\p{N}_-]/gu, '_').subs
  */
 function record({ name, buffer, group, confidence, candidate = false, ts = Date.now() }) {
   if (!name || !buffer || !buffer.length) return null;
+  // Not in a group this person cannot be in (see face-recognition.allowedNames).
+  try { if (group && !require('./face-recognition').isAllowed(name, group)) return null; } catch (_) {}
   if (buffer.length > MAX_BYTES) return null;
   try {
     const idx = _load();
@@ -116,7 +118,8 @@ function photos(name, limit = 20, withData = true) {
   const key = _safe(name);
   const entry = idx[key];
   if (!entry) return [];
-  return (entry.photos || []).slice(0, limit).map(p => {
+  let _fr = null; try { _fr = require('./face-recognition'); } catch (_) {}
+  return (entry.photos || []).filter(p => !_fr || !p.group || _fr.isAllowed(entry.name || name, p.group)).slice(0, limit).map(p => {
     const out = { ts: p.ts, group: p.group, confidence: p.confidence, kb: p.kb, candidate: !!p.candidate };
     if (withData) {
       try { out.image = fs.readFileSync(path.join(ROOT, key, p.file)).toString('base64'); }

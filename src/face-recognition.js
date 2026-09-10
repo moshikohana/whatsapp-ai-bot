@@ -716,8 +716,12 @@ async function blurNonMatchingFaces(imageBuffer, preDetected = null) {
 }
 
 // ─── Highlight matching faces (draw colored border around them) ──
-async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDetected = null, matchedOnly = false } = {}) {
-  const config = loadConfig();
+async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDetected = null, matchedOnly = false, allowed = null } = {}) {
+  const cfg0 = loadConfig();
+  // Only the people allowed in this group get a frame (see allowedNames).
+  const config = allowed && allowed.length
+    ? { ...cfg0, referenceDescriptors: Object.fromEntries(Object.entries(cfg0.referenceDescriptors || {}).filter(([n]) => allowed.includes(n))) }
+    : cfg0;
   const detections = preDetected || await detectFaces(imageBuffer);
   if (detections.length === 0) return { buffer: imageBuffer, highlighted: 0, blurred: 0, matched: 0 };
 
@@ -831,8 +835,13 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
 // to a face by number ("2"). Powers both the pick-a-face reference flow and
 // detection feedback. `faces[i]` corresponds to `detections[i]`, so the number
 // the owner sees maps straight back to a specific detection.
-async function numberFaces(imageBuffer, preDetected = null) {
-  const config = loadConfig();
+async function numberFaces(imageBuffer, preDetected = null, allowed = null) {
+  const cfg0 = loadConfig();
+  // In a group limited to certain people, only they are candidates — a face
+  // in שי's kindergarten is never labelled "מיה", however alike they look.
+  const config = allowed && allowed.length
+    ? { ...cfg0, referenceDescriptors: Object.fromEntries(Object.entries(cfg0.referenceDescriptors || {}).filter(([n]) => allowed.includes(n))) }
+    : cfg0;
   const detections = preDetected || await detectFaces(imageBuffer);
   if (!detections.length) return { buffer: imageBuffer, faces: [], count: 0, detections: [] };
 
@@ -1151,6 +1160,23 @@ function getStatus() {
  * @param {object} groupWhitelist - { groupName: [allowedNames] }
  * @returns {Array} matches limited to whitelisted names (or all if no whitelist)
  */
+/**
+ * מי מותר בקבוצה הזו — או null כשאין הגבלה.
+ * One answer for every place that shows a name: alerts already obeyed the
+ * whitelist, but the archive, the questions and the numbering did not, so
+ * "מיה" kept appearing on photos from שי's kindergarten, where she can't be.
+ */
+function allowedNames(groupName) {
+  if (!groupName) return null;
+  const wl = loadConfig().groupWhitelist || {};
+  const entry = Object.entries(wl).find(([g]) => groupName.includes(g) || g.includes(groupName));
+  return entry && Array.isArray(entry[1]) && entry[1].length ? entry[1] : null;
+}
+function isAllowed(name, groupName) {
+  const a = allowedNames(groupName);
+  return !a || a.includes(name);
+}
+
 function applyGroupWhitelist(matches, groupName, groupWhitelist) {
   if (!groupWhitelist || !groupName || !matches?.length) return matches || [];
   // Find the whitelist entry whose key best matches the group name (partial-match,
@@ -1203,6 +1229,8 @@ module.exports = {
   highlightMatchingFaces,
   numberFaces,
   faceGeometry,     // where a face sits, in words (for "which child")
+  allowedNames,     // who may appear in a group (whitelist), or null
+  isAllowed,
   markFace,         // one face boxed in orange with a "?"
   _matchDetections, // exported for diagnostics/tests
   _decideFaces,     // the shared per-face decision — naming and drawing both use it
