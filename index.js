@@ -8034,6 +8034,8 @@ setInterval(async () => {
       (async () => {
         try {
           const lr = require('./src/lead-radar');
+          // 📲 Did ynet / C14 / Kan already push it? (and later: when they do)
+          try { require('./src/news-apps').onHeadline(h); } catch (_) {}
           const pkg = await lr.onHeadline(h);
           if (!pkg) return;
           const text = lr.formatPackage(h, pkg);
@@ -8052,6 +8054,9 @@ setInterval(async () => {
   finally { _bcBusy = false; }
 }, 60 * 1000);
 let _bcLast = 0;
+
+// ─── 📲 בדיקה חוזרת של התראות החדשות מול הרדיו — כל 10 דקות ─────────
+setInterval(() => { try { require('./src/news-apps').tick(); } catch (_) {} }, 10 * 60 * 1000);
 
 // ─── 🎞️ כרטיס האלבום החודשי — ב-1 לחודש, 09:00 ──────────────────
 setInterval(async () => {

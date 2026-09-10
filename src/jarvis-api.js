@@ -679,6 +679,24 @@ function attach(app, deps = {}) {
     res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'התמונה לא נמצאה' });
   });
 
+  // ── 📲 התראות מאפליקציות החדשות — מהטלפון, מול הרדיו ─────────────
+  app.post('/api/jarvis/news-push', guard, (req, res) => {
+    try {
+      const items = Array.isArray((req.body || {}).items) ? req.body.items.slice(0, 300) : [];
+      res.json({ ok: true, added: require('./news-apps').addMany(items) });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+  app.get('/api/jarvis/news-compare', guard, (req, res) => {
+    try {
+      const na = require('./news-apps');
+      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7) });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
   // ── מד היתרון — כמה הקדמנו את הקבוצות ──────────────────────────
   app.get('/api/jarvis/lead-radar', guard, (req, res) => {
     try {
