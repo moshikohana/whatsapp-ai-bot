@@ -2647,6 +2647,11 @@ client.on('auth_failure', async (msg) => {
 // Reset reconnect counter once we're fully ready again
 client.on('ready', () => { _reconnectAttempts = 0; });
 
+// The last emergency, kept for the app's war-room screen.
+function _saveWarRoom(v) {
+  try { fs.writeFileSync(path.join(__dirname, 'data', 'warroom-last.json'), JSON.stringify(v, null, 2)); } catch (_) {}
+}
+
 // ─── Crisis War-Room — auto-triggered when 3+ critical alerts fire in 30 min ─────
 // Replaces the noise of 4 separate alerts with one consolidated brief:
 // aggregated group activity, web context, and a draft response. The user
@@ -2674,6 +2679,17 @@ async function triggerWarRoom(trigger) {
       '_מכין סקירה מצרפית + טיוטת תגובה... (15-30 שניות)_',
     ].join('\n');
     await botSend(oc, opener);
+    // The app too. Until now the emergency lived only in WhatsApp — the one
+    // moment where he most needs it on the phone was the one it never reached.
+    _saveWarRoom({ ts: Date.now(), opener: opener.replace(/\*/g, ''), brief: null });
+    try {
+      require('./src/jarvis-api').pushAlert({
+        title: `🚨 מצב חירום · ${trigger.count} התראות קריטיות`,
+        summary: `${trigger.keywords.join(', ')} · ${trigger.groups.length} קבוצות`,
+        body: opener.replace(/\*/g, ''),
+        kind: 'warroom', urgency: 'high',
+      });
+    } catch (_) {}
 
     // Aggregate analysis prompt — let Claude do web_search + spokesperson
     const dominantKeywords = trigger.keywords.join(', ');
@@ -2724,6 +2740,15 @@ ${previews}
 
     const result = await _sc(warRoomPrompt, [], { webSearchMaxUses: 2, timeoutMs: 120000 });
     await botSend(oc, `📋 *מצב חירום — סקירה מצרפית*\n${'━'.repeat(20)}\n\n${result}`);
+    _saveWarRoom({ ts: Date.now(), opener: opener.replace(/\*/g, ''), brief: String(result || '').replace(/\*/g, '') });
+    try {
+      require('./src/jarvis-api').pushAlert({
+        title: '📋 מצב חירום — סקירה מצרפית',
+        summary: 'הסיפור, מצב הקבוצות וטיוטת תגובה',
+        body: String(result || '').replace(/\*/g, ''),
+        kind: 'warroom', urgency: 'high',
+      });
+    } catch (_) {}
   } catch (e) {
     logger.error('triggerWarRoom error:', e.message?.substring(0, 100));
     try {
@@ -6437,6 +6462,25 @@ async function route(chatId, text, chat) {
   {
     const _canon = _canonicalizeCommand(text);
     if (_canon) { logger.info(`🎯 intent => ${_canon}`); text = _canon; }
+  }
+
+  // Emergency commands. In WhatsApp these are caught before route() runs;
+  // from the app they arrive here, and fell through to the model as plain
+  // text. Same answers as the WhatsApp handler, so the two agree.
+  {
+    const _t = String(text || '').trim();
+    if (/^(סיים|סיום|בטל) חירום$/.test(_t)) {
+      const cm = require('./src/crisis-mode');
+      const was = cm.isCrisisActive();
+      cm.endCrisis();
+      return was ? '✅ מצב חירום הסתיים. חוזרים להתראות רגילות.' : 'ℹ️ לא היה מצב חירום פעיל.';
+    }
+    if (/^(סטטוס|מצב) חירום$/.test(_t)) {
+      const c = require('./src/crisis-mode').getActiveCrisis();
+      if (!c) return '🟢 אין מצב חירום פעיל כרגע.';
+      const ageMin = Math.round((Date.now() - c.startedAt) / 60000);
+      return `🚨 *מצב חירום פעיל*\nהחל: לפני ${ageMin} דק'\nסיבה: ${c.triggerCount} התראות (${c.triggerKeywords.join(', ')}) ב-${c.spanMinutes} דק'\nקבוצות: ${c.triggerGroups.join(', ')}\n\nאמור "סיים חירום" כדי לכבות.`;
+    }
   }
 
   // ─── שכבת הרשאות ─────────────────────────────────────────────────

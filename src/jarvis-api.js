@@ -610,6 +610,47 @@ function attach(app, deps = {}) {
     }
   });
 
+  // ── חדר מלחמה — מצב החירום, מה מפעיל אותו, והסקירה האחרונה ──────
+  app.get('/api/jarvis/warroom', guard, (req, res) => {
+    try {
+      const cm = require('./crisis-mode');
+      const active = cm.getActiveCrisis();
+      let recent = [];
+      try {
+        const cutoff = Date.now() - (cm.WINDOW_MINUTES || 30) * 60000;
+        recent = JSON.parse(fs.readFileSync(path.join(DATA, 'crisis-recent-alerts.json'), 'utf8'))
+          .filter(a => a && a.ts >= cutoff)
+          .map(a => ({ ts: a.ts, keyword: a.keyword, group: a.group, preview: String(a.preview || '').substring(0, 220) }));
+      } catch (_) {}
+      let last = null;
+      try { last = JSON.parse(fs.readFileSync(path.join(DATA, 'warroom-last.json'), 'utf8')); } catch (_) {}
+      res.json({
+        ok: true,
+        active: active ? {
+          since: active.startedAt, count: active.triggerCount,
+          keywords: active.triggerKeywords || [], groups: active.triggerGroups || [],
+          spanMinutes: active.spanMinutes,
+        } : null,
+        trigger: { count: cm.TRIGGER_COUNT, windowMinutes: cm.WINDOW_MINUTES },
+        keywords: cm.loadCriticalKeywords(),
+        recent,
+        last,
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+  app.post('/api/jarvis/warroom/end', guard, (req, res) => {
+    try {
+      const cm = require('./crisis-mode');
+      const was = cm.isCrisisActive();
+      cm.endCrisis();
+      res.json({ ok: true, text: was ? 'מצב החירום הסתיים. חוזרים להתראות רגילות.' : 'לא היה מצב חירום פעיל.' });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
   // ── "מה חדש" — לכרטיס בדף הבית של האפליקציה ─────────────────────
   app.get('/api/jarvis/changelog', guard, (req, res) => {
     try {
@@ -965,6 +1006,15 @@ function attach(app, deps = {}) {
     if (!text) return res.status(400).json({ error: 'no text' });
     if (!deps.chat) return res.status(503).json({ error: 'chat not wired' });
     try {
+      // One conversation. The app had its own path: its own memory, kept in
+      // RAM and lost on every restart, straight to the model — so "מוקד"
+      // typed in the app and in WhatsApp could get two different answers,
+      // and a question asked here was unknown there. Now it goes through the
+      // same router as a WhatsApp message, with the same saved history.
+      if (deps.runCommand) {
+        const reply = await deps.runCommand(text);
+        return res.json({ ok: true, text: reply });
+      }
       const history = _chats.get(device) || [];
       const reply = await deps.chat(text, history);
       history.push({ role: 'user', content: text });

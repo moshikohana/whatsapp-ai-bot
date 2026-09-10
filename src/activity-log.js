@@ -21,7 +21,7 @@ const LOGS_DIR = path.join(__dirname, '..', 'logs');
 const KEEP_DAYS = 30;
 
 // Endpoints that are background plumbing, not something he did.
-const NOISE = /\/(pull|hello|faces\/tracked|faces\/checks|faces\/photos|faces\/references|decisions$|scan\/last|groups\/live|scan\/presets|broadcast$|reports|memory|actions|wa-thread|activity|changelog|check\/full)/;
+const NOISE = /\/(pull|hello|faces\/tracked|faces\/checks|faces\/photos|faces\/references|decisions$|scan\/last|groups\/live|scan\/presets|broadcast$|reports|memory|actions|wa-thread|activity|changelog|check\/full|warroom$)/;
 
 /** שם קריא לפעולה באפליקציה, לפי הנתיב והגוף. */
 function describe(method, route, body) {
@@ -41,6 +41,7 @@ function describe(method, route, body) {
     [/\/face\/photo\/delete$/, () => `מחיקת תמונה: ${b.name || ''}`],
     [/\/face\/person\/delete$/, () => `מחיקת אדם: ${b.name || ''}`],
     [/\/decisions\/answer$/, () => `הכרעה על ספק: ${b.value || ''}`],
+    [/\/warroom\/end$/, () => 'סיום מצב חירום'],
     [/\/keywords/, () => method === 'GET' ? null : 'עדכון מילות מפתח'],
   ];
   for (const [re, fn] of map) if (re.test(route)) return fn();
