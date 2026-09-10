@@ -278,6 +278,11 @@ function attach(app, deps = {}) {
       const src = req.query && req.query.src ? ` [${String(req.query.src).substring(0, 12)}]` : '';
       logger.info(`📱 JARVIS ${req.method} ${req.path}${src} → ${res.statusCode} ` +
         `(${Date.now() - started}ms${ok ? '' : ', BAD KEY'})`);
+      // What he did in the app, for the activity tab. Background polling is
+      // filtered out inside, so this only keeps actions he actually took.
+      if (ok) {
+        try { require('./activity-log').recordApp(req.method, req.path, req.body, res.statusCode); } catch (_) {}
+      }
     });
     next();
   });
@@ -595,6 +600,26 @@ function attach(app, deps = {}) {
     }
   });
 
+  // ── יומן פעילות — אפליקציה + וואטסאפ, לציר זמן אחד ─────────────
+  app.get('/api/jarvis/activity', guard, (req, res) => {
+    try {
+      const days = Math.min(Math.max(parseInt(req.query.days, 10) || 3, 1), 14);
+      res.json({ ok: true, ...require('./activity-log').timeline(days, 250) });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // ── השיחה בוואטסאפ, לטאב השיחה באפליקציה ────────────────────────
+  app.get('/api/jarvis/wa-thread', guard, (req, res) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 80);
+      res.json({ ok: true, messages: require('./activity-log').waThread(limit, 2) });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
   // ── דיווחי שגיאה מהאפליקציה ──────────────────────────────────
   // הטלפון מדווח בעצמו במקום שהוא יתאר לי מה קרה מהזיכרון.
   app.post('/api/jarvis/report', guard, async (req, res) => {
@@ -633,9 +658,14 @@ function attach(app, deps = {}) {
         terms: (c.terms || []),
         activeFrom: c.activeFrom, activeTo: c.activeTo,
         digests: bd.recentDigests(limit),
-        // The live tail, so the tab shows the monitor is working even when
-        // the last hour produced nothing worth summarising.
-        live: bd.recentChunks(20),
+        // The live tail, minus adverts. Most of what "נקלט עכשיו" showed was
+        // promotions — phone numbers and sales — which is noise to him.
+        live: (() => {
+          const hl = require('./broadcast-headlines');
+          return bd.recentChunks(40).filter(c => !hl.isAd(c.text)).slice(0, 20);
+        })(),
+        // The headlines, which are what the monitor is actually for.
+        headlines: require('./broadcast-headlines').recent(20),
       });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
@@ -656,6 +686,27 @@ function attach(app, deps = {}) {
       const bm = require('./broadcast-monitor');
       const terms = action === 'remove' ? bm.removeTerm(t) : bm.addTerm(t);
       res.json({ ok: true, terms });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  /**
+   * התמלול סביב רגע — "פתח הקשר" על כותרת או ציטוט.
+   *
+   * התמלול נשמר ממילא; עד עכשיו לא הייתה דרך להגיע אליו מתוך ידיעה. כותרת היא
+   * שורה אחת, ולפעמים צריך את חצי הדקה שלפניה כדי להבין אם זו התקפה, ציטוט
+   * של מישהו אחר או תשובה לשאלה.
+   */
+  app.get('/api/jarvis/broadcast/context', guard, (req, res) => {
+    const ts = parseInt(req.query.ts, 10);
+    if (!ts) return res.status(400).json({ error: 'צריך זמן' });
+    try {
+      const hl = require('./broadcast-headlines');
+      const station = req.query.station ? String(req.query.station) : null;
+      const minutes = Math.min(Math.max(parseInt(req.query.minutes, 10) || 12, 4), 40);
+      const chunks = hl.contextAround(ts, station, minutes);
+      res.json({ ok: true, chunks });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }

@@ -110,6 +110,8 @@ function _sentenceAround(text, term) {
 async function checkOnce() {
   const c = loadConfig();
   const hits = [];
+  const headlines = [];
+  hits.headlines = headlines;
   const terms = (c.terms || []).filter(Boolean);
   if (!terms.length) return hits;
 
@@ -128,6 +130,14 @@ async function checkOnce() {
     // sentence around a keyword — the rest was transcribed, paid for, and
     // dropped. The hourly digest reads from the file, not from this array.
     try { require('./broadcast-digest').recordChunk({ station: st.name, text }); } catch (_) {}
+
+    // Checked for a headline right away, not at the next hourly digest. The
+    // Ohana interview was in the transcript at 08:15 and only reached him as
+    // half a sentence in the 09:00 summary — after WhatsApp had it.
+    try {
+      const h = await require('./broadcast-headlines').onChunk({ station: st.name, text });
+      if (h) headlines.push(h);
+    } catch (_) {}
 
     for (const term of terms) {
       if (!text.includes(term)) continue;

@@ -488,6 +488,30 @@ async function getAllChatsAndChannels(opts = {}) {
 // Prevents "קניות" from matching "קניות חכמות ברשת" when an exact match exists.
 // Both sides are normalized via normalizeHe() so Hebrew-quote variants
 // (״ vs ") and whitespace differences don't break matching.
+/**
+ * הקטע שבו מילת המפתח הופיעה — לא תחילת ההודעה.
+ *
+ * ההתראה לקחה את 150 התווים הראשונים. בהודעה ארוכה שבה "קלנר" מופיע אחרי 400
+ * תווים, ההתראה הציגה פסקה שלא מכילה את המילה בכלל, ולא היה אפשר להבין למה
+ * היא נשלחה בלי לחפש את ההודעה ידנית.
+ *
+ * החלון ממורכז על המילה ומתרחב לגבולות מילים, כדי לא לחתוך באמצע מילה.
+ */
+function snippetAround(body, keyword, radius = 110) {
+  const text = String(body || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (text.length <= radius * 2) return text;
+  const i = keyword ? text.indexOf(keyword) : -1;
+  if (i < 0) return text.substring(0, radius * 2).trim() + '…';
+
+  let start = Math.max(0, i - radius);
+  let end = Math.min(text.length, i + keyword.length + radius);
+  // Widen to the nearest space so the snippet never opens or closes mid-word.
+  if (start > 0) { const s = text.lastIndexOf(' ', start); if (s > 0) start = s + 1; }
+  if (end < text.length) { const e = text.indexOf(' ', end); if (e > 0) end = e; }
+  return (start > 0 ? '…' : '') + text.substring(start, end).trim() + (end < text.length ? '…' : '');
+}
+
 function findChatByName(chats, query) {
   const q = normalizeHe(query);
   if (!q) return undefined;
@@ -3882,12 +3906,12 @@ client.on('message_create', async (msg) => {
         try {
           const _grpCht = await msg.getChat();
           const _ownerC = await client.getChatById(OWNER_ID);
-          const _preview = stripUrls(msg.body.substring(0, 150));
+          const _preview = snippetAround(stripUrls(msg.body), _matchOwner);
           await botSend(_ownerC,
             `🚨 *התראה — מילת מפתח: "${_matchOwner}"*\n` +
             `📍 *${_grpCht.name || msg.to}*\n` +
             `👤 אתה\n` +
-            `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
+            `💬 "${_preview}"`
           );
           require('./src/keyword-alerts').logAlert(_matchOwner, _grpCht.name || msg.to, 'אתה', _preview);
         } catch (_oe) { /* silent */ }
@@ -5566,7 +5590,7 @@ client.on('message', async (msg) => {
           const _alertChat = await msg.getChat();
           const _groupNameForAlert = _alertChat.name || _kFromJid;
           const _sender = msg._data?.notifyName || 'מישהו';
-          const _preview = stripUrls(msg.body.substring(0, 150));
+          const _preview = snippetAround(stripUrls(msg.body), _matchedKw);
           // Crisis mode check — if this critical alert pushes us over the
           // war-room threshold, suppress this individual alert and trigger
           // the consolidated war-room flow instead.
@@ -5588,7 +5612,7 @@ client.on('message', async (msg) => {
                 `🚨 *התראה — מילת מפתח: "${_matchedKw}"*\n` +
                 `📍 *${_groupNameForAlert}*\n` +
                 `👤 ${_sender}\n` +
-                `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`
+                `💬 "${_preview}"`
               );
               // Same alert to the phone. His WhatsApp self-chat is silent, so
               // everything sent there has effectively been invisible. Nothing
@@ -5598,7 +5622,7 @@ client.on('message', async (msg) => {
                 const _ctx = await _j.fetchContext(_alertChat, msg.id?._serialized || '', 3);
                 _j.mirrorAlert({
                   title: `🚨 מילת מפתח: "${_matchedKw}"`,
-                  body: `💬 "${_preview}${_preview.length >= 150 ? '...' : ''}"`,
+                  body: `💬 "${_preview}"`,
                   kind: 'keyword', urgency: 'high',
                   group: _groupNameForAlert, sender: _sender,
                   // The message's own timestamp, not now — by the time this
@@ -7707,6 +7731,33 @@ setInterval(async () => {
       } catch {}
     }
     if (hits.length) logger.info(`📻 broadcast: ${hits.length} mention(s) alerted`);
+
+    // Headlines — the reason the monitor exists. Sent immediately, with the
+    // speaker and the verified quote, so it reaches him while it is still news
+    // rather than an hour later inside a summary.
+    for (const h of (hits.headlines || [])) {
+      const time = new Date(h.ts).toLocaleTimeString('he-IL', {
+        timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit',
+      });
+      const who = [h.speaker, h.role].filter(Boolean).join(', ');
+      const wa = `🗞️ *כותרת מהשידור* · ${h.station} · ${time}\n\n` +
+        `*${h.headline}*` +
+        (who ? `\n🎙️ ${who}` : '') +
+        (h.quote ? `\n\n"${h.quote}"` : '') +
+        `\n\n_נקלט באוויר — לפני שפורסם._`;
+      try { await botSend(await client.getChatById(OWNER_ID), wa); } catch {}
+      try {
+        require('./src/jarvis-api').pushAlert({
+          title: `🗞️ ${h.headline}`,
+          summary: `${h.station} · ${time}${who ? ' · ' + who : ''}`,
+          body: [who && `🎙️ ${who}`, h.quote && `"${h.quote}"`, `📻 ${h.station} · ${time}`]
+            .filter(Boolean).join('\n\n'),
+          kind: 'broadcast-headline',
+          urgency: h.score >= 5 ? 'high' : 'normal',
+        });
+      } catch {}
+    }
+    if ((hits.headlines || []).length) logger.info(`🗞️ broadcast: ${hits.headlines.length} headline(s) sent`);
   } catch (e) { logger.warn('broadcast loop: ' + (e.message || '').substring(0, 70)); }
   finally { _bcBusy = false; }
 }, 60 * 1000);
