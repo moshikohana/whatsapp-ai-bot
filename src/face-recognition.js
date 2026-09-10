@@ -821,19 +821,28 @@ async function numberFaces(imageBuffer, preDetected = null) {
     if (w <= 4 || h <= 4) continue;
 
     const color = isMatch ? '#00e676' : '#2979ff';
+    // Sized to the face and set above it, not on it. A fixed badge of 5.5% of
+    // the photo's width was ~88px on a class photo where a face is 40 —
+    // the number covered the very face it labelled, in the one view whose
+    // purpose is to look at that face and say who it is.
+    const b = Math.max(22, Math.min(badge, Math.round(w * 0.6)));
+    const bw = Math.max(2, Math.min(borderWidth, Math.round(w * 0.05)));
     try {
       const boxSvg = Buffer.from(
         `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">` +
-        `<rect x="${borderWidth / 2}" y="${borderWidth / 2}" width="${w - borderWidth}" height="${h - borderWidth}" ` +
-        `fill="none" stroke="${color}" stroke-width="${borderWidth}" rx="10"/></svg>`);
+        `<rect x="${bw / 2}" y="${bw / 2}" width="${w - bw}" height="${h - bw}" ` +
+        `fill="none" stroke="${color}" stroke-width="${bw}" rx="${Math.min(10, Math.round(w / 8))}"/></svg>`);
       composites.push({ input: await sharp(boxSvg).png().toBuffer(), left: x, top: y });
 
       const badgeSvg = Buffer.from(
-        `<svg width="${badge}" height="${badge}" xmlns="http://www.w3.org/2000/svg">` +
-        `<circle cx="${badge / 2}" cy="${badge / 2}" r="${badge / 2 - 2}" fill="${color}" stroke="#ffffff" stroke-width="3"/>` +
+        `<svg width="${b}" height="${b}" xmlns="http://www.w3.org/2000/svg">` +
+        `<circle cx="${b / 2}" cy="${b / 2}" r="${b / 2 - 2}" fill="${color}" stroke="#ffffff" stroke-width="${Math.max(2, Math.round(b / 14))}"/>` +
         `<text x="50%" y="50%" dy="0.36em" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" ` +
-        `font-size="${Math.round(badge * 0.6)}" font-weight="bold" fill="#000000">${i + 1}</text></svg>`);
-      composites.push({ input: await sharp(badgeSvg).png().toBuffer(), left: x, top: Math.max(0, y - Math.round(badge * 0.15)) });
+        `font-size="${Math.round(b * 0.6)}" font-weight="bold" fill="#000000">${i + 1}</text></svg>`);
+      const bx = Math.min(origMeta.width - b, Math.max(0, Math.round(x + w / 2 - b / 2)));
+      // Above the box when there is room; below it for a face at the top edge.
+      const by = y - b - 2 >= 0 ? y - b - 2 : Math.min(origMeta.height - b, y + h + 2);
+      composites.push({ input: await sharp(badgeSvg).png().toBuffer(), left: bx, top: by });
     } catch {}
   }
 
