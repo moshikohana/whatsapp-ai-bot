@@ -18,6 +18,11 @@
     --radius:20px; --radius-sm:12px;
   }
   *{margin:0;padding:0;box-sizing:border-box}
+  /* A class that sets `display` outranks the UA rule behind the `hidden`
+     attribute, so `el.hidden = true` silently does nothing. That is exactly
+     what pinned the "code expired" cover permanently over a perfectly good
+     QR — no socket state involved, it was never conditional at all. */
+  [hidden]{display:none!important}
   html{scroll-behavior:smooth}
   body{font-family:'Heebo',-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
 
@@ -124,6 +129,22 @@
   .tipbox b{color:var(--amber)}
   .tipbox p{color:var(--text2);font-size:.88rem;line-height:1.6;margin-top:5px}
 
+  /* ── LIVE FEED ───────────────────────────── */
+  .live-badge{margin-right:auto;display:inline-flex;align-items:center;gap:6px;font-size:.68rem;font-weight:800;
+    padding:5px 11px;border-radius:999px;background:rgba(224,82,82,.1);color:var(--red);border:1px solid rgba(224,82,82,.2)}
+  .counters{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:14px}
+  .counter{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:11px;text-align:center}
+  .counter .n{font-size:1.5rem;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1;color:var(--orange)}
+  .counter .l{font-size:.68rem;color:var(--muted);font-weight:600;margin-top:2px}
+  .feed{display:flex;flex-direction:column;gap:9px;max-height:340px;overflow-y:auto;padding-left:2px}
+  .msg{border-radius:12px;padding:9px 13px;max-width:88%;animation:msgIn .3s ease}
+  @keyframes msgIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+  .msg.in{align-self:flex-end;background:var(--orange);color:#180d04}
+  .msg.out{align-self:flex-start;background:var(--bg4);border:1px solid var(--border);color:var(--text2)}
+  .msg .m{font-size:.66rem;font-weight:700;opacity:.72;margin-bottom:3px}
+  .msg .b{font-size:.88rem;line-height:1.5;overflow-wrap:anywhere;white-space:pre-wrap}
+  .feed-empty{color:var(--muted2);font-size:.84rem;text-align:center;padding:20px 6px;line-height:1.6}
+
   footer{max-width:880px;margin:0 auto;padding:0 16px 60px;color:var(--muted2);font-size:.79rem;line-height:1.65;
     display:flex;flex-direction:column;gap:7px;border-top:1px solid var(--border);padding-top:20px;margin-top:8px}
   footer b{color:var(--muted)}
@@ -175,6 +196,22 @@
         <p class="qr-msg" id="qr-msg">רגע, מכינים את הקוד…</p>
         <p class="qr-hint" id="qr-hint">הקוד מתחדש מעצמו כל כמה שניות — אין צורך לרענן.</p>
       </div>
+    </div>
+  </div>
+
+  <!-- LIVE FEED — hidden until there is something to show -->
+  <div class="card" id="feed-card" hidden>
+    <div class="card-head">
+      <div class="icon">💬</div>
+      <div><h3>שיחה חיה</h3><div class="sub">מה שנשלח ומה שעניתי, בזמן אמת</div></div>
+      <div class="live-badge"><span class="status-dot"></span>חי</div>
+    </div>
+    <div class="card-body">
+      <div class="counters">
+        <div class="counter"><div class="n" id="c-in">0</div><div class="l">התקבלו</div></div>
+        <div class="counter"><div class="n" id="c-out">0</div><div class="l">נשלחו</div></div>
+      </div>
+      <div class="feed" id="feed"></div>
     </div>
   </div>
 
@@ -284,13 +321,26 @@
   function setPill(cls,txt){ pill.className='status-pill '+cls; pillText.textContent=txt; }
   function showCover(on){ cover.hidden=!on; }
 
+  var lastQrAt=0;
   socket.on('qr',function(data){
     if(connected) return;
+    lastQrAt=Date.now();
     img.src=data; img.style.display='block'; spin.style.display='none'; showCover(false);
     setPill('qr','ממתין לסריקה');
     msg.textContent='סרקי את הקוד לפי שלושת השלבים שמתחת.';
     hint.textContent='הקוד מתחדש מעצמו כל כמה שניות — אין צורך לרענן.';
   });
+
+  // Staleness is judged by the age of the code itself, not by the socket.
+  // The first version covered the QR whenever the socket dropped, and the
+  // connection here runs over long-polling that blips constantly — so the
+  // cover flapped over a perfectly good code and made it unscannable.
+  // WhatsApp rotates the code roughly every 20 seconds, so nothing new for a
+  // minute is the honest signal that what is on screen is dead.
+  setInterval(function(){
+    if(connected || !lastQrAt) return;
+    showCover(Date.now() - lastQrAt > 60000);
+  }, 4000);
 
   socket.on('status',function(st){
     if(st==='connected'){
@@ -313,18 +363,49 @@
     }
   });
 
-  // A phone that backgrounds the tab freezes this socket, and the code frozen
-  // on screen stops being valid without looking any different. Cover it.
-  socket.on('disconnect',function(){
-    if(connected) return;
-    setPill('disconnected','אין חיבור לשרת');
-    showCover(true);
-  });
-  socket.on('connect',function(){ if(!connected) showCover(false); });
-  document.addEventListener('visibilitychange',function(){
-    if(!document.hidden && !connected && !socket.connected) showCover(true);
-  });
+  // The pill reflects the connection, but a blip must never hide the code.
+  socket.on('disconnect',function(){ if(!connected) setPill('disconnected','מתחבר מחדש…'); });
+  socket.on('connect',function(){ if(!connected) setPill('qr','ממתין לסריקה'); });
   document.getElementById('reload').onclick=function(){ location.reload(); };
+
+  // ── Live conversation ──────────────────────────────────────────
+  // The same 'messages' / 'newMessage' stream the main dashboard uses. The
+  // card stays hidden until something arrives, so an empty panel never sits
+  // above the instructions while she is still trying to connect.
+  var feedCard=document.getElementById('feed-card'), feed=document.getElementById('feed');
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+  function bubble(m,prepend){
+    var el=document.createElement('div');
+    el.className='msg '+(m.direction==='in'?'in':'out');
+    var who=m.direction==='in' ? (m.from||'את') : 'בוטי';
+    el.innerHTML='<div class="m">'+(m.direction==='in'?'👤':'🤖')+' '+esc(who)+' · '+esc(m.time||'')+'</div>'+
+                 '<div class="b">'+esc(m.text||'')+'</div>';
+    if(prepend) feed.insertBefore(el,feed.firstChild); else feed.appendChild(el);
+    if(prepend) feed.scrollTop=0;
+  }
+  function showFeed(){ feedCard.hidden=false; }
+
+  socket.on('messages',function(list){
+    feed.innerHTML='';
+    if(!list || !list.length){
+      // Only shown once the card is already visible, i.e. after activity.
+      feed.innerHTML='<div class="feed-empty">💬 עדיין אין הודעות.<br>שלחי לעצמך <b>היי</b> בוואטסאפ.</div>';
+      return;
+    }
+    showFeed();
+    list.slice(0,40).forEach(function(m){ bubble(m,false); });
+  });
+
+  socket.on('newMessage',function(d){
+    showFeed();
+    var empty=feed.querySelector('.feed-empty'); if(empty) empty.remove();
+    bubble(d,true);
+    if(d.stats){
+      document.getElementById('c-in').textContent=d.stats.received||0;
+      document.getElementById('c-out').textContent=d.stats.sent||0;
+    }
+  });
 })();
 </script>
 </body>

@@ -15,6 +15,11 @@ const logger = require('./logger');
 
 const ROOT = path.join(__dirname, '..', 'data', 'face-photos');
 const INDEX = path.join(ROOT, 'index.json');
+// Reference faces live apart from detections: they are what the recogniser is
+// built on, not something it produced, and they must not be trimmed by the
+// per-person cap that keeps the detection archive small.
+const REF_ROOT = path.join(__dirname, '..', 'data', 'face-refs');
+const REF_INDEX = path.join(REF_ROOT, 'index.json');
 const MAX_PER_PERSON = 40;          // enough to scroll, small enough to stay cheap
 const MAX_BYTES = 900 * 1024;       // skip anything unreasonably large
 
@@ -30,6 +35,17 @@ function _save() {
     fs.mkdirSync(ROOT, { recursive: true });
     fs.writeFileSync(INDEX, JSON.stringify(_index, null, 2));
   } catch (e) { logger.warn('face-archive save: ' + (e.message || '').substring(0, 60)); }
+}
+// Read fresh each time rather than cached: references change rarely, and a
+// stale cache here would show the wrong count right after adding one.
+function _loadRef() {
+  try { return JSON.parse(fs.readFileSync(REF_INDEX, 'utf8')); } catch { return {}; }
+}
+function _saveRef(idx) {
+  try {
+    fs.mkdirSync(REF_ROOT, { recursive: true });
+    fs.writeFileSync(REF_INDEX, JSON.stringify(idx, null, 2));
+  } catch (e) { logger.warn('face-refs save: ' + (e.message || '').substring(0, 60)); }
 }
 const _safe = s => String(s || 'unknown').replace(/[^\p{L}\p{N}_-]/gu, '_').substring(0, 40);
 
@@ -110,9 +126,270 @@ function photos(name, limit = 20, withData = true) {
   });
 }
 
+/**
+ * מוחק תמונת זיהוי בודדת מהארכיון.
+ *
+ * זיהוי הוא רשומה של מה שקרה, לא חלק ממה שהמזהה בנוי עליו — ולכן מחיקה כאן
+ * לא נוגעת בווקטורים ולא משנה את איכות הזיהוי. היא רק מנקה את הגלריה.
+ */
+function removePhoto(name, ts) {
+  try {
+    const idx = _load();
+    const key = _safe(name);
+    const entry = idx[key];
+    if (!entry || !entry.photos) return { success: false, error: 'לא נמצא' };
+    const target = entry.photos.find(p => String(p.ts) === String(ts));
+    if (!target) return { success: false, error: 'התמונה כבר לא קיימת' };
+    try { fs.unlinkSync(path.join(ROOT, key, target.file)); } catch {}
+    entry.photos = entry.photos.filter(p => p !== target);
+    _save();
+    return { success: true, remaining: entry.photos.length };
+  } catch (e) {
+    logger.warn('face-archive removePhoto: ' + (e.message || '').substring(0, 60));
+    return { success: false, error: (e.message || '').substring(0, 60) };
+  }
+}
+
+/** מוחק אדם מהארכיון — התמונות בלבד. הווקטורים נמחקים בנפרד. */
+function removePerson(name) {
+  try {
+    const idx = _load();
+    const key = _safe(name);
+    let removed = 0;
+    if (idx[key]) {
+      removed = (idx[key].photos || []).length;
+      for (const p of idx[key].photos || []) {
+        try { fs.unlinkSync(path.join(ROOT, key, p.file)); } catch {}
+      }
+      delete idx[key];
+      _save();
+    }
+    // References live in their own tree and index.
+    const ridx = _loadRef();
+    if (ridx[key]) {
+      for (const p of ridx[key].photos || []) {
+        try { fs.unlinkSync(path.join(REF_ROOT, key, p.file)); } catch {}
+      }
+      delete ridx[key];
+      _saveRef(ridx);
+    }
+    try { fs.rmdirSync(path.join(ROOT, key)); } catch {}
+    try { fs.rmdirSync(path.join(REF_ROOT, key)); } catch {}
+    return { success: true, removed };
+  } catch (e) {
+    logger.warn('face-archive removePerson: ' + (e.message || '').substring(0, 60));
+    return { success: false, error: (e.message || '').substring(0, 60) };
+  }
+}
+
+// ── יומן בדיקות ─────────────────────────────────────────────────
+/**
+ * כל תמונה שהבוט בדק — גם כשלא זוהה אף אחד.
+ *
+ * עד עכשיו נשמרו רק תמונות שבהן היה זיהוי. תמונה שנבדקה ולא נמצא בה אף אחד
+ * פשוט נעלמה, ולכן על השאלה "שלחו 40 תמונות בגן, הבוט בכלל הסתכל?" לא הייתה
+ * שום דרך לענות — לא היה הבדל נראה לעין בין "בדק ולא מצא" לבין "לא בדק".
+ *
+ * נשמרת תמונה ממוזערת ולא המקור: זה יומן, לא ארכיון. 400 פיקסל מספיקים כדי
+ * לזהות איזו תמונה זו, ועולים כ-25KB במקום 300.
+ */
+const CHECK_ROOT = path.join(__dirname, '..', 'data', 'face-checks');
+const CHECK_INDEX = path.join(CHECK_ROOT, 'index.json');
+const MAX_CHECKS = 80;
+const CHECK_TTL_MS = 48 * 60 * 60 * 1000;
+
+function _loadChecks() {
+  try { return JSON.parse(fs.readFileSync(CHECK_INDEX, 'utf8')); } catch { return []; }
+}
+function _saveChecks(list) {
+  try {
+    fs.mkdirSync(CHECK_ROOT, { recursive: true });
+    fs.writeFileSync(CHECK_INDEX, JSON.stringify(list, null, 2));
+  } catch (e) { logger.warn('face-checks save: ' + (e.message || '').substring(0, 60)); }
+}
+
+/**
+ * @param outcome match | candidate | ambiguous | nomatch | nofaces
+ */
+async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts = Date.now() }) {
+  if (!buffer || !buffer.length) return null;
+  try {
+    const sharp = require('sharp');
+    fs.mkdirSync(CHECK_ROOT, { recursive: true });
+    const thumb = await sharp(buffer).rotate()
+      .resize(400, 400, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 70 }).toBuffer();
+
+    const file = `${ts}-${Math.random().toString(36).slice(2, 6)}.jpg`;
+    fs.writeFileSync(path.join(CHECK_ROOT, file), thumb);
+
+    let list = _loadChecks();
+    list.unshift({
+      ts, file,
+      group: String(group || '').substring(0, 80),
+      outcome, detail: String(detail || '').substring(0, 120),
+      faces,
+    });
+
+    // Trimmed by both age and count, and the files go with the entries — a
+    // log that only grows is the disk problem this bot has had before.
+    const cutoff = Date.now() - CHECK_TTL_MS;
+    const keep = [], drop = [];
+    for (const c of list) ((c.ts >= cutoff && keep.length < MAX_CHECKS) ? keep : drop).push(c);
+    for (const d of drop) { try { fs.unlinkSync(path.join(CHECK_ROOT, d.file)); } catch {} }
+    _saveChecks(keep);
+    return { file };
+  } catch (e) {
+    logger.warn('face-archive recordCheck: ' + (e.message || '').substring(0, 60));
+    return null;
+  }
+}
+
+function checks(limit = 30, withData = true) {
+  return _loadChecks().slice(0, limit).map(c => {
+    const out = { ts: c.ts, group: c.group, outcome: c.outcome, detail: c.detail, faces: c.faces };
+    if (withData) {
+      try { out.image = fs.readFileSync(path.join(CHECK_ROOT, c.file)).toString('base64'); }
+      catch { out.image = null; }
+    }
+    return out;
+  });
+}
+
+/** כמה נבדקו ומה יצא — לשורת סיכום. */
+function checkStats() {
+  const l = _loadChecks();
+  const day = Date.now() - 24 * 3600 * 1000;
+  const today = l.filter(c => c.ts >= day);
+  const by = {};
+  for (const c of today) by[c.outcome] = (by[c.outcome] || 0) + 1;
+  return { total: l.length, last24h: today.length, byOutcome: by };
+}
+
+// ── תמונות ייחוס ────────────────────────────────────────────────
+/**
+ * שומר את פרצוף הייחוס עצמו.
+ *
+ * עד עכשיו נשמר רק הווקטור בן 128 המספרים, והתמונה נזרקה — ולכן על 22
+ * הייחוסים הקיימים אי אפשר היה להסתכל, רק לסמוך עליהם. חיתוך הפרצוף ולא
+ * התמונה המלאה: זה מה שהמזהה באמת משתמש בו, וזה מה שמראה אם נשמר הילד הנכון.
+ */
+async function recordReference({ name, buffer, box, ts = Date.now() }) {
+  if (!name || !buffer || !buffer.length) return null;
+  try {
+    const sharp = require('sharp');
+    const key = _safe(name);
+    const dir = path.join(REF_ROOT, key);
+    fs.mkdirSync(dir, { recursive: true });
+
+    // Materialised before measuring: metadata() on a rotate() pipeline still
+    // reports the pre-rotation dimensions, so an EXIF-rotated phone photo
+    // would be measured with width and height the wrong way round.
+    const rotated = await sharp(buffer).rotate().toBuffer();
+    let img = sharp(rotated);
+
+    if (box && box.width > 0 && box.height > 0) {
+      const meta = await sharp(rotated).metadata();
+      // Detection runs on an image capped at 1280px on the long edge, so the
+      // box is in THAT coordinate space, not the original's. Cropping the
+      // full-size original at those raw numbers put the crop up and to the
+      // left of the face — a 2040px photo was off by a factor of 1.6.
+      const DETECT_MAX_DIM = 1280;
+      const ratio = Math.min(
+        DETECT_MAX_DIM / (meta.width || DETECT_MAX_DIM),
+        DETECT_MAX_DIM / (meta.height || DETECT_MAX_DIM),
+        1
+      );
+      const scale = 1 / ratio;
+      const bx = box.x * scale, by = box.y * scale;
+      const bw = box.width * scale, bh = box.height * scale;
+
+      // 40% padding — a box cropped tight to the detection loses the hairline
+      // and chin, which is exactly what makes a face recognisable to a person.
+      const pad = 0.4;
+      const left = Math.max(0, Math.round(bx - bw * pad));
+      const top = Math.max(0, Math.round(by - bh * pad));
+      const width = Math.min((meta.width || 0) - left, Math.round(bw * (1 + pad * 2)));
+      const height = Math.min((meta.height || 0) - top, Math.round(bh * (1 + pad * 2)));
+      if (width > 20 && height > 20) img = img.extract({ left, top, width, height });
+    }
+    const out = await img.resize(280, 280, { fit: 'cover' }).jpeg({ quality: 82 }).toBuffer();
+
+    const file = `${ts}.jpg`;
+    fs.writeFileSync(path.join(dir, file), out);
+
+    const idx = _loadRef();
+    if (!idx[key]) idx[key] = { name, photos: [] };
+    idx[key].name = name;
+    idx[key].photos.push({ file, ts, kb: Math.round(out.length / 1024) });
+    idx[key].photos.sort((a, b) => b.ts - a.ts);
+    _saveRef(idx);
+    return { key, file };
+  } catch (e) {
+    // Never block adding a reference because its picture could not be saved —
+    // the descriptor is the part that matters for recognition.
+    logger.warn('face-archive recordReference: ' + (e.message || '').substring(0, 70));
+    return null;
+  }
+}
+
+/** תמונות הייחוס השמורות של אדם. */
+function references(name, withData = true) {
+  const idx = _loadRef();
+  const key = _safe(name);
+  const entry = idx[key];
+  if (!entry) return [];
+  return (entry.photos || []).map(p => {
+    const out = { ts: p.ts, kb: p.kb };
+    if (withData) {
+      try { out.image = fs.readFileSync(path.join(REF_ROOT, key, p.file)).toString('base64'); }
+      catch { out.image = null; }
+    }
+    return out;
+  });
+}
+
+/**
+ * מוחק תמונת ייחוס לפי סדר ההוספה.
+ *
+ * הווקטורים נשמרים בסדר שבו נוספו, ולכן האינדקס כאן חייב להימדד באותו סדר —
+ * הרשימה מוצגת מהחדש לישן, ומחיקה לפי סדר התצוגה הייתה מוחקת את התמונה
+ * ההפוכה בדיוק.
+ */
+function removeReferenceAt(name, index) {
+  try {
+    const idx = _loadRef();
+    const key = _safe(name);
+    const entry = idx[key];
+    if (!entry || !entry.photos || !entry.photos.length) return false;
+    const byAge = [...entry.photos].sort((a, b) => a.ts - b.ts);
+    const target = byAge[index];
+    if (!target) return false;
+    try { fs.unlinkSync(path.join(REF_ROOT, key, target.file)); } catch {}
+    entry.photos = entry.photos.filter(p => p.file !== target.file);
+    _saveRef(idx);
+    return true;
+  } catch (e) {
+    logger.warn('face-refs remove: ' + (e.message || '').substring(0, 60));
+    return false;
+  }
+}
+
+/** כמה תמונות ייחוס שמורות לכל אדם. */
+function referenceCount(name) {
+  const idx = _loadRef();
+  const entry = idx[_safe(name)];
+  return entry ? (entry.photos || []).length : 0;
+}
+
 function totalCount() {
   const idx = _load();
   return Object.values(idx).reduce((s, v) => s + (v.photos || []).length, 0);
 }
 
-module.exports = { record, people, photos, totalCount };
+module.exports = {
+  record, people, photos, totalCount,
+  recordReference, references, referenceCount, removeReferenceAt,
+  removePhoto, removePerson,
+  recordCheck, checks, checkStats,
+};

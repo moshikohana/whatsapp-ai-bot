@@ -123,6 +123,12 @@ async function checkOnce() {
     recent.push({ station: st.name, ts: Date.now(), text });
     if (recent.length > 60) recent = recent.slice(-60);
 
+    // Kept on disk as well as in memory. `recent` is 60 chunks that vanish on
+    // every restart, so until now the only transcript that survived was the
+    // sentence around a keyword — the rest was transcribed, paid for, and
+    // dropped. The hourly digest reads from the file, not from this array.
+    try { require('./broadcast-digest').recordChunk({ station: st.name, text }); } catch (_) {}
+
     for (const term of terms) {
       if (!text.includes(term)) continue;
       const quote = _sentenceAround(text, term);

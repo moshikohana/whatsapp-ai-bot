@@ -13,8 +13,20 @@
 # other keeps serving.
 #
 # Runs from cron every 2 minutes.
+#
+# NOTE (2026-09-08): the limit was 1400MB, which sat INSIDE this instance's
+# normal working range. Chromium idles around 1200MB and drifts to 1400-1500
+# under load, so the guard fired about 15 times a day and restarted a healthy
+# bot. Those restarts were then misread as crashes: killing Chromium mid-sync
+# produces TargetCloseError: Target closed in the bot log, which looks like
+# a crash and is actually the guard's own doing.
+#
+# 1900MB is above everything observed (peak seen: 1578MB) while still leaving
+# ~1900MB available. The machine-wide MIN_FREE_MB floor below is the real OOM
+# protection and is unchanged — it fires regardless of which instance is at
+# fault, so raising this ceiling does not remove the safety net.
 
-PER_INSTANCE_MB=1400       # one instance's own Chromium footprint
+PER_INSTANCE_MB=1900       # see NOTE below — 1400 sat inside normal working range
 MIN_FREE_MB=400            # machine-wide floor, whoever is responsible
 LOG=/var/log/bot-memory-guard.log
 

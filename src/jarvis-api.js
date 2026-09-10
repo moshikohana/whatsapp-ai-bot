@@ -272,7 +272,11 @@ function attach(app, deps = {}) {
     if (ok) _lastSeen = Date.now();
     const started = Date.now();
     res.on('finish', () => {
-      logger.info(`📱 JARVIS ${req.method} ${req.path} → ${res.statusCode} ` +
+      // The source tag separates a background poll from the app being opened.
+      // Without it, "the phone is polling" and "he happened to open the app"
+      // looked identical in this log, and the difference is the whole question.
+      const src = req.query && req.query.src ? ` [${String(req.query.src).substring(0, 12)}]` : '';
+      logger.info(`📱 JARVIS ${req.method} ${req.path}${src} → ${res.statusCode} ` +
         `(${Date.now() - started}ms${ok ? '' : ', BAD KEY'})`);
     });
     next();
@@ -389,8 +393,111 @@ function attach(app, deps = {}) {
     try {
       const fr = require('./face-recognition');
       const out = await fr.numberFaces(Buffer.from(String(image), 'base64'));
-      if (!out || !out.buffer) return res.json({ ok: true, faces: 0, image: null });
-      res.json({ ok: true, faces: out.count != null ? out.count : 0, image: out.buffer.toString('base64') });
+      if (!out || !out.buffer) return res.json({ ok: true, faces: 0, image: null, details: [] });
+      res.json({
+        ok: true,
+        // `faces` stays a count: an app already in his pocket reads it that
+        // way, and changing its type would break that build.
+        faces: out.count != null ? out.count : 0,
+        image: out.buffer.toString('base64'),
+        // Per-face labels, so the app can offer the same two corrections
+        // WhatsApp offers — name a face, or delete the reference that
+        // mislabelled it.
+        details: (out.faces || []).map(f => ({
+          n: f.n, matchedName: f.matchedName, nearest: f.nearest,
+          confidence: f.confidence, isMatch: !!f.isMatch,
+        })),
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+
+  /**
+   * מוחק את הייחוס שגרם לזיהוי שגוי — המקבילה של "2 לא זוהה" בוואטסאפ.
+   *
+   * אותה פונקציה בדיוק שמשרתת את וואטסאפ, כדי ששתי הדרכים יתנהגו זהה ולא
+   * ייווצר הבדל שקט בין מה שקורה בטלפון לבין מה שקורה בצ׳אט.
+   */
+  app.post('/api/jarvis/face/unteach', guard, async (req, res) => {
+    const { name, image, faceIndex } = req.body || {};
+    if (!name || !image) return res.status(400).json({ error: 'צריך שם ותמונה' });
+    try {
+      const fr = require('./face-recognition');
+      const r = await fr.removeReferenceNear(
+        String(name).trim(),
+        Buffer.from(String(image), 'base64'),
+        parseInt(faceIndex, 10) || 0
+      );
+      res.json({ ok: !!r.success, result: r, separation: fr.separation() });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+
+  /**
+   * מוחק תמונת זיהוי מהארכיון.
+   *
+   * לא נוגע בווקטורים: זיהוי הוא רשומה של מה שקרה, לא חלק ממה שהמזהה בנוי
+   * עליו. מחיקה כאן מנקה את הגלריה ולא משנה את איכות הזיהוי.
+   */
+  app.post('/api/jarvis/face/photo/delete', guard, (req, res) => {
+    const { name, ts } = req.body || {};
+    if (!name || !ts) return res.status(400).json({ error: 'צריך שם וזמן' });
+    try {
+      const r = require('./face-archive').removePhoto(String(name).trim(), ts);
+      res.json({ ok: !!r.success, result: r });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+
+  /**
+   * מוחק אדם לגמרי — ווקטורים, ייחוסים, וכל התמונות.
+   *
+   * דורש confirm מפורש בגוף הבקשה. זו הפעולה היחידה כאן שאי אפשר לבטל,
+   * ולחיצה אחת שגויה על טלפון מוחקת 17 ייחוסים שנאספו לאורך שבועות.
+   */
+  app.post('/api/jarvis/face/person/delete', guard, (req, res) => {
+    const { name, confirm } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'צריך שם' });
+    if (confirm !== true) return res.status(400).json({ error: 'חסר אישור מפורש' });
+    try {
+      const fr = require('./face-recognition');
+      const before = fr.getReferenceCount(String(name).trim());
+      fr.clearReferences(String(name).trim());
+      const a = require('./face-archive').removePerson(String(name).trim());
+      logger.info(`🗑️ Person deleted from app: "${name}" — ${before} refs, ${a.removed || 0} photos`);
+      res.json({ ok: true, removedRefs: before, removedPhotos: a.removed || 0, separation: fr.separation() });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+
+  /** מוחק תמונת ייחוס ספציפית לפי הזמן שלה — לעריכה ישירה מהטאב. */
+  app.post('/api/jarvis/face/reference/delete', guard, async (req, res) => {
+    const { name, ts } = req.body || {};
+    if (!name || !ts) return res.status(400).json({ error: 'צריך שם וזמן' });
+    try {
+      const fr = require('./face-recognition');
+      const arch = require('./face-archive');
+      const list = arch.references(String(name).trim(), false);
+      // Ordered oldest-first, because that is the order the descriptors were
+      // appended in — the display order is newest-first and would delete the
+      // opposite photo.
+      const byAge = [...list].sort((a, b) => a.ts - b.ts);
+      const idx = byAge.findIndex(p => String(p.ts) === String(ts));
+      if (idx < 0) return res.status(404).json({ error: 'לא נמצאה תמונת ייחוס כזו' });
+
+      const cfg = fr.getStatus();
+      const entry = (cfg.references || []).find(r => r.name === String(name).trim());
+      if (entry && entry.count <= 1) {
+        return res.status(400).json({ error: `ל-${name} יש ייחוס אחד בלבד — מחיקה תבטל את הזיהוי לגמרי.` });
+      }
+      const r = fr.removeReferenceIndex
+        ? fr.removeReferenceIndex(String(name).trim(), idx)
+        : { success: false, error: 'לא נתמך' };
+      res.json({ ok: !!r.success, result: r, separation: fr.separation() });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
     }
@@ -412,12 +519,265 @@ function attach(app, deps = {}) {
       const arch = require('./face-archive');
       const fr = require('./face-recognition');
       const st = fr.getStatus ? fr.getStatus() : {};
+
+      // Merged from both sides on purpose. The archive only knows people it has
+      // detected, so someone with references but no sighting yet was missing
+      // from the tab entirely — which reads as "not tracked" when the truth is
+      // "tracked, never seen". Two different counts, kept apart:
+      //   refs      — descriptors the recogniser matches against
+      //   refPhotos — how many of those we can actually show a picture for
+      const byName = new Map();
+      for (const p of arch.people()) byName.set(p.name, { ...p });
+      for (const r of (st.references || [])) {
+        const cur = byName.get(r.name) || {
+          key: r.name, name: r.name, count: 0, candidates: 0, lastSeen: null, lastGroup: null,
+        };
+        cur.refs = r.count;
+        byName.set(r.name, cur);
+      }
+      const people = [...byName.values()].map(p => ({
+        ...p,
+        refs: p.refs || 0,
+        refPhotos: arch.referenceCount(p.name),
+      })).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+
       res.json({
         ok: true,
-        people: arch.people(),
+        people,
         totalPhotos: arch.totalCount(),
         groups: st.monitoredGroups || [],
         enabled: st.enabled !== false,
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // ── פריסטים של סריקה ─────────────────────────────────────────
+  /**
+   * הרשימה האמיתית של הפריסטים השמורים.
+   *
+   * האפליקציה שלחה עד עכשיו מחרוזת קשיחה — "סרוק את 11 הקבוצות הפוליטיות" —
+   * שלא נגעה באף אחד מתשעת הפריסטים שהוא בנה, ולא כללה טלגרם בכלל. בוואטסאפ
+   * הוא בוחר פריסט ומקבל 54 מקורות; באפליקציה קיבל 11 קבוצות שמישהו קידד
+   * לתוך כפתור. זה הפער שהוא תיאר כ"בוואטסאפ מצוין, בבוט פחות".
+   */
+  app.get('/api/jarvis/scan/presets', guard, (_req, res) => {
+    try {
+      const p = require('./scan-presets');
+      const list = p.list().map(x => ({
+        id: x.id,
+        name: x.name,
+        total: (x.sources || []).length,
+        wa: (x.sources || []).filter(s => s.source === 'wa').length,
+        tg: (x.sources || []).filter(s => s.source === 'tg').length,
+        groups: (x.sources || []).filter(s => s.type === 'group').length,
+        channels: (x.sources || []).filter(s => s.type === 'channel').length,
+        createdAt: x.createdAt || null,
+      })).filter(x => x.total > 0);
+      res.json({ ok: true, presets: list });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  /** מריץ סריקה על פריסט שמור — בדיוק אותו מסלול שהאשף בוואטסאפ מפעיל. */
+  app.post('/api/jarvis/scan/preset', guard, async (req, res) => {
+    const { id, hours } = req.body || {};
+    if (!id) return res.status(400).json({ error: 'צריך מזהה פריסט' });
+    if (!deps.runScanPreset) return res.status(503).json({ error: 'גשר הסריקה לא מחובר' });
+    try {
+      const h = Math.min(Math.max(parseInt(hours, 10) || 24, 1), 168);
+      const out = await deps.runScanPreset(String(id), h);
+      res.json({ ok: true, text: out || 'בוצע.' });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
+    }
+  });
+
+  // ── דיווחי שגיאה מהאפליקציה ──────────────────────────────────
+  // הטלפון מדווח בעצמו במקום שהוא יתאר לי מה קרה מהזיכרון.
+  app.post('/api/jarvis/report', guard, async (req, res) => {
+    try {
+      const rep = require('./app-reports');
+      const item = rep.record(req.body || {});
+      // Relayed immediately when the desktop agent is up; otherwise it waits
+      // in the queue and goes out on the next sweep. Never blocks the phone.
+      rep.relay(item).catch(() => {});
+      res.json({ ok: true, id: item && item.id });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  app.get('/api/jarvis/reports', guard, (_req, res) => {
+    try {
+      const rep = require('./app-reports');
+      res.json({ ok: true, reports: rep.recent(30), stats: rep.stats() });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // ── שידורים: מה נאמר, מתי, ובאיזו תכנית ──────────────────────
+  app.get('/api/jarvis/broadcast', guard, (req, res) => {
+    try {
+      const bd = require('./broadcast-digest');
+      const bm = require('./broadcast-monitor');
+      const limit = Math.min(parseInt(req.query.limit, 10) || 12, 48);
+      const c = bm.loadConfig();
+      res.json({
+        ok: true,
+        enabled: !!c.enabled,
+        stations: (c.stations || []),
+        terms: (c.terms || []),
+        activeFrom: c.activeFrom, activeTo: c.activeTo,
+        digests: bd.recentDigests(limit),
+        // The live tail, so the tab shows the monitor is working even when
+        // the last hour produced nothing worth summarising.
+        live: bd.recentChunks(20),
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  /**
+   * הוספה והסרה של מילות מעקב בשידורים.
+   *
+   * עד עכשיו זה היה אפשרי רק דרך פקודת וואטסאפ ("שידורים מילה X"), כלומר
+   * הרשימה הוצגה באפליקציה אבל לא ניתן היה לגעת בה משם.
+   */
+  app.post('/api/jarvis/broadcast/terms', guard, (req, res) => {
+    const { action, term } = req.body || {};
+    const t = String(term || '').trim();
+    if (!t || t.length < 2) return res.status(400).json({ error: 'מילה קצרה מדי' });
+    try {
+      const bm = require('./broadcast-monitor');
+      const terms = action === 'remove' ? bm.removeTerm(t) : bm.addTerm(t);
+      res.json({ ok: true, terms });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // מריץ ניתוח על טווח שהאפליקציה מבקשת — בלי לחכות לשעה העגולה.
+  app.post('/api/jarvis/broadcast/analyse', guard, async (req, res) => {
+    try {
+      const hours = Math.min(Math.max(parseInt((req.body || {}).hours, 10) || 1, 1), 6);
+      const bd = require('./broadcast-digest');
+      const to = Date.now();
+      const d = await bd.analyseHour({ fromTs: to - hours * 3600 * 1000, toTs: to });
+      res.json({
+        ok: true,
+        digest: d,
+        message: d ? null : 'אין מספיק תמלול בטווח הזה עדיין',
+      });
+    } catch (e) {
+      // The two failures look identical from the phone but mean opposite
+      // things: one is "wait", the other is "something broke". Saying "not
+      // enough transcript" for a model failure hid a real bug for a day.
+      if (e && e.code === 'ANALYSIS_FAILED') {
+        return res.json({ ok: false, digest: null, message: 'הניתוח נכשל — התמלול קיים אבל המודל לא החזיר תשובה תקינה. נסה שוב.' });
+      }
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // ── תור הספקות ───────────────────────────────────────────────
+  // מה שהבוט לא ידע להכריע, כשאלות עם כפתורים.
+  app.get('/api/jarvis/decisions', guard, (_req, res) => {
+    try {
+      const dec = require('./decisions');
+      const fr = require('./face-recognition');
+      res.json({
+        ok: true,
+        decisions: dec.open(),
+        stats: dec.stats(),
+        // The confidence meter: how well each pair can actually be told apart.
+        // Shown next to the questions because answering them is what moves it.
+        separation: fr.separation ? fr.separation() : [],
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  /**
+   * תשובה על ספק — וכאן זה גם באמת משנה משהו.
+   *
+   * ההבדל בין הפיצ׳ר הזה לסקר דעת קהל הוא השורה שמפעילה את התוצאה: תשובה על
+   * פרצוף נכנסת מיד לסט הייחוסים, ולכן ההכרעה הבאה כבר תהיה אחרת.
+   */
+  app.post('/api/jarvis/decisions/answer', guard, async (req, res) => {
+    const { id, value } = req.body || {};
+    if (!id || value === undefined) return res.status(400).json({ error: 'צריך id ו-value' });
+    try {
+      const dec = require('./decisions');
+      const item = dec.open(200, false).find(d => d.id === id);
+      if (!item) return res.status(404).json({ error: 'השאלה כבר נענתה או לא קיימת' });
+
+      let outcome = 'נרשם';
+      if (item.kind === 'face' && value !== '__none__' && value !== '__skip__') {
+        // The image was stored with the question, so the answer can be turned
+        // into a reference without asking him to find the photo again.
+        const p = path.join(DATA, 'decision-images', `${id}.jpg`);
+        if (fs.existsSync(p)) {
+          const buf = fs.readFileSync(p);
+          const fr = require('./face-recognition');
+          // force: he just looked at the photo and named the child. The
+          // cross-person guard exists to catch a mislabel made blind, and
+          // here it would reject exactly the correction that fixes the
+          // overlap it is complaining about.
+          const r = await fr.addReference(value, buf, { force: true });
+          outcome = r && r.success
+            ? `נוסף לייחוס של ${value} — עכשיו ${r.totalReferences} תמונות`
+            : `לא נוסף: ${(r && r.error) || 'שגיאה'}`;
+        } else {
+          outcome = 'התמונה כבר לא זמינה — נרשם בלבד';
+        }
+      }
+
+      const saved = dec.answer(id, value, outcome);
+      const fr2 = require('./face-recognition');
+      res.json({
+        ok: true, outcome, decision: saved,
+        stats: dec.stats(),
+        separation: fr2.separation ? fr2.separation() : [],
+      });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // יומן הבדיקות — כל תמונה שהבוט הסתכל עליה, כולל כשלא מצא כלום.
+  app.get('/api/jarvis/faces/checks', guard, (req, res) => {
+    try {
+      const arch = require('./face-archive');
+      const limit = Math.min(parseInt(req.query.limit, 10) || 20, 40);
+      res.json({ ok: true, checks: arch.checks(limit), stats: arch.checkStats() });
+    } catch (e) {
+      res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
+    }
+  });
+
+  // תמונות הייחוס עצמן — מה שהמזהה בנוי עליו.
+  app.get('/api/jarvis/faces/references', guard, (req, res) => {
+    const name = String(req.query.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'צריך שם' });
+    try {
+      const arch = require('./face-archive');
+      const fr = require('./face-recognition');
+      const st = fr.getStatus ? fr.getStatus() : {};
+      const entry = (st.references || []).find(r => r.name === name);
+      const saved = arch.references(name, true);
+      res.json({
+        ok: true, name,
+        // The gap between the two is the honest part: references added before
+        // images were kept exist as vectors with no picture to show.
+        descriptors: entry ? entry.count : 0,
+        withoutImage: Math.max(0, (entry ? entry.count : 0) - saved.length),
+        references: saved,
       });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });

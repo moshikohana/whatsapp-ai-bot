@@ -214,7 +214,54 @@ async function detectFaces(imageBuffer) {
 // `chooseIndex` (0-based) picks a SPECIFIC detected face instead of guessing
 // the largest — used by the numbered-faces flow, where the owner looks at an
 // annotated image and tells us exactly which face is the person.
+/**
+ * שומר את פרצוף הייחוס כתמונה, לצד הווקטור.
+ *
+ * נקרא בכל מסלול שמוסיף ייחוס — וואטסאפ, האפליקציה, ואישור מועמד. תמיד
+ * best-effort: כישלון בשמירת התמונה לא מבטל ייחוס תקין.
+ */
+async function _keepReferenceImage(name, imageBuffer, chosen) {
+  try {
+    await require('./face-archive').recordReference({
+      name, buffer: imageBuffer, box: chosen?.detection?.box || null,
+    });
+  } catch (_) { /* the descriptor is what matters for recognition */ }
+}
+
+// Answers that are a refusal, not a name. One of these got through and created
+// a "person" called אף אחד holding an exact copy of one of שי's descriptors —
+// so every face near it matched both at identical distance, the gap was 0.000,
+// and the ambiguity guard then refused to name שי at all. A dead entry nobody
+// could see was quietly suppressing real matches.
+const NON_NAMES = [
+  // Refusals
+  'אף אחד', 'אףאחד', 'אין', 'לא יודע', 'לאיודע', 'לא', 'כלום', 'אחר', 'אף אחת', 'אףאחת',
+  'none', 'nobody', 'no', 'unknown', 'skip', 'dunno',
+  // Commands. "1 למחוק" created a person called למחוק — the same failure as
+  // אף אחד, one day later, because the first version of this list held only
+  // nouns of refusal. An instruction is never a name.
+  'מחק', 'למחוק', 'תמחק', 'מחיקה', 'הסר', 'להסיר', 'תסיר', 'הסרה',
+  'בטל', 'ביטול', 'לבטל', 'טעות', 'שגוי', 'לא נכון', 'לאנכון', 'לא זוהה', 'לאזוהה',
+  'נכון', 'תקן', 'לתקן', 'תיקון', 'סיום', 'עזוב', 'עצור',
+  'delete', 'remove', 'wrong', 'cancel', 'undo', 'fix',
+];
+
+function _isNonName(name) {
+  const n = String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!n) return true;
+  if (n.length > 40) return true;
+  return NON_NAMES.includes(n) || NON_NAMES.includes(n.replace(/\s/g, ''));
+}
+
 async function addReference(name, imageBuffer, { force = false, chooseIndex = null } = {}) {
+  if (_isNonName(name)) {
+    logger.warn(`📸 addReference rejected non-name: "${name}"`);
+    return {
+      success: false,
+      error: `"${name}" הוא לא שם. אם אף אחד בתמונה הוא לא מי שחיפשת, פשוט אל תוסיף ייחוס.`,
+      facesFound: 0,
+    };
+  }
   const detections = await detectFaces(imageBuffer);
 
   // Quality guard: reject images that are too dark or overexposed
@@ -297,6 +344,7 @@ async function addReference(name, imageBuffer, { force = false, chooseIndex = nu
       logger.info(`📸 addReference "${name}": borderline (min dist ${minDist.toFixed(3)}) — added with note`);
       config.referenceDescriptors[name].push(Array.from(chosen.descriptor));
       saveConfig(config);
+      await _keepReferenceImage(name, imageBuffer, chosen);
       return {
         success: true,
         facesAdded: 1,
@@ -339,6 +387,7 @@ async function addReference(name, imageBuffer, { force = false, chooseIndex = nu
   config.referenceDescriptors[name].push(Array.from(chosen.descriptor));
 
   saveConfig(config);
+  await _keepReferenceImage(name, imageBuffer, chosen);
   return {
     success: true,
     facesAdded: 1,
@@ -380,12 +429,22 @@ const FACE_STANDOUT_MARGIN = 0.05; // winner must beat the next face by this
 // Each face is assigned ONLY to its closest person (winner-takes-the-face)
 // so similar-looking people (e.g. sisters) don't both get reported for the
 // same face. Returns deduped matches sorted best-first.
-function _matchDetections(detections, config) {
-  const matches = [];
+/**
+ * ההחלטה על כל פרצוף בנפרד — מי זה, או למה לא נקבע.
+ *
+ * הוצא החוצה כי היו שתי החלטות מקבילות שלא הסכימו: השמות נקבעו כאן, אבל
+ * המסגרות בתמונה נקבעו לפי מרחק בלבד. פרצוף שנפסל כדו־משמעי בין שי למיה
+ * קיבל מסגרת ירוקה ולא קיבל שם, ולכן התמונה הראתה שתי בנות והכיתוב אמר אחת.
+ * עכשיו שתיהן קוראות מאותה פונקציה, ואי־הסכמה כזו לא יכולה לחזור.
+ *
+ * מחזיר מערך מקביל ל-detections:
+ *   { name, distance, confidence }        — זוהה
+ *   { ambiguous: [שם, שם], distance }     — פרצוף אמיתי, לא ניתן לשייך
+ *   null                                  — לא מוכר
+ */
+function _decideFaces(detections, config) {
   const faceCount = detections.length;
 
-  // Distance from every face to every person, so we can ask not just "is this
-  // face close enough?" but "is it closer than all the other faces here?".
   const distOf = (det, descriptors) => {
     let best = Infinity;
     for (const refDesc of descriptors) {
@@ -394,15 +453,15 @@ function _matchDetections(detections, config) {
     }
     return best;
   };
-  const perPersonAll = {}; // name → sorted distances across ALL faces
-  for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
+  const perPersonAll = {};
+  for (const [name, descriptors] of Object.entries(config.referenceDescriptors || {})) {
     if (!descriptors.length) continue;
     perPersonAll[name] = detections.map(d => distOf(d, descriptors)).sort((a, b) => a - b);
   }
 
-  for (const det of detections) {
+  return detections.map(det => {
     const perPerson = [];
-    for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
+    for (const [name, descriptors] of Object.entries(config.referenceDescriptors || {})) {
       if (!descriptors.length) continue;
       perPerson.push({
         name,
@@ -412,44 +471,59 @@ function _matchDetections(detections, config) {
     }
     perPerson.sort((a, b) => a.distance - b.distance);
     const winner = perPerson.find(p => p.distance < p.threshold) || null;
-    if (!winner) continue;
+    if (!winner) return null;
 
     // 1) Which PERSON is it? Refuse to guess between look-alike siblings.
     const runnerUp = perPerson.find(p => p.name !== winner.name);
     if (runnerUp && (runnerUp.distance - winner.distance) < AMBIGUITY_MARGIN) {
       logger.info(`🤝 Ambiguous face: ${winner.name} ${winner.distance.toFixed(3)} vs ${runnerUp.name} ${runnerUp.distance.toFixed(3)} — not naming`);
-      continue;
+      // Returned rather than dropped, so the caller can say a face was found
+      // but could not be attributed — which is the truth, and is actionable.
+      return { ambiguous: [winner.name, runnerUp.name], distance: winner.distance };
     }
 
     // 2) Crowd + stand-out checks — skipped for a strong, unmistakable match.
     if (winner.distance > STRONG_DIST) {
       if (faceCount >= CROWD_FACES && winner.distance > CROWD_MAX_DIST) {
         logger.info(`👥 Crowd photo (${faceCount} faces): ${winner.name} at ${winner.distance.toFixed(3)} too weak — skipping`);
-        continue;
+        return null;
       }
       const all = perPersonAll[winner.name] || [];
       const nextFace = all.find(d => d > winner.distance + 1e-9);
       if (faceCount >= 3 && nextFace !== undefined && (nextFace - winner.distance) < FACE_STANDOUT_MARGIN) {
         logger.info(`👥 ${winner.name} doesn't stand out (${winner.distance.toFixed(3)} vs next face ${nextFace.toFixed(3)}) — skipping`);
-        continue;
+        return null;
       }
     }
 
     const confidence = Math.round(Math.max(0, (1 - winner.distance / winner.threshold) * 100));
-    if (confidence >= MIN_FORWARD_CONFIDENCE) {
-      matches.push({
-        name: winner.name,
-        distance: Math.round(winner.distance * 1000) / 1000,
-        confidence,
-        threshold: winner.threshold,
-      });
-    }
-  }
+    if (confidence < MIN_FORWARD_CONFIDENCE) return null;
+    return {
+      name: winner.name,
+      distance: Math.round(winner.distance * 1000) / 1000,
+      confidence,
+      threshold: winner.threshold,
+    };
+  });
+}
+
+function _matchDetections(detections, config) {
+  const decisions = _decideFaces(detections, config);
+  const matches = decisions.filter(d => d && d.name);
+
+  // Faces the recogniser saw but could not attribute. Carried alongside the
+  // matches so a caption can admit "one more face I could not place" instead
+  // of silently dropping a child from a photo she is in.
+  const ambiguous = decisions.filter(d => d && d.ambiguous)
+    .map(d => ({ between: d.ambiguous, distance: Math.round(d.distance * 1000) / 1000 }));
+
   const deduped = {};
   for (const m of matches) {
     if (!deduped[m.name] || m.confidence > deduped[m.name].confidence) deduped[m.name] = m;
   }
-  return Object.values(deduped).sort((a, b) => b.confidence - a.confidence);
+  const out = Object.values(deduped).sort((a, b) => b.confidence - a.confidence);
+  out.ambiguous = ambiguous;
+  return out;
 }
 
 // Best "near miss" across detected faces: the closest reference even though
@@ -605,30 +679,28 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
   const scaleY = 1 / ratio;
 
   const matchedBoxes = [];
+  const ambiguousBoxes = [];
   const unmatchedBoxes = [];
 
-  for (const det of detections) {
-    let bestDist = Infinity;
-    let matchedName = null;
-    for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
-      for (const refDesc of descriptors) {
-        const dist = faceapi.euclideanDistance(det.descriptor, new Float32Array(refDesc));
-        if (dist < bestDist) { bestDist = dist; matchedName = name; }
-      }
-    }
-    // Use the SAME criterion as findMatches — not just distance < threshold,
-    // but distance inside the MIN_FORWARD_CONFIDENCE band — otherwise a face
-    // that findMatches rejected as too-borderline (e.g. an adult at ~0.42)
-    // still got a green box here. Green only for confident matches.
-    const _effTh = config.perPersonThresholds?.[matchedName] ?? config.threshold;
-    const isMatch = bestDist < _effTh * (1 - MIN_FORWARD_CONFIDENCE / 100);
+  // The exact same decision the caption is built from. Previously this loop
+  // ran its own distance test, which accepted faces the naming logic had
+  // rejected as ambiguous — so a photo of both girls came back with two green
+  // boxes and a caption naming only one of them.
+  const decisions = _decideFaces(detections, config);
+
+  for (let i = 0; i < detections.length; i++) {
+    const det = detections[i];
+    const decision = decisions[i];
+    const isMatch = !!(decision && decision.name);
+    const isAmbiguous = !!(decision && decision.ambiguous);
     const box = det.detection.box;
     const pad = Math.round(box.width * scaleX * 0.35);
     const x = Math.max(0, Math.round(box.x * scaleX - pad));
     const y = Math.max(0, Math.round(box.y * scaleY - pad));
     const w = Math.min(origMeta.width - x, Math.round(box.width * scaleX + pad * 2));
     const h = Math.min(origMeta.height - y, Math.round(box.height * scaleY + pad * 2));
-    if (isMatch) matchedBoxes.push({ x, y, w, h, name: matchedName });
+    if (isMatch) matchedBoxes.push({ x, y, w, h, name: decision.name });
+    else if (isAmbiguous) ambiguousBoxes.push({ x, y, w, h, between: decision.ambiguous });
     else unmatchedBoxes.push({ x, y, w, h });
   }
 
@@ -648,6 +720,22 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
       );
       const border = await sharp(svg).png().toBuffer();
       composites.push({ input: border, left: x, top: y });
+    } catch {}
+  }
+
+  // Amber border for a real face the recogniser could not attribute. Shown
+  // even under matchedOnly: this is a face it is actively unsure about, and
+  // hiding it is what made a child silently disappear from a photo she is in.
+  for (const { x, y, w, h } of ambiguousBoxes) {
+    if (w <= 4 || h <= 4) continue;
+    try {
+      const svg = Buffer.from(
+        `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">` +
+        `<rect x="${borderWidth / 2}" y="${borderWidth / 2}" width="${w - borderWidth}" height="${h - borderWidth}" ` +
+        `fill="none" stroke="#ffab00" stroke-width="${borderWidth}" rx="8" stroke-dasharray="${borderWidth * 3},${borderWidth * 2}"/>` +
+        `</svg>`
+      );
+      composites.push({ input: await sharp(svg).png().toBuffer(), left: x, top: y });
     } catch {}
   }
 
@@ -673,12 +761,20 @@ async function highlightMatchingFaces(imageBuffer, { blurOthers = false, preDete
     } catch {}
   }
 
-  if (composites.length === 0) return { buffer: imageBuffer, highlighted: matchedBoxes.length, blurred: 0, matched: matchedBoxes.length };
+  if (composites.length === 0) {
+    return { buffer: imageBuffer, highlighted: matchedBoxes.length, blurred: 0, matched: matchedBoxes.length, ambiguous: ambiguousBoxes.length };
+  }
 
   const result = await sharp(imageBuffer).composite(composites).jpeg({ quality: 88 }).toBuffer();
   const othersShown = matchedOnly ? 0 : unmatchedBoxes.length;
-  logger.info(`🟢 Highlighted ${matchedBoxes.length} matched${othersShown ? `, ${blurOthers ? 'blurred' : 'marked'} ${othersShown} others` : ' (only matched)'}`);
-  return { buffer: result, highlighted: matchedBoxes.length, blurred: blurOthers ? othersShown : 0, matched: matchedBoxes.length };
+  logger.info(`🟢 Highlighted ${matchedBoxes.length} matched` +
+    (ambiguousBoxes.length ? `, ${ambiguousBoxes.length} ambiguous` : '') +
+    (othersShown ? `, ${blurOthers ? 'blurred' : 'marked'} ${othersShown} others` : ' (only matched)'));
+  return {
+    buffer: result, highlighted: matchedBoxes.length,
+    blurred: blurOthers ? othersShown : 0,
+    matched: matchedBoxes.length, ambiguous: ambiguousBoxes.length,
+  };
 }
 
 // ─── Group management ───────────────────────────────────────────
@@ -774,6 +870,138 @@ function getReferenceCount(name) {
   const config = loadConfig();
   if (name) return config.referenceDescriptors[name]?.length || 0;
   return Object.values(config.referenceDescriptors).reduce((s, a) => s + a.length, 0);
+}
+
+/**
+ * כמה טוב הבוט מבדיל בין שני אנשים — המספר שקובע אם הזיהוי שווה משהו.
+ *
+ * מודד את המרחק הקטן ביותר בין סט הייחוסים של אחד לשל השני. ככל שהוא קטן,
+ * כך הסטים חופפים, וכך יותר פרצופים ייפסלו כדו־משמעיים. בבוקר ה-8.9 שי ומיה
+ * עמדו על 0.010 — הרבה מתחת ל-AMBIGUITY_MARGIN של 0.06 — ולכן מיה נעלמה
+ * מתמונות שהיא בהן. עד עכשיו לא הייתה שום דרך לראות את המספר הזה.
+ */
+function separation() {
+  const config = loadConfig();
+  const names = Object.keys(config.referenceDescriptors || {})
+    .filter(n => (config.referenceDescriptors[n] || []).length);
+  const pairs = [];
+  for (let i = 0; i < names.length; i++) {
+    for (let j = i + 1; j < names.length; j++) {
+      const a = config.referenceDescriptors[names[i]];
+      const b = config.referenceDescriptors[names[j]];
+      let min = Infinity;
+      for (const da of a) {
+        const fa = new Float32Array(da);
+        for (const db of b) {
+          const d = faceapi.euclideanDistance(fa, new Float32Array(db));
+          if (d < min) min = d;
+        }
+      }
+      pairs.push({
+        a: names[i], b: names[j],
+        distance: Math.round(min * 1000) / 1000,
+        // Graded against the margin that actually decides whether a face gets
+        // named, so the label means something operational and not just "low".
+        level: min < AMBIGUITY_MARGIN ? 'weak'
+          : min < AMBIGUITY_MARGIN * 2 ? 'fair'
+          : 'strong',
+        margin: AMBIGUITY_MARGIN,
+      });
+    }
+  }
+  return pairs.sort((x, y) => x.distance - y.distance);
+}
+
+/**
+ * מוחק את הייחוס שגרם לזיהוי השגוי.
+ *
+ * "2 לא זוהה" אומר שפרצוף מספר 2 שויך למישהו שהוא לא. האשם אינו הסט כולו
+ * אלא ייחוס אחד ספציפי — התמונה שנשמרה בטעות תחת השם הזה, ושפרצוף 2 קרוב
+ * אליה יותר מלכל השאר. מחיקה שלה מתקנת את הזיהוי בלי לפגוע ב-15 הייחוסים
+ * התקינים, שזה מה ש-clearReferences היה עושה.
+ *
+ * chooseIndex — אינדקס הפרצוף מתוך המספור (0-based).
+ */
+async function removeReferenceNear(name, imageBuffer, chooseIndex) {
+  const config = loadConfig();
+  const descs = config.referenceDescriptors[name];
+  if (!descs || !descs.length) {
+    return { success: false, error: `אין ייחוסים ל-${name}` };
+  }
+  if (descs.length === 1) {
+    // Refused rather than silently emptying the person: losing the last
+    // reference turns a wrong match into no recognition at all, which is a
+    // bigger change than he asked for.
+    return {
+      success: false,
+      error: `ל-*${name}* יש ייחוס אחד בלבד. מחיקה שלו תבטל את הזיהוי לגמרי — אם זו הכוונה, שלח *אפס ייחוסים ${name}*.`,
+    };
+  }
+
+  const detections = await detectFaces(imageBuffer);
+  if (!detections.length) return { success: false, error: 'לא זוהו פנים בתמונה' };
+  const det = detections[chooseIndex];
+  if (!det) return { success: false, error: `אין פרצוף מספר ${chooseIndex + 1} (יש ${detections.length})` };
+
+  let bestIdx = -1, bestDist = Infinity;
+  for (let i = 0; i < descs.length; i++) {
+    const d = faceapi.euclideanDistance(det.descriptor, new Float32Array(descs[i]));
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  if (bestIdx < 0) return { success: false, error: 'לא נמצא ייחוס מתאים' };
+
+  descs.splice(bestIdx, 1);
+  saveConfig(config);
+
+  // The stored picture is removed alongside only when the two lists are still
+  // aligned. References predating image storage have no picture, so the counts
+  // drift apart and an index-based delete would remove the wrong photo.
+  let photoRemoved = false;
+  try {
+    const arch = require('./face-archive');
+    if (arch.removeReferenceAt && arch.referenceCount(name) === descs.length + 1) {
+      photoRemoved = arch.removeReferenceAt(name, bestIdx);
+    }
+  } catch (_) {}
+
+  logger.info(`🗑️ removeReferenceNear "${name}": dropped #${bestIdx + 1} at distance ${bestDist.toFixed(3)} (${descs.length} left)`);
+  return {
+    success: true,
+    name,
+    removedIndex: bestIdx + 1,
+    distance: Math.round(bestDist * 1000) / 1000,
+    remaining: descs.length,
+    photoRemoved,
+  };
+}
+
+/**
+ * מוחק ייחוס לפי מיקומו בסדר ההוספה — למחיקה ישירה מהאפליקציה.
+ *
+ * removeReferenceNear מוצא את האשם מתוך תמונה; כאן הוא כבר ידוע, כי הוא
+ * מסתכל על תמונת הייחוס עצמה ובוחר אותה.
+ */
+function removeReferenceIndex(name, index) {
+  const config = loadConfig();
+  const descs = config.referenceDescriptors[name];
+  if (!descs || !descs.length) return { success: false, error: `אין ייחוסים ל-${name}` };
+  if (descs.length === 1) {
+    return { success: false, error: `ל-${name} יש ייחוס אחד בלבד — מחיקה תבטל את הזיהוי לגמרי.` };
+  }
+  if (index < 0 || index >= descs.length) {
+    return { success: false, error: `אין ייחוס מספר ${index + 1} (יש ${descs.length})` };
+  }
+  descs.splice(index, 1);
+  saveConfig(config);
+
+  let photoRemoved = false;
+  try {
+    const arch = require('./face-archive');
+    if (arch.removeReferenceAt) photoRemoved = arch.removeReferenceAt(name, index);
+  } catch (_) {}
+
+  logger.info(`🗑️ removeReferenceIndex "${name}": dropped #${index + 1} (${descs.length} left)`);
+  return { success: true, name, removedIndex: index + 1, remaining: descs.length, photoRemoved };
 }
 
 function clearReferences(name) {
@@ -917,6 +1145,10 @@ module.exports = {
   highlightMatchingFaces,
   numberFaces,
   _matchDetections, // exported for diagnostics/tests
+  _decideFaces,     // the shared per-face decision — naming and drawing both use it
+  separation,       // how well two people can be told apart
+  removeReferenceNear, // drop the one reference that caused a wrong match
+  removeReferenceIndex, // drop a reference the app picked directly
   isBlurEnabled,
   setBlurEnabled,
   getHighlightMode,

@@ -507,6 +507,25 @@ function findChatByName(chats, query) {
   // 3. Includes match — prefer shortest name (closest to query)
   const includes = indexed.filter(x => x.norm.includes(q));
   if (includes.length) return includes.sort((a, b) => a.name.length - b.name.length)[0].chat;
+
+  // 4. All words present, in any order and not adjacent.
+  //
+  // The three steps above all need the query to appear as one unbroken run.
+  // People name a group from memory instead — "גן פיסטוק הורים" for a group
+  // actually called "גן פיסטוק תשפ״ו - הורים 🌷🌈", where the words are right
+  // and a year and a dash sit between them. That returned "לא הצלחתי לגשת
+  // לקבוצה" for a group he is a member of and can see in the list.
+  // Split the RAW query, then normalise each word. normalizeHe strips every
+  // space, so splitting `q` yields exactly one token and this step never runs.
+  const words = String(query || '').trim().split(/\s+/)
+    .map(w => normalizeHe(w))
+    .filter(w => w.length >= 2);
+  if (words.length >= 2) {
+    const all = indexed.filter(x => words.every(w => x.norm.includes(w)));
+    // Shortest name wins: it is the one carrying the least beyond what he
+    // actually typed, so it is the closest to what he meant.
+    if (all.length) return all.sort((a, b) => a.name.length - b.name.length)[0].chat;
+  }
   return undefined;
 }
 
@@ -1540,10 +1559,87 @@ try {
         async clearState() {},
       };
       const direct = await route(OWNER_ID, text, stubChat);
+
+      // Several handlers acknowledge and then keep working, sending the real
+      // answer to the chat afterwards. In WhatsApp that reads fine; through
+      // this bridge route() had already returned, so the app showed
+      // "מנתח... שנייה" and nothing ever replaced it. Group analysis returned
+      // in 3ms and looked frozen for exactly this reason.
+      //
+      // So when the reply is an acknowledgement, wait for what follows.
+      const ack = typeof direct === 'string'
+        && direct.length < 300
+        && /שנייה|רגע|\.\.\.|…/.test(direct);
+      if (ack) {
+        const DEADLINE = Date.now() + 150000;   // the app allows 180s
+        const QUIET_MS = 6000;                  // output stopped → it is done
+        let seen = collected.length;
+        let lastChange = Date.now();
+        while (Date.now() < DEADLINE) {
+          await new Promise(r => setTimeout(r, 500));
+          if (collected.length !== seen) {
+            seen = collected.length;
+            lastChange = Date.now();
+          } else if (collected.length > 0 && Date.now() - lastChange > QUIET_MS) {
+            break;
+          }
+        }
+      }
+
       const parts = [];
-      if (typeof direct === 'string' && direct.trim()) parts.push(direct.trim());
+      // The acknowledgement is dropped once the real answer arrived — showing
+      // "מנתח… שנייה" above a finished analysis is just noise.
+      const haveReal = collected.some(c => c && c.trim().length > 80);
+      if (typeof direct === 'string' && direct.trim() && !(ack && haveReal)) {
+        parts.push(direct.trim());
+      }
       for (const c of collected) if (c && c.trim()) parts.push(c.trim());
       return parts.join('\n\n') || 'בוצע.';
+    },
+    /**
+     * מריץ סריקה על פריסט שמור, ומחזיר את הפלט לאפליקציה.
+     *
+     * קורא ל-executeScan עם אותם מקורות שהאשף בוואטסאפ היה מעביר, כדי ששתי
+     * הדרכים יריצו את אותו קוד בדיוק. כל דרך שנייה לסרוק הייתה נהיית דרך
+     * שנייה להתנהג אחרת.
+     */
+    runScanPreset: async (presetId, hours) => {
+      const presets = require('./src/scan-presets');
+      const p = presets.getById(presetId);
+      if (!p) throw new Error('פריסט לא נמצא');
+      const sources = (p.sources || []).filter(Boolean);
+      if (!sources.length) throw new Error(`הפריסט "${p.name}" ריק`);
+
+      // The scan writes its output to the owner chat. Collected here instead,
+      // so the app gets the text back rather than only WhatsApp getting it.
+      const collected = [];
+      const realGetChatById = client.getChatById.bind(client);
+      const stub = {
+        id: { _serialized: OWNER_ID },
+        isGroup: false,
+        async sendMessage(content, opts) {
+          if (typeof content === 'string') collected.push(content);
+          else if (opts && opts.caption) collected.push(opts.caption);
+          return { id: { _serialized: 'jarvis-scan-stub' } };
+        },
+        async sendStateTyping() {},
+        async clearState() {},
+      };
+      client.getChatById = async (id) => (id === OWNER_ID ? stub : realGetChatById(id));
+      try {
+        await executeScan({
+          sinceMinutes: hours * 60,
+          timeLabel: `${hours} שעות אחרונות`,
+          scope: 'select',
+          confirmedSources: sources,
+          usedPresetName: p.name,
+        });
+      } finally {
+        // Restored no matter what — leaving the stub in place would silently
+        // swallow every later message the bot tries to send him.
+        client.getChatById = realGetChatById;
+      }
+      return collected.filter(c => c && c.trim()).join('\n\n');
     },
     // Conversation keeps its own history so a follow-up like "ומה לגבי
     // אתמול?" means something. Separate from runCommand, which stays
@@ -1634,6 +1730,59 @@ const _dailyFaceMatches = new Map(); // "YYYY-MM-DD" → Map<name, {count, group
 // ─── Weekly face photo buffer (for Saturday album) ────────────────
 const _weeklyFacePhotos = []; // { name, base64, groupName, date, confidence }
 const MAX_WEEKLY_PHOTOS = 50; // keep max 50 photos
+
+/**
+ * מעביר פרצוף שלא הוכרע לתור הספקות במקום לזרוק אותו.
+ *
+ * זו הנקודה שבה מיה נעלמה: הבוט ראה אותה, חישב 0.349 מולה ו-0.359 מול שי,
+ * והפער היה קטן מדי כדי לנקוב בשם. במקום לשתוק — שאלה עם התמונה המסומנת
+ * ושני כפתורים, שהתשובה עליה נכנסת לסט הייחוסים ומשפרת את ההכרעה הבאה.
+ *
+ * best-effort לגמרי: תור הספקות לא יפיל טיפול בתמונה.
+ */
+/**
+ * רושם ביומן הבדיקות כל תמונה שהבוט הסתכל עליה.
+ *
+ * החור שזה סוגר: כשלא זוהה אף אחד, שום דבר לא נשמר — ולכן "בדק ולא מצא"
+ * ו"בכלל לא בדק" נראו זהים לגמרי מבחוץ. זו הייתה השאלה שאי אפשר היה לענות
+ * עליה כששלחו 40 תמונות בגן ולא קרה כלום.
+ */
+function _logFaceCheck(buffer, groupName, outcome, detail, faces) {
+  try {
+    require('./src/face-archive').recordCheck({
+      buffer, group: groupName, outcome, detail, faces,
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+function _queueFaceDoubts(ambiguous, buffer, groupName) {
+  try {
+    if (!ambiguous || !ambiguous.length) return;
+    const dec = require('./src/decisions');
+    for (const a of ambiguous) {
+      const between = a.between || [];
+      if (between.length < 2) continue;
+      dec.ask({
+        kind: 'face',
+        question: `מי זה בתמונה — ${between[0]} או ${between[1]}?`,
+        hint: `הפרש של ${a.distance != null ? a.distance.toFixed(3) : '?'} בלבד בין השתיים. ` +
+          `התשובה תיכנס לייחוס ותשפר את ההכרעה הבאה.`,
+        options: [
+          ...between.slice(0, 2).map(n => ({ label: n, value: n })),
+          { label: 'אף אחת', value: '__none__' },
+        ],
+        context: { group: groupName || '', distance: a.distance, between },
+        image: buffer,
+        // One question per pair per group per hour. The kindergarten sends
+        // thirty photos of one event; without this the queue would fill with
+        // thirty identical questions about the same two girls.
+        dedupeKey: `face:${between.slice(0, 2).sort().join('|')}:${groupName || ''}:${Math.floor(Date.now() / 3600000)}`,
+      });
+    }
+  } catch (e) {
+    logger.warn('queueFaceDoubts: ' + (e.message || '').substring(0, 60));
+  }
+}
 
 function _trackFaceMatch(name, groupName) {
   const day = new Date().toISOString().slice(0, 10);
@@ -3600,17 +3749,33 @@ client.on('message_create', async (msg) => {
                     await highlightMatchingFaces(hlBuffer, { blurOthers: false, preDetected: matches.detections, matchedOnly: true });
                   markedBuf = _b;
                   hlNote = ` · 🟢 ${highlighted} זוהה${hlB > 0 ? ` · 🔴 ${hlB} לא זוהה` : ''}`;
+                  // The picture already shows an amber box for a face that
+                  // could not be attributed; the caption has to say so too,
+                  // or the two disagree again in the other direction.
+                  const _amb = matches.ambiguous || [];
+                  if (_amb.length) {
+                    const _pair = [...new Set(_amb.flatMap(a => a.between))].join(' / ');
+                    hlNote += `\n🟠 ${_amb.length} פרצוף לא שויך — קרוב מדי בין ${_pair}`;
+                  }
                 } catch (hlErr) { /* will send text fallback */ }
                 // Reply directly to the photo in the group FIRST (this is what
                 // the user watches for). Best-effort — wwwebjs sendMessage can
                 // intermittently throw "getChat undefined" on LID chats; don't
                 // let one failed send abort the whole response.
                 try {
+                  // Same ambiguity note as the DM — the group reply is the one
+                  // he actually looks at, and it was the one saying "שי" under
+                  // a picture with two girls boxed.
+                  const _ambG = matches.ambiguous || [];
+                  const _ambTxt = _ambG.length
+                    ? `\n🟠 ועוד ${_ambG.length} פרצוף שלא שויך — קרוב מדי בין ` +
+                      [...new Set(_ambG.flatMap(a => a.between))].join(' / ')
+                    : '';
                   if (markedBuf) {
                     const gm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'result.jpg');
-                    await msg.reply(gm, null, { caption: `🟢 זוהה: *${allNames}*` + BOT_MARKER });
+                    await msg.reply(gm, null, { caption: `🟢 זוהה: *${allNames}*${_ambTxt}` + BOT_MARKER });
                   } else {
-                    await msg.reply(`🟢 זוהה: *${allNames}*` + BOT_MARKER);
+                    await msg.reply(`🟢 זוהה: *${allNames}*${_ambTxt}` + BOT_MARKER);
                   }
                 } catch (e) { console.warn(`face group-reply failed: ${e.message?.substring(0, 60)}`); }
                 // Then notify owner DM — also best-effort.
@@ -3632,6 +3797,15 @@ client.on('message_create', async (msg) => {
                   const _arch = require('./src/face-archive');
                   // markedBuf is already computed for the WhatsApp reply here.
                   const _ob = (typeof markedBuf !== 'undefined' && markedBuf && markedBuf.length) ? markedBuf : imageBuffer;
+                  // The marked frame already carries the amber box round the
+                  // face in question, so the queued image shows exactly which
+                  // one is being asked about.
+                  _queueFaceDoubts(matches.ambiguous, _ob, groupName);
+                  // The owner test path was missed on the first pass, which is
+                  // the one path he actually uses to test — קניות is his
+                  // control group, so every photo he sent to check the feature
+                  // was the one kind that never reached the log.
+                  _logFaceCheck(_ob, groupName, 'match', allNames, matches.length);
                   for (const m of matches) {
                     _arch.record({
                       name: m.name, buffer: _ob, group: groupName,
@@ -3644,6 +3818,10 @@ client.on('message_create', async (msg) => {
                     title: `🎀 ${allNames} — זוהה בתמונה`,
                     summary: `${groupName} · ${allNames}`,
                     body: matches.map(m => `${m.name} · ${m.confidence}% ביטחון`).join('\n')
+                      + ((matches.ambiguous || []).length
+                        ? `\n🟠 ${matches.ambiguous.length} פרצוף לא שויך — קרוב מדי בין `
+                          + [...new Set(matches.ambiguous.flatMap(a => a.between))].join(' / ')
+                        : '')
                       + `\n\nהתמונה נשמרה — אפשר לראות אותה בטאב "פרצופים".`,
                     kind: 'face',
                     urgency: 'normal',
@@ -3653,6 +3831,12 @@ client.on('message_create', async (msg) => {
                 } catch (_) {}
               } else {
                 console.log(`📷 No match in owner test photo from "${groupName}"`);
+                _logFaceCheck(
+                  imageBuffer, groupName,
+                  (matches.detections || []).length ? 'nomatch' : 'nofaces',
+                  matches.nearMiss ? `הכי קרוב ל-${matches.nearMiss.name} (~${matches.nearMiss.closeness}%)` : '',
+                  (matches.detections || []).length
+                );
                 // Quoted reply on the photo itself so it's clear WHICH image
                 // wasn't recognized. If a face was close to a daughter, say so.
                 const nm = matches.nearMiss;
@@ -4013,7 +4197,7 @@ ${rawBody}`;
           const { MessageMedia } = require('whatsapp-web.js');
           await chat.sendMessage(
             new MessageMedia('image/jpeg', _nf.buffer.toString('base64'), 'faces.jpg'),
-            { caption: `🔢 *${_nf.count} פרצופים*\n\n${lines}\n\n━━━━━━━━━━\n*צדקתי?*\n• *נכון* — הכל מדויק\n• *<מספר> <שם>* — לתקן/להוסיף ייחוס (למשל: _2 מיה_)\n• *טעות* — אם הזיהוי שגוי` + BOT_MARKER }
+            { caption: `🔢 *${_nf.count} פרצופים*\n\n${lines}\n\n━━━━━━━━━━\n*צדקתי?*\n• *נכון* — הכל מדויק\n• *<מספר> <שם>* — לתקן/להוסיף ייחוס (למשל: _2 מיה_)\n• *<מספר> לא זוהה* — למחוק ייחוס שגוי` + BOT_MARKER }
           );
           pendingFaceFeedback.set(OWNER_ID, { buf: _buf, faces: _nf.faces, count: _nf.count, expiresAt: Date.now() + 15 * 60 * 1000 });
           stats.sent++;
@@ -4324,7 +4508,7 @@ ${rawBody}`;
       const t = text.trim();
       const pairs = [...t.matchAll(/(\d{1,2})\s+([\p{L}][\p{L}'"`\-! ]{0,24}?)(?=\s*(?:\d{1,2}\s+[\p{L}]|$|[\n,.;]))/gu)]
         .map(m => ({ idx: parseInt(m[1], 10) - 1, who: m[2].trim(), num: m[1] }))
-        .filter(x => x.who && !/^(תגובה|הפצה|שקט|התעלם|מידע|ימים)$/.test(x.who));
+        .filter(x => x.who && !/^(תגובה|הפצה|שקט|התעלם|מידע|ימים|לא|לא זוהה|לא נכון|טעות|שגוי|מחק|למחוק|תמחק|מחיקה|הסר|להסיר|תסיר|בטל|ביטול|נכון|תקן)$/.test(x.who));
 
       if (ffActive && /^(נכון|צדקת|מדויק|כן)\s*[?!.]?$/i.test(t)) {
         pendingFaceFeedback.delete(OWNER_ID);
@@ -4338,6 +4522,49 @@ ${rawBody}`;
       }
       if ((ffActive || lpFresh) && !pairs.length && /^(טעות|לא נכון|שגוי|טעית)\s*[?!.]?$/i.test(t)) {
         await botSend(chat, '🔧 בוא נתקן — שלח *<מספר> <שם>* (אפשר כמה יחד, למשל: _1 שי 3 מיה_).');
+        stats.sent++; return;
+      }
+
+      // ── "2 לא זוהה" — the bot named a face wrongly ──
+      // Correcting with a name adds a reference; this is the other half, and
+      // it was missing. A wrong match is caused by one specific reference —
+      // a photo filed under the wrong child — and until now the only remedy
+      // was wiping the whole person and starting over.
+      // Deliberately loose about the verb form. "1 למחוק" was written and the
+      // first version of this only matched "מחק", so it fell through to the
+      // name parser and created a person called למחוק — the same way אף אחד
+      // was created. Every way of saying it is accepted here.
+      const wrong = [...t.matchAll(
+        /(\d{1,2})\s*(?:זה\s*)?(?:לא\s*(?:זוהה|נכון|זה|היא|הוא|נכונה)|[לת]?מחוק|תמחק|מחק|מחיקה|הסר|להסיר|תסיר|טעות|שגוי|בטל)/gu
+      )].map(m => parseInt(m[1], 10) - 1);
+      if (wrong.length && (ffActive || lpFresh)) {
+        const buf = ffActive ? ff.buf : lp.buf;
+        const faces = ffActive ? ff.faces : null;
+        const fr = require('./src/face-recognition');
+        const out = [];
+        for (const idx of wrong) {
+          // Which name to un-teach comes from the numbering report, because
+          // that is the label he is disputing.
+          const f = faces && faces[idx];
+          const named = f && f.matchedName;
+          if (!named) {
+            out.push(`⚠️ *${idx + 1}* — הבוט לא שייך את הפרצוף הזה לאף אחד, אז אין ייחוס למחוק.`);
+            continue;
+          }
+          try {
+            const r = await fr.removeReferenceNear(named, buf, idx);
+            out.push(r.success
+              ? `🗑️ *${idx + 1}* — נמחק הייחוס של *${named}* שגרם לזיהוי (מרחק ${r.distance}). נשארו ${r.remaining}.`
+              : `❌ *${idx + 1}* — ${r.error}`);
+          } catch (e) {
+            out.push(`❌ *${idx + 1}* — ${(e.message || '').substring(0, 60)}`);
+          }
+        }
+        const sep = require('./src/face-recognition').separation();
+        const sepTxt = sep.length
+          ? '\n\n📏 ' + sep.map(s => `${s.a}↔${s.b} ${s.distance}`).join(' · ')
+          : '';
+        await botSend(chat, `🔢 *תיקון*\n\n${out.join('\n')}${sepTxt}\n\n_אם זו בעצם מישהי אחרת, שלח *${wrong[0] + 1} <שם>* כדי ללמד אותו._`);
         stats.sent++; return;
       }
 
@@ -4599,10 +4826,18 @@ ${rawBody}`;
     // Catches: "קבוצת X", "את הקבוצה X", "של קבוצת X", "סכם את X", "מהקבוצה X"
     // Note: Hebrew chars aren't \w in JS regex, so we avoid \b and rely on explicit prefixes
     const _mentionsSingleGroup =
-      // "(את) (ה)קבוצה/קבוצת X" — where X is a letter/digit (not space/punct)
-      /(?:^|\s)(?:את\s+)?ה?קבוצ[הת]\s+["״']?[\u0590-\u05FFa-zA-Z0-9]/i.test(text) ||
+      // "(את) (ה)קבוצה/קבוצת X" — X is anything that isn't whitespace.
+      //
+      // It used to demand a Hebrew letter, a Latin letter or a digit straight
+      // after "קבוצת", and a good half of his groups are named starting with
+      // an emoji — "🔅זירה פוליטית 48", "💚גן פיסטוק-תשפז". For those the guard
+      // never matched, so tapping one in the app sent "סרוק את קבוצת 💚גן
+      // פיסטוק…" and fell through to the multi-group branch, scanning all
+      // eleven political groups instead of the one he chose. An emoji opens a
+      // name exactly the way a letter does.
+      /(?:^|\s)(?:את\s+)?ה?קבוצ[הת]\s+["״']?\S/i.test(text) ||
       // "של/מה/ב + קבוצה/קבוצת X"
-      /(?:של|מה|\sב)ה?קבוצ[הת]\s+["״']?[\u0590-\u05FFa-zA-Z0-9]/i.test(text) ||
+      /(?:של|מה|\sב)ה?קבוצ[הת]\s+["״']?\S/i.test(text) ||
       // "סכם את הקבוצה/קבוצת ..."
       /סכם\s+(?:לי\s+)?(?:את\s+)?ה?קבוצ[הת]/i.test(text);
     if (!_isSchedCmd && !_mentionsSingleGroup && (
@@ -5482,6 +5717,10 @@ client.on('message', async (msg) => {
             confidence: m.confidence, candidate: true,
           });
         }
+        _queueFaceDoubts(allMatches.ambiguous, _cbuf, groupName);
+        _logFaceCheck(_cbuf, groupName, "candidate",
+          allMatches.map(m => `${m.name} ${m.confidence}% — נפסל בסינון`).join(", "),
+          (allMatches.detections || []).length);
       } catch (_) {}
     }
 
@@ -5514,6 +5753,12 @@ client.on('message', async (msg) => {
             confidence: m.confidence,
           });
         }
+        // A named match and an unresolved face can sit in the same photo — the
+        // kindergarten shot that started this had both. Ask about the second.
+        _queueFaceDoubts(allMatches.ambiguous, _buf, groupName);
+        _logFaceCheck(_buf, groupName, "match",
+          matches.map(m => `${m.name} ${m.confidence}%`).join(", "),
+          (matches.detections || []).length);
       } catch (_) {}
 
       // Save for weekly album
@@ -5627,6 +5872,12 @@ client.on('message', async (msg) => {
       stats.sent++;
     } else {
       console.log(`📷 No match in "${groupName}" photo`);
+      // Logged even though nothing matched — this is the case that was
+      // invisible, and the one he asked about.
+      _logFaceCheck(imageBuffer, groupName,
+        (allMatches.detections || []).length ? "nomatch" : "nofaces",
+        allMatches.nearMiss ? `הכי קרוב ל-${allMatches.nearMiss.name} (~${allMatches.nearMiss.closeness}%)` : "",
+        (allMatches.detections || []).length);
       // For ownerGroups (test groups): quoted reply on the photo so it's clear
       // WHICH one wasn't recognized, incl. a "closest to X" hint when near.
       const isTestGrp = (status.ownerGroups || []).some(g => groupName.includes(g) || g.includes(groupName));
@@ -6173,7 +6424,8 @@ async function route(chatId, text, chat) {
         const { MessageMedia } = require('whatsapp-web.js');
         await chat.sendMessage(
           new MessageMedia('image/jpeg', _nf.buffer.toString('base64'), 'faces.jpg'),
-          { caption: `🔢 *${_nf.count} פרצופים*\n\n${lines}\n\n━━━━━━━━━━\n*צדקתי?*\n• *נכון* — הכל מדויק\n• *<מספר> <שם>* — לתקן (אפשר כמה: _1 שי 3 מיה_)` + BOT_MARKER }
+          { caption: `🔢 *${_nf.count} פרצופים*\n\n${lines}\n\n━━━━━━━━━━\n*צדקתי?*\n• *נכון* — הכל מדויק\n• *<מספר> <שם>* — לתקן (אפשר כמה: _1 שי 3 מיה_)
+• *<מספר> לא זוהה* — למחוק ייחוס שגוי` + BOT_MARKER }
         );
         pendingFaceFeedback.set(OWNER_ID, { buf: _lp.buf, faces: _nf.faces, count: _nf.count, expiresAt: Date.now() + 15 * 60 * 1000 });
       } catch (e) {
@@ -7459,6 +7711,75 @@ setInterval(async () => {
   finally { _bcBusy = false; }
 }, 60 * 1000);
 let _bcLast = 0;
+
+// ─── 🐞 Relay queued app error reports ───────────────────────────
+// A report that arrived while the desktop agent was offline is not lost; it
+// waits here and goes out when the agent is back. The agent disconnects
+// whenever his PC sleeps, which is most of the time a phone error happens.
+setInterval(async () => {
+  try {
+    const rep = require('./src/app-reports');
+    const pending = rep.pendingRelay();
+    if (!pending.length) return;
+    const da = require('./src/desktop-agent');
+    if (!da.isConnected || !da.isConnected()) return;
+    // One per sweep — a backlog should trickle into the dev session, not
+    // arrive as thirty prompts at once.
+    await rep.relay(pending[pending.length - 1]);
+  } catch (_) {}
+}, 90 * 1000);
+
+// ─── 📻 Hourly broadcast digest ──────────────────────────────────
+// The keyword alert above answers "was my name said?". This answers "what was
+// actually being talked about, by whom, and on which programme" — from the
+// same transcripts, which were until now discarded.
+//
+// Runs on the hour rather than every 60 minutes of uptime: a digest labelled
+// 14:00–15:00 should mean that, and this bot restarts often enough that an
+// uptime-relative schedule would drift into meaningless windows.
+let _digestHour = null;
+setInterval(async () => {
+  try {
+    if (!profile.jobEnabled('broadcast-monitor')) return;
+    if (botStatus !== 'connected') return;
+    const bm = require('./src/broadcast-monitor');
+    if (!bm.isEnabled()) return;
+
+    const now = new Date();
+    const il = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+    const hourKey = `${il.toDateString()}-${il.getHours()}`;
+    if (_digestHour === hourKey) return;
+    // A few minutes past the hour, so the window it covers is already complete.
+    if (il.getMinutes() < 3) return;
+    _digestHour = hourKey;
+
+    const bd = require('./src/broadcast-digest');
+    const to = new Date(now); to.setMinutes(0, 0, 0);
+    const from = new Date(to.getTime() - 60 * 60 * 1000);
+    let d = null;
+    try { d = await bd.analyseHour({ fromTs: from.getTime(), toTs: to.getTime() }); }
+    catch (err) { logger.warn("broadcast digest: " + (err.code || err.message)); }
+    bd.prune();
+    if (!d) return;
+
+    // Only worth interrupting him when there is something in it. A quiet hour
+    // is still stored and visible in the app, but it does not buzz the phone.
+    if (!(d.topics || []).length && !(d.quotes || []).length) return;
+    try {
+      require('./src/jarvis-api').pushAlert({
+        title: `📻 מה נאמר בשידור · ${d.label}`,
+        summary: (d.topics || []).map(t => t.title).slice(0, 3).join(' · ')
+          || `${d.quotes.length} ציטוטים`,
+        body: bd.formatDigest(d),
+        kind: 'broadcast-digest', urgency: 'normal',
+        // Only the newest hour matters; older undelivered ones are stale.
+        supersedes: 'broadcast-digest',
+      });
+    } catch {}
+  } catch (e) {
+    logger.warn('broadcast digest loop: ' + (e.message || '').substring(0, 70));
+  }
+}, 60 * 1000);
 
 // מוקד — deliver the batched alert digest when one is due (the hub itself
 // holds delivery during quiet hours / Shabbat and rate-limits to DIGEST_MINUTES).
