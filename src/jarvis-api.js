@@ -848,7 +848,24 @@ function attach(app, deps = {}) {
           // cross-person guard exists to catch a mislabel made blind, and
           // here it would reject exactly the correction that fixes the
           // overlap it is complaining about.
-          const r = await fr.addReference(value, buf, { force: true });
+          // The face the question was about. Without this the reference was
+          // taken from whichever face the detector ranked first — in a class
+          // photo, quite possibly a different child, now filed under her name.
+          let chooseIndex = null;
+          const want = item.context && item.context.face;
+          if (want) {
+            try {
+              const dets = await fr.detectFaces(buf);
+              let best = Infinity;
+              for (let i = 0; i < dets.length; i++) {
+                const g = await fr.faceGeometry(buf, dets[i]);
+                const d = Math.hypot((g.x + g.w / 2) / g.width - want.cx, (g.y + g.h / 2) / g.height - want.cy);
+                if (d < best) { best = d; chooseIndex = i; }
+              }
+              if (best > 0.08) chooseIndex = null;   // not the same face — fall back
+            } catch (_) { chooseIndex = null; }
+          }
+          const r = await fr.addReference(value, buf, { force: true, chooseIndex });
           outcome = r && r.success
             ? `נוסף לייחוס של ${value} — עכשיו ${r.totalReferences} תמונות`
             : `לא נוסף: ${(r && r.error) || 'שגיאה'}`;

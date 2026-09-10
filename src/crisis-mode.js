@@ -29,8 +29,10 @@ const TRIGGER_COUNT = 3;
 const CRISIS_TIMEOUT_MINUTES = 60;       // auto-end crisis after 60 min of inactivity
 
 // Built-in critical keywords — overridable by data/crisis-keywords.json
+// 'דרמה' was removed on 10.9: it counted "דרמה מגזרית: חנמאל דורפמן הוריד את
+// הפיאות" — gossip — toward an emergency. It is a headline word, not a crisis.
 const DEFAULT_CRITICAL_KEYWORDS = [
-  'מיידי', 'דרמה', 'ירי', 'התנקשות', 'פיגוע', 'חירום',
+  'מיידי', 'ירי', 'התנקשות', 'פיגוע', 'חירום',
   'מתקפה', 'הרוג', 'נפצע', 'נחטף', 'דחוף',
   'בהול', 'משבר', 'קריסה', 'הופלה',
 ];

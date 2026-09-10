@@ -1890,33 +1890,51 @@ async function _flushMaybe(key) {
   logger.info(`🟡 maybe ${b.name} in "${b.groupName}": ${n} photo(s), ${range}`);
 }
 
-function _queueFaceDoubts(ambiguous, buffer, groupName) {
-  try {
-    if (!ambiguous || !ambiguous.length) return;
+/**
+ * @param raw        the original photo — to mark the face the question is about
+ * @param detections the detections faceIndex refers to
+ */
+function _queueFaceDoubts(ambiguous, buffer, groupName, raw = null, detections = null) {
+  if (!ambiguous || !ambiguous.length) return;
+  (async () => {
     const dec = require('./src/decisions');
     for (const a of ambiguous) {
       const between = a.between || [];
       if (between.length < 2) continue;
+      // The face in question, boxed in orange with a "?", and where it is.
+      // On 10.9 the question "מיה או שי?" came over a photo with שי framed
+      // in green — it was about a boy in the back row, and it read as a
+      // question about her.
+      let image = buffer, where = '', face = null;
+      const det = detections && a.faceIndex != null ? detections[a.faceIndex] : null;
+      if (raw && det) {
+        try {
+          const r = await require('./src/face-recognition').markFace(raw, det);
+          image = r.buffer; where = r.geometry.where;
+          const g = r.geometry;
+          // Where the face is, so the answer stores THIS face as the
+          // reference and not whichever one the detector ranks first.
+          face = { cx: (g.x + g.w / 2) / g.width, cy: (g.y + g.h / 2) / g.height };
+        } catch (_) {}
+      }
       dec.ask({
         kind: 'face',
-        question: `מי זה בתמונה — ${between[0]} או ${between[1]}?`,
+        question: `מי זה בתמונה${where ? ` (${where}, מסומן ב-?)` : ''} — ${between[0]} או ${between[1]}?`,
         hint: `הפרש של ${a.distance != null ? a.distance.toFixed(3) : '?'} בלבד בין השתיים. ` +
-          `התשובה תיכנס לייחוס ותשפר את ההכרעה הבאה.`,
+          `אם זה ילד אחר — "אף אחת". התשובה תיכנס לייחוס ותשפר את ההכרעה הבאה.`,
         options: [
           ...between.slice(0, 2).map(n => ({ label: n, value: n })),
           { label: 'אף אחת', value: '__none__' },
         ],
-        context: { group: groupName || '', distance: a.distance, between },
-        image: buffer,
+        context: { group: groupName || '', distance: a.distance, between, face },
+        image,
         // One question per pair per group per hour. The kindergarten sends
         // thirty photos of one event; without this the queue would fill with
         // thirty identical questions about the same two girls.
         dedupeKey: `face:${between.slice(0, 2).sort().join('|')}:${groupName || ''}:${Math.floor(Date.now() / 3600000)}`,
       });
     }
-  } catch (e) {
-    logger.warn('queueFaceDoubts: ' + (e.message || '').substring(0, 60));
-  }
+  })().catch(e => logger.warn('queueFaceDoubts: ' + (e.message || '').substring(0, 60)));
 }
 
 function _trackFaceMatch(name, groupName) {
@@ -3960,7 +3978,7 @@ client.on('message_create', async (msg) => {
                   // The marked frame already carries the amber box round the
                   // face in question, so the queued image shows exactly which
                   // one is being asked about.
-                  _queueFaceDoubts(matches.ambiguous, _ob, groupName);
+                  _queueFaceDoubts(matches.ambiguous, _ob, groupName, imageBuffer, matches.detections);
                   // The owner test path was missed on the first pass, which is
                   // the one path he actually uses to test — קניות is his
                   // control group, so every photo he sent to check the feature
@@ -5920,7 +5938,7 @@ client.on('message', async (msg) => {
             confidence: m.confidence, candidate: true,
           });
         }
-        _queueFaceDoubts(allMatches.ambiguous, _cbuf, groupName);
+        _queueFaceDoubts(allMatches.ambiguous, _cbuf, groupName, imageBuffer, allMatches.detections);
         _logFaceCheck(_cbuf, groupName, "candidate",
           allMatches.map(m => `${m.name} ${m.confidence}% — נפסל בסינון`).join(", "),
           (allMatches.detections || []).length);
@@ -5970,7 +5988,7 @@ client.on('message', async (msg) => {
         }
         // A named match and an unresolved face can sit in the same photo — the
         // kindergarten shot that started this had both. Ask about the second.
-        _queueFaceDoubts(allMatches.ambiguous, _buf, groupName);
+        _queueFaceDoubts(allMatches.ambiguous, _buf, groupName, imageBuffer, allMatches.detections);
         _logFaceCheck(_buf, groupName, "match",
           matches.map(m => `${m.name} ${m.confidence}%`).join(", "),
           (matches.detections || []).length);
@@ -6089,6 +6107,10 @@ client.on('message', async (msg) => {
       console.log(`📷 No match in "${groupName}" photo`);
       // Logged even though nothing matched — this is the case that was
       // invisible, and the one he asked about.
+      // A face it could not tell between the two girls, in a photo with no
+      // named match — the 10.9 "קניות" photo. It used to reach neither an
+      // alert nor the question queue; he had no way to answer it.
+      if (!_checkLogged) _queueFaceDoubts(allMatches.ambiguous, imageBuffer, groupName, imageBuffer, allMatches.detections);
       if (!_checkLogged) _logFaceCheck(imageBuffer, groupName,
         (allMatches.detections || []).length ? "nomatch" : "nofaces",
         allMatches.nearMiss ? `הכי קרוב ל-${allMatches.nearMiss.name} (~${allMatches.nearMiss.closeness}%)` : "",
@@ -6097,11 +6119,33 @@ client.on('message', async (msg) => {
       // WHICH one wasn't recognized, incl. a "closest to X" hint when near.
       const isTestGrp = (status.ownerGroups || []).some(g => groupName.includes(g) || g.includes(groupName));
       if (isTestGrp) {
+        // Says WHICH face, and marks it. "הכי קרוב למיה", with nothing to
+        // point at, read as a verdict on the girl in front — on 10.9 it was
+        // about a boy in the back row, and the girl in front was שי.
         const nm = allMatches.nearMiss;
-        const noMatchMsg = nm
-          ? `🔍 לא זוהה בוודאות — אבל הכי קרוב ל-*${nm.name}* (קרבה ~${nm.closeness}%). אם זו באמת ${nm.name}, שלח עוד תמונת ייחוס שלה 💡`
-          : `🔍 לא זוהו פנים מוכרים`;
-        try { await msg.reply(noMatchMsg + BOT_MARKER); } catch (e) { /* silent */ }
+        const amb = (allMatches.ambiguous || [])[0];
+        const idx = amb ? amb.faceIndex : (nm ? nm.faceIndex : null);
+        let marked = null, where = '';
+        if (idx != null && allMatches.detections?.[idx]) {
+          try {
+            const r = await require('./src/face-recognition').markFace(imageBuffer, allMatches.detections[idx]);
+            marked = r.buffer; where = r.geometry.where;
+          } catch (_) {}
+        }
+        const at = where ? `הפרצוף ${where} (מסומן ב-?)` : 'הפרצוף המסומן';
+        const noMatchMsg = amb
+          ? `🤔 לא בטוח: ${at} יכול להיות ${amb.between[0]} או ${amb.between[1]} — ההפרש קטן מדי כדי להחליט.\nנשאלת על זה באפליקציה (התראות ← ממתין להכרעה שלך). אם זה ילד אחר — "אף אחת".`
+          : nm
+            ? `🔍 לא זוהה אף אחד. ${at} הכי דומה ל-${nm.name} (~${nm.closeness}%) — זה עדיין לא אומר שזה ${nm.name}.`
+            : `🔍 לא זוהו פנים מוכרים`;
+        try {
+          if (marked) {
+            const { MessageMedia: _MM } = require('whatsapp-web.js');
+            await msg.reply(new _MM('image/jpeg', marked.toString('base64'), 'which.jpg'), null, { caption: noMatchMsg + BOT_MARKER });
+          } else {
+            await msg.reply(noMatchMsg + BOT_MARKER);
+          }
+        } catch (e) { /* silent */ }
       }
     }
   } catch (err) {

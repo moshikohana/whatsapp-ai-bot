@@ -514,8 +514,12 @@ function _matchDetections(detections, config) {
   // Faces the recogniser saw but could not attribute. Carried alongside the
   // matches so a caption can admit "one more face I could not place" instead
   // of silently dropping a child from a photo she is in.
-  const ambiguous = decisions.filter(d => d && d.ambiguous)
-    .map(d => ({ between: d.ambiguous, distance: Math.round(d.distance * 1000) / 1000 }));
+  // faceIndex says WHICH face. Without it a question about a background child
+  // arrived over a photo with the main child framed, and "הכי קרוב למיה" read
+  // as a verdict on the girl in front — it was about a boy in the back row.
+  const ambiguous = decisions.map((d, i) => (d && d.ambiguous
+    ? { between: d.ambiguous, distance: Math.round(d.distance * 1000) / 1000, faceIndex: i }
+    : null)).filter(Boolean);
 
   const deduped = {};
   for (const m of matches) {
@@ -531,8 +535,8 @@ function _matchDetections(detections, config) {
 // closest was שי" so the user knows it got close (and which person to add
 // more references for). Only reported when reasonably close.
 function _computeNearMiss(detections, config) {
-  let best = null; // { name, distance, threshold }
-  for (const det of detections) {
+  let best = null; // { name, distance, threshold, faceIndex }
+  detections.forEach((det, i) => {
     for (const [name, descriptors] of Object.entries(config.referenceDescriptors)) {
       if (!descriptors.length) continue;
       let d = Infinity;
@@ -541,17 +545,62 @@ function _computeNearMiss(detections, config) {
         if (dist < d) d = dist;
       }
       if (!best || d < best.distance) {
-        best = { name, distance: d, threshold: config.perPersonThresholds?.[name] ?? config.threshold };
+        best = { name, distance: d, threshold: config.perPersonThresholds?.[name] ?? config.threshold, faceIndex: i };
       }
     }
-  }
+  });
   if (!best) return null;
   // Only call it a "near miss" if it's within a reasonable margin of the
   // threshold — anything past that is genuinely a different person.
   if (best.distance > best.threshold + 0.15) return null;
   // Rough closeness %: how far into the threshold band it landed.
   const closeness = Math.round(Math.max(0, (1 - best.distance / (best.threshold + 0.15)) * 100));
-  return { name: best.name, distance: Math.round(best.distance * 1000) / 1000, closeness };
+  return { name: best.name, distance: Math.round(best.distance * 1000) / 1000, closeness, faceIndex: best.faceIndex };
+}
+
+/**
+ * איפה בתמונה נמצא פרצוף, במילים — ובאיזה גודל.
+ * detections are in the downscaled (≤1280px) frame detectFaces used; the
+ * geometry is returned in the original image's pixels, like numberFaces.
+ */
+async function faceGeometry(imageBuffer, det) {
+  const raw = await sharp(imageBuffer).metadata();
+  // Detection ran on the EXIF-rotated image; a portrait iPhone photo stored
+  // sideways reports its width and height swapped.
+  const meta = (raw.orientation || 1) >= 5 ? { width: raw.height, height: raw.width } : raw;
+  const ratio = Math.min(1280 / meta.width, 1280 / meta.height, 1);
+  const scale = 1 / ratio;
+  const b = det.detection.box;
+  const x = b.x * scale, y = b.y * scale, w = b.width * scale, h = b.height * scale;
+  const cx = (x + w / 2) / meta.width, cy = (y + h / 2) / meta.height;
+  const rel = w / meta.width;
+  const horiz = cx < 0.34 ? 'בצד שמאל' : cx > 0.66 ? 'בצד ימין' : 'באמצע';
+  const vert = cy < 0.35 ? 'למעלה' : cy > 0.7 ? 'למטה' : '';
+  return {
+    x, y, w, h, rel, width: meta.width, height: meta.height,
+    // A face under ~6% of the frame's width is a child in the back row.
+    small: rel < 0.06,
+    where: [rel < 0.06 ? 'ברקע' : null, horiz, vert].filter(Boolean).join(' '),
+  };
+}
+
+/** מסמן פרצוף אחד בכתום, עם "?" מעליו — כדי שיהיה ברור על מי השאלה. */
+async function markFace(imageBuffer, det, color = '#ff9100') {
+  const g = await faceGeometry(imageBuffer, det);
+  const pad = Math.round(g.w * 0.3);
+  const x = Math.max(0, Math.round(g.x - pad)), y = Math.max(0, Math.round(g.y - pad));
+  const w = Math.min(g.width - x, Math.round(g.w + pad * 2)), h = Math.min(g.height - y, Math.round(g.h + pad * 2));
+  const bw = Math.max(3, Math.min(Math.round(g.width * 0.006), Math.round(w * 0.06)));
+  const b = Math.max(26, Math.min(Math.round(g.width * 0.05), Math.round(w * 0.7)));
+  const box = Buffer.from(`<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg"><rect x="${bw / 2}" y="${bw / 2}" width="${w - bw}" height="${h - bw}" fill="none" stroke="${color}" stroke-width="${bw}" rx="${Math.min(10, Math.round(w / 8))}"/></svg>`);
+  const badge = Buffer.from(`<svg width="${b}" height="${b}" xmlns="http://www.w3.org/2000/svg"><circle cx="${b / 2}" cy="${b / 2}" r="${b / 2 - 2}" fill="${color}" stroke="#fff" stroke-width="3"/><text x="50%" y="50%" dy="0.36em" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="${Math.round(b * 0.62)}" font-weight="bold" fill="#000">?</text></svg>`);
+  const bx = Math.min(g.width - b, Math.max(0, Math.round(x + w / 2 - b / 2)));
+  const by = y - b - 2 >= 0 ? y - b - 2 : Math.min(g.height - b, y + h + 2);
+  const buffer = await sharp(imageBuffer).rotate().composite([
+    { input: await sharp(box).png().toBuffer(), left: x, top: y },
+    { input: await sharp(badge).png().toBuffer(), left: bx, top: by },
+  ]).jpeg({ quality: 88 }).toBuffer();
+  return { buffer, geometry: g };
 }
 
 async function findMatches(imageBuffer) {
@@ -1153,6 +1202,8 @@ module.exports = {
   blurNonMatchingFaces,
   highlightMatchingFaces,
   numberFaces,
+  faceGeometry,     // where a face sits, in words (for "which child")
+  markFace,         // one face boxed in orange with a "?"
   _matchDetections, // exported for diagnostics/tests
   _decideFaces,     // the shared per-face decision — naming and drawing both use it
   separation,       // how well two people can be told apart
