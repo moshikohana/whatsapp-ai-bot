@@ -688,6 +688,13 @@ function attach(app, deps = {}) {
     const ok = require('./attention').markDone(String((req.body || {}).id || ''));
     res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'הפריט לא נמצא' });
   });
+  app.post('/api/jarvis/attention/clear', guard, (req, res) => {
+    res.json({ ok: true, closed: require('./attention').clearAll() });
+  });
+  app.post('/api/jarvis/attention/mute', guard, (req, res) => {
+    const r = require('./attention').mute(String((req.body || {}).id || ''));
+    res.status(r ? 200 : 404).json(r ? { ok: true, ...r } : { error: 'הפריט לא נמצא' });
+  });
   app.post('/api/jarvis/attention/calendar', guard, async (req, res) => {
     try {
       const att = require('./attention');

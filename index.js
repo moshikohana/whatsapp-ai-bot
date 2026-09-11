@@ -3876,6 +3876,8 @@ function _seenAndMark(msgIdSerialized) {
   return false;
 }
 
+// The "דורש התייחסות" card the bot sent last — "ליומן" right after it is about it.
+let _lastAttention = null;
 client.on('message_create', async (msg) => {
   // Feed the zombie watchdog — any event here proves listeners are alive
   _lastMsgEventAt = Date.now();
@@ -4146,7 +4148,8 @@ client.on('message_create', async (msg) => {
     // ── 📌 "טופל" / "ליומן" on a "דורש התייחסות" message ─────────────
     // Only when it is clearly about one: a reply to that message, or the
     // single open item from the last day. Otherwise it falls through.
-    if (/^(טופל|בוצע|ליומן|תוסיף ליומן|הוסף ליומן)[.!]?$/.test(rawBody.trim())) {
+    if (/^(כן\s*,?\s*)?(טופל|בוצע|ליומן|יומן|תוסיף ליומן|הוסף ליומן|תכניס ליומן|תכניס את זה ליומן|תוסיף את זה ליומן)( בבקשה)?[.!]?$/.test(rawBody.trim())
+        || (/^(כן|כן תוסיף|כן תכניס|תוסיף|תכניס)[.!]?$/.test(rawBody.trim()) && _lastAttention && Date.now() - _lastAttention.at < 15 * 60000)) {
       const att = require('./src/attention');
       let item = null;
       if (msg.hasQuotedMsg) {
@@ -4155,20 +4158,25 @@ client.on('message_create', async (msg) => {
           if (q.includes('דורש התייחסות')) item = att.open().find(i => q.includes(i.what.substring(0, 30))) || null;
         } catch (_) {}
       }
+      // The one the bot just showed him comes first: "ליומן" right after an
+      // invitation is about that invitation, however many others are open.
+      if (!item && _lastAttention && Date.now() - _lastAttention.at < 30 * 60000) {
+        item = att.find(_lastAttention.id);
+      }
       if (!item) {
         const fresh = att.open().filter(i => Date.now() - i.ts < 24 * 3600000);
         if (fresh.length === 1) item = fresh[0];
       }
       if (item) {
         const _ac = await client.getChatById(OWNER_ID);
-        if (/יומן/.test(rawBody)) {
+        if (!/טופל|בוצע/.test(rawBody)) {
           try {
             const r = await att.toCalendar(item.id);
             att.markDone(item.id);
             await botSend(_ac, `📅 נוסף ליומן: *${r.summary}* · ${r.when}`);
           } catch (e) {
             await botSend(_ac, e.code === 'NO_DATE'
-              ? '📅 אין בהודעה תאריך ושעה מדויקים — לא הוספתי כדי לא לנחש. אפשר "פגישה חדשה" ולהזין ידנית.'
+              ? '📅 לא מצאתי בהודעה תאריך — לא הוספתי כדי לא לנחש. כתוב לי "תוסיף ליומן" עם התאריך והשעה.'
               : `❌ ההוספה ליומן נכשלה: ${(e.message || '').substring(0, 80)}`);
           }
         } else {
@@ -4545,6 +4553,35 @@ ${rawBody}`;
 
       const chat = await msg.getChat();
       await chat.sendStateTyping();
+
+      // 📌 An invitation he forwards to the bot gets the same card as one
+      // found in a group — with "ליומן" that actually works. Before, the
+      // general reply offered "להוסיף ליומן?", and his "כן" arrived with no
+      // picture attached, so it just asked again.
+      if (!caption || /הזמנ|יומן|אירוע|ברית|חתונ|בר מצו|בת מצו|יום הולדת|תזכיר|לאשר/.test(caption)) {
+        try {
+          const _m = await safeDownloadMedia(msg);
+          if (_m && _m.data) {
+            const att = require('./src/attention');
+            const item = await att.check({
+              msgId: msg.id?._serialized, chatId: OWNER_ID, group: 'שלחת לי', sender: '',
+              text: caption, isImage: true, media: { buffer: Buffer.from(_m.data, 'base64') },
+              ts: (msg.timestamp || 0) * 1000 || Date.now(), direct: true,
+            });
+            if (item) {
+              _lastAttention = { id: item.id, at: Date.now() };
+              const txt = att.format(item);
+              await botSend(chat, txt);
+              require('./src/jarvis-api').pushAlert({
+                title: `📌 ${item.what}`, summary: [item.when, item.where].filter(Boolean).join(' · '),
+                body: txt.replace(/\*/g, ''), kind: 'attention', urgency: 'normal',
+              });
+              stats.sent++;
+              return;
+            }
+          }
+        } catch (e) { logger.warn('attention direct: ' + (e.message || '').substring(0, 60)); }
+      }
 
       const response = await handleImage(msg, caption, chatId);
       await botSend(chat, response);
@@ -5888,7 +5925,7 @@ client.on('message', async (msg) => {
   (async () => {
     try {
       const _from = msg.from || '';
-      if (!_from.endsWith('@g.us')) return;
+      if (!/@g(\.us)?$/.test(_from)) return;
       if (msg.type !== 'chat' && msg.type !== 'image') return;
       const att = require('./src/attention');
       const _chat = await msg.getChat();
@@ -5906,6 +5943,7 @@ client.on('message', async (msg) => {
       });
       if (!item) return;
       const txt = att.format(item);
+      _lastAttention = { id: item.id, at: Date.now() };
       await botSend(await client.getChatById(OWNER_ID), txt);
       require('./src/jarvis-api').pushAlert({
         title: `📌 ${item.what}`,

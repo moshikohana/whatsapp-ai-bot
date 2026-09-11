@@ -18,7 +18,12 @@ const path = require('path');
 const logger = require('./logger');
 
 const FILE = path.join(__dirname, '..', 'data', 'attention.json');
+const MUTE_FILE = path.join(__dirname, '..', 'data', 'attention-muted.json');
 const KEEP_DAYS = 21;
+// An item with no date stops being "open" after this long. It either got done
+// without anyone telling the bot, or it no longer matters; it should not sit
+// on the home screen forever.
+const STALE_DAYS = 3;
 
 // Words that usually come with a request. Only a gate for the model — a false
 // hit costs one short call; the model decides.
@@ -41,8 +46,15 @@ function _newsGroupIds() {
   return s;
 }
 
+function _muted() { try { return JSON.parse(fs.readFileSync(MUTE_FILE, 'utf8')); } catch { return { ids: [], names: [] }; } }
+
+// Groups come in two id forms: "…@g.us", and the older "…-…@g" that the
+// oldest groups, family ones included, still carry. Only the first was
+// accepted, so "אוהבים את סבתא וסבא" was never read.
 function isPersonal(chatId, name) {
-  if (!chatId || !chatId.endsWith('@g.us')) return false;
+  if (!chatId || !/@g(\.us)?$/.test(chatId)) return false;
+  const mu = _muted();
+  if ((mu.ids || []).includes(chatId) || (mu.names || []).includes(name)) return false;
   if (_newsGroupIds().has(chatId)) return false;
   if (JUNK_GROUP.test(name || '')) return false;
   return true;
@@ -71,8 +83,10 @@ const SYSTEM = () => `אתה העוזר האישי של מושיקו. קיבלת
  "when": "היום והשעה כפי שנכתבו, או null",
  "where": "המקום, או null",
  "deadline": "עד מתי להגיב, או null",
- "dateISO": "YYYY-MM-DDTHH:MM של האירוע, או null"}
-כללים ל-dateISO: רק כשגם היום וגם השעה כתובים במפורש — בלי שעה, null (לא 00:00).
+ "dateISO": "YYYY-MM-DDTHH:MM של האירוע, או null",
+ "date": "YYYY-MM-DD של האירוע כשהיום ידוע, גם בלי שעה, או null"}
+כללים ל-dateISO: רק כשגם היום וגם השעה כתובים במפורש — בלי שעה, null (לא 00:00), ואז רק date.
+תאריך עברי (למשל "ט״ו באלול") — המר לתאריך הלועזי; אם כתוב גם לועזי, העדף אותו.
 יום בשבוע ("יום חמישי") = המופע הקרוב שעוד לא עבר: אם זה היום והשעה כבר עברה — השבוע הבא.
 כשיש כמה מועדים — של האירוע שצריך להגיע אליו.`;
 
@@ -83,6 +97,9 @@ const SYSTEM = () => `אתה העוזר האישי של מושיקו. קיבלת
  */
 function _fixDate(iso, text) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(iso || '')) return null;
+  // 00:00 is how the model says "no hour" even when told not to — a ברית
+  // invitation with a date only came back as midnight.
+  if (iso.endsWith('T00:00') && !/(00[:.]00|חצות|24[:.]00)/.test(text)) return null;
   const il = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
   const p = n => String(n).padStart(2, '0');
   const nowLocal = `${il.getFullYear()}-${p(il.getMonth() + 1)}-${p(il.getDate())}T${p(il.getHours())}:${p(il.getMinutes())}`;
@@ -93,6 +110,13 @@ function _fixDate(iso, text) {
   dt.setUTCDate(dt.getUTCDate() + 7);
   const out = `${dt.toISOString().slice(0, 10)}T${t}`;
   return out >= nowLocal ? out : null;
+}
+
+function _fixDay(d) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d || '')) return null;
+  const il = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+  const p = n => String(n).padStart(2, '0');
+  return d >= `${il.getFullYear()}-${p(il.getMonth() + 1)}-${p(il.getDate())}` ? d : null;
 }
 
 async function _classifyText(text, group, sender) {
@@ -124,9 +148,11 @@ async function _classifyImage(buf, caption, group, sender) {
  * נקרא על כל הודעה בקבוצה. מחזיר פריט חדש כשיש משהו שדורש ממנו פעולה.
  * @param media  { buffer } לתמונה, אם כבר הורדה
  */
-async function check({ msgId, chatId, group, sender, text, isImage, media, ts = Date.now() }) {
+async function check({ msgId, chatId, group, sender, text, isImage, media, ts = Date.now(), direct = false }) {
   try {
-    if (!isPersonal(chatId, group)) return null;
+    // direct: he sent it to the bot himself ("תסתכל על ההזמנה הזאת") — no
+    // group to judge, and a clear sign he wants it handled.
+    if (!direct && !isPersonal(chatId, group)) return null;
     if (msgId) { if (_seenMsg.has(msgId)) return null; _seenMsg.add(msgId); if (_seenMsg.size > 2000) _seenMsg.clear(); }
     let r = null, source = 'text';
     if (isImage && media && media.buffer) {
@@ -141,16 +167,19 @@ async function check({ msgId, chatId, group, sender, text, isImage, media, ts = 
     const list = _load();
     const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
     // The same request, reposted or forwarded — once.
-    if (list.some(x => x.group === group && norm(x.what) === norm(r.what) && ts - x.ts < 2 * 86400000)) return null;
+    const dup = list.find(x => x.group === group && norm(x.what) === norm(r.what) && ts - x.ts < 2 * 86400000);
+    if (dup) return direct ? dup : null;
+    const dateISO = _fixDate(r.dateISO, `${text || ''} ${r.when || ''}`);
     const item = {
-      id: `${ts}-${Math.random().toString(36).slice(2, 6)}`, ts,
+      id: `${ts}-${Math.random().toString(36).slice(2, 6)}`, ts, chatId: chatId || null,
       group: String(group || '').substring(0, 80), sender: String(sender || '').substring(0, 40),
       what: String(r.what).substring(0, 200),
       event: r.event ? String(r.event).substring(0, 120) : null,
       when: r.when ? String(r.when).substring(0, 80) : null,
       where: r.where ? String(r.where).substring(0, 120) : null,
       deadline: r.deadline ? String(r.deadline).substring(0, 80) : null,
-      dateISO: _fixDate(r.dateISO, `${text || ''} ${r.when || ''}`),
+      dateISO,
+      date: dateISO ? dateISO.slice(0, 10) : _fixDay(r.date || String(r.dateISO || '').slice(0, 10)),
       source, excerpt: String(text || '').substring(0, 300),
       done: false, calendar: false,
     };
@@ -171,43 +200,92 @@ function format(it) {
   if (facts.length) lines.push(facts.join(' · '));
   if (it.deadline) lines.push(`⏳ לענות עד: ${it.deadline}`);
   if (it.source === 'image') lines.push('_(נקרא מתוך תמונה)_');
-  lines.push('', `↩️ ענה על ההודעה: *טופל*${it.dateISO ? ' או *ליומן*' : ''}`);
+  lines.push('', `↩️ ענה על ההודעה: ${(it.dateISO || it.date) ? '*ליומן* או ' : ''}*טופל*`);
   return lines.join('\n');
 }
 
-function open() { return _load().filter(x => !x.done); }
+/**
+ * Still waiting on him: not done, not dismissed, and not stale — the event
+ * has not passed (its day ended), and an undated item is under STALE_DAYS old.
+ */
+function _live(x) {
+  if (x.done) return false;
+  const now = Date.now();
+  const day = x.date || (x.dateISO && x.dateISO.slice(0, 10));
+  if (day) return new Date(`${day}T23:59:00+03:00`).getTime() >= now;
+  return now - x.ts < STALE_DAYS * 86400000;
+}
+function open() { return _load().filter(_live); }
 function recent(n = 30) { return _load().slice(0, n); }
 function find(id) { return _load().find(x => x.id === id) || null; }
 
-function markDone(id) {
+function markDone(id, how = 'done') {
   const l = _load(); const x = l.find(i => i.id === id);
   if (!x) return false;
-  x.done = true; x.doneAt = Date.now(); _save(l);
+  x.done = true; x.doneAt = Date.now(); x.doneHow = how; _save(l);
   return true;
+}
+
+/** "נקה הכל" — everything open is closed at once. */
+function clearAll() {
+  const l = _load(); let n = 0;
+  for (const x of l) if (_live(x)) { x.done = true; x.doneAt = Date.now(); x.doneHow = 'cleared'; n++; }
+  _save(l);
+  return n;
+}
+
+/**
+ * "לא מהקבוצה הזו" — some groups are personal by the rule (not a news list)
+ * but every "come to the protest" there is not a request to him.
+ */
+function mute(id) {
+  const l = _load(); const x = l.find(i => i.id === id);
+  if (!x) return null;
+  const mu = _muted();
+  mu.ids = mu.ids || []; mu.names = mu.names || [];
+  if (x.chatId && !mu.ids.includes(x.chatId)) mu.ids.push(x.chatId);
+  if (x.group && !mu.names.includes(x.group)) mu.names.push(x.group);
+  try { fs.writeFileSync(MUTE_FILE, JSON.stringify(mu, null, 1)); } catch (_) {}
+  let n = 0;
+  for (const i of l) if (!i.done && i.group === x.group) { i.done = true; i.doneAt = Date.now(); i.doneHow = 'muted'; n++; }
+  _save(l);
+  return { group: x.group, closed: n };
 }
 
 /** מוסיף ליומן גוגל. רק כשיש תאריך ושעה מדויקים — ניחוש ביומן גרוע מכלום. */
 async function toCalendar(id) {
   const l = _load(); const x = l.find(i => i.id === id);
   if (!x) throw Object.assign(new Error('הפריט לא נמצא'), { code: 'NOT_FOUND' });
-  if (!x.dateISO) throw Object.assign(new Error('אין תאריך ושעה מדויקים בהודעה'), { code: 'NO_DATE' });
+  // A day with no hour goes in as an all-day event: an invitation that gives
+  // the date but no hour is still a day he has to keep free.
+  const day = x.dateISO ? x.dateISO.slice(0, 10) : x.date;
+  if (!day) throw Object.assign(new Error('אין בהודעה תאריך — לא הוספתי כדי לא לנחש'), { code: 'NO_DATE' });
   const { google } = require('googleapis');
   const cal = google.calendar({ version: 'v3', auth: require('./calendar').getAuthClient() });
-  const [d, t] = x.dateISO.split('T');
-  const [hh, mm] = t.split(':').map(Number);
-  const endH = String((hh + 2) % 24).padStart(2, '0');
+  const p = n => String(n).padStart(2, '0');
+  const shift = (d, days) => { const t = new Date(`${d}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + days); return t.toISOString().slice(0, 10); };
+  let start, end, whenTxt;
+  if (x.dateISO) {
+    const [hh, mm] = x.dateISO.slice(11).split(':').map(Number);
+    const eh = hh + 2;
+    start = { dateTime: `${x.dateISO}:00`, timeZone: 'Asia/Jerusalem' };
+    end = { dateTime: `${eh >= 24 ? shift(day, 1) : day}T${p(eh % 24)}:${p(mm)}:00`, timeZone: 'Asia/Jerusalem' };
+    whenTxt = `${day.split('-').reverse().join('.')} ${x.dateISO.slice(11)}`;
+  } else {
+    start = { date: day }; end = { date: shift(day, 1) };
+    whenTxt = `${day.split('-').reverse().join('.')} (כל היום)`;
+  }
   const res = await cal.events.insert({
     calendarId: 'primary',
     resource: {
       summary: x.event || x.what,
       location: x.where || undefined,
-      description: `מתוך "${x.group}"${x.sender ? ` · ${x.sender}` : ''}\n${x.what}${x.deadline ? `\nלענות עד: ${x.deadline}` : ''}`,
-      start: { dateTime: `${d}T${t}:00`, timeZone: 'Asia/Jerusalem' },
-      end: { dateTime: `${d}T${endH}:${String(mm).padStart(2, '0')}:00`, timeZone: 'Asia/Jerusalem' },
+      description: `מתוך "${x.group}"${x.sender ? ` · ${x.sender}` : ''}\n${x.what}${x.when ? `\n${x.when}` : ''}${x.deadline ? `\nלענות עד: ${x.deadline}` : ''}`,
+      start, end,
     },
   });
   x.calendar = true; x.calendarAt = Date.now(); _save(l);
-  return { summary: res.data.summary, when: `${d.split('-').reverse().join('.')} ${t}` };
+  return { summary: res.data.summary, when: whenTxt };
 }
 
-module.exports = { check, format, open, recent, find, markDone, toCalendar, isPersonal };
+module.exports = { check, format, open, recent, find, markDone, clearAll, mute, toCalendar, isPersonal };
