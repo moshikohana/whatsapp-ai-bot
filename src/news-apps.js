@@ -18,7 +18,7 @@ const FILE = path.join(__dirname, '..', 'data', 'news-apps.json');
 const HEADLINES = path.join(__dirname, '..', 'data', 'broadcast', 'headlines.json');
 const KEEP_DAYS = 7;
 const MATCH_WINDOW_MS = 6 * 3600000;
-const MAX_CHECKS_PER_HOUR = 60;
+const MAX_CHECKS_PER_HOUR = 90;
 
 const STOP = new Set(('של את על עם זה זו לא כי גם אם או אבל רק כל יש אין היה היא הוא הם הן אני אנחנו ' +
   'אתה מה מי איך למה כמו עוד כבר אחרי לפני בין תחת מול אל עד שלא שהוא שהיא הזה הזאת היום אמר אמרה ' +
@@ -38,7 +38,7 @@ function _saveH(list) { try { fs.writeFileSync(HEADLINES, JSON.stringify(list, n
 // sometimes a real headline; only a real one is part of the story.
 const _GENERIC = /^(ynet|c14|כאן|כאן 11|כאן חדשות|ערוץ 14|עכשיו 14|i24news)$/i;
 // Podcasts, sport and culture channels inside the same apps are not news.
-const _SKIP = /(הסכתים|פודקאסט|פופ אפ|כדורגל|כדורסל|ליגת|מונדיאל|פיפ"א|אירוויזיון|מתכון)/;
+const _SKIP = /(הסכתים|פודקאסט|פופ אפ|כדורגל|כדורסל|ליגת|מונדיאל|פיפ"א|אירוויזיון|מתכון|מגזין חג|\| מגזין|פרויקט מיוחד|כאן גימל|כאן 88|כאן תרבות|הצטרפו לשידור החי|למתחילים:)/;
 
 /**
  * התראות חדשות מהטלפון. חוזרות פעמיים לפעמים (עדכון של אותה התראה) — נשמר פעם אחת.
@@ -64,7 +64,7 @@ function addMany(items) {
     added++;
   }
   _save(list.filter(x => x.ts >= cutoff).sort((a, b) => b.ts - a.ts).slice(0, 1500));
-  for (const it of fresh) _queue.push({ kind: 'push', id: it.id });
+  for (const it of fresh) { _queue.push({ kind: 'twin', id: it.id }); _queue.push({ kind: 'push', id: it.id }); }
   _drain();
   return added;
 }
@@ -101,6 +101,28 @@ function _overlap(a, b) {
   const x = _words(a), y = _words(b);
   let n = 0; for (const w of x) if (y.has(w)) n += w.length >= 5 ? 1.5 : 1;
   return n;
+}
+
+/**
+ * Two apps, the same story in different words: "ליברמן: היעד — מקסימום
+ * מנדטים" in ynet and "ליברמן בראיון: נתמודד לראשות הממשלה" in ערוץ 14
+ * share two words. Word overlap alone left almost every row with one app.
+ */
+async function _sameApps(a, b) {
+  const hk = Math.floor(Date.now() / 3600000);
+  if (hk !== _hourKey) { _hourKey = hk; _checks = 0; }
+  if (_checks >= MAX_CHECKS_PER_HOUR) return false;
+  _checks++;
+  const r = await require('./claude').classifyJSON(`התראה א:
+"${a}"
+
+התראה ב:
+"${b}"`, {
+    system: 'שתי התראות מאפליקציות חדשות. האם הן מדווחות על אותה ידיעה — אותו אירוע או אותה אמירה, גם אם בניסוח אחר או עם פרטים נוספים? ' +
+      'לא מספיק אותו נושא כללי. החזר JSON בלבד: {"same": true|false}',
+    maxTokens: 30, model: 'claude-haiku-4-5-20251001',
+  });
+  return !!(r && r.same === true);
 }
 
 async function _same(headline, quote, text) {
@@ -179,6 +201,23 @@ async function _drain() {
   _busy = true;
   const job = _queue.shift();
   try {
+    if (job.kind === 'twin') {
+      // Which earlier push, from any app, is this same story? The row in the
+      // table is the story; each app's first push on it is its time.
+      const all = _load();
+      const p = all.find(x => x.id === job.id);
+      if (!p || p.story) return;
+      const cands = all.filter(x => x.id !== p.id && !x.skip && x.ts <= p.ts && p.ts - x.ts < 3 * 3600000)
+        .map(x => ({ x, n: _overlap(x.text, p.text) })).filter(c => c.n >= 2).sort((a, b) => b.n - a.n).slice(0, 3);
+      let story = null;
+      for (const c of cands) {
+        if (c.n >= 4.5 || (c.x.source !== p.source && await _sameApps(c.x.text, p.text))) { story = c.x.story || c.x.id; break; }
+      }
+      const l2 = _load(); const pp = l2.find(x => x.id === p.id);
+      if (pp) { pp.story = story || pp.id; _save(l2); }
+      if (story) logger.info(`📲 ${p.source} = same story as earlier push: "${p.text.substring(0, 40)}"`);
+      return;
+    }
     if (job.kind === 'push') {
       const all = _load();
       const p = all.find(x => x.id === job.id);
@@ -258,6 +297,64 @@ function stories(hours = 24, limit = 15) {
     .slice(0, limit);
 }
 
+/**
+ * הכותרות האחרונות — האפליקציות בלבד, החדשה למעלה.
+ * לכל סיפור: מתי כל אפליקציה שלחה, ומה היא כתבה. "ראשון" רק כשיותר
+ * מאפליקציה אחת שלחה — סיפור שרק אחת שלחה אינו ניצחון של אף אחת.
+ */
+function latest(hours = 12, limit = 20) {
+  const since = Date.now() - hours * 3600000;
+  // _SKIP again: items stored before a word was added to it.
+  const pushes = _load().filter(x => !x.skip && !_SKIP.test(x.text) && x.ts >= since).sort((a, b) => a.ts - b.ts);
+  const out = [];
+  for (const p of pushes) {
+    // The story the model linked it to; words only for pushes it has not seen.
+    const s = p.story
+      ? (p.story === p.id ? null : out.find(st => st.members.some(m => m.id === p.story || m.story === p.story)))
+      : out.find(st => Math.abs(st.last - p.ts) < 3 * 3600000 && st.members.some(m => _overlap(m.text, p.text) >= 3.5));
+    if (s) { s.members.push(p); s.last = Math.max(s.last, p.ts); }
+    else out.push({ members: [p], last: p.ts });
+  }
+  return out.map(st => {
+    const apps = {}, texts = {};
+    for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) { apps[m.source] = m.ts; texts[m.source] = m.text.substring(0, 160); }
+    const order = Object.entries(apps).sort((a, b) => a[1] - b[1]);
+    return {
+      title: order.length ? texts[order[0][0]] : st.members[0].text.substring(0, 160),
+      apps, texts,
+      first: order.length > 1 ? order[0][0] : null,
+      last: st.last,
+    };
+  }).sort((a, b) => b.last - a.last).slice(0, limit);
+}
+
+/**
+ * האפליקציות זו מול זו: בכמה סיפורים משותפים כל אחת הייתה ראשונה, ובכמה
+ * דקות בממוצע היא איחרה אחרי הראשונה כשלא הייתה.
+ */
+function duel(hours = 24) {
+  const out = {};
+  const since = Date.now() - hours * 3600000;
+  for (const p of _load().filter(x => !x.skip && x.ts >= since)) {
+    const s = out[p.source] || (out[p.source] = { source: p.source, pushes: 0, shared: 0, first: 0, behind: [], lastTs: 0 });
+    s.pushes++; s.lastTs = Math.max(s.lastTs, p.ts);
+  }
+  for (const st of latest(hours, 500)) {
+    const e = Object.entries(st.apps);
+    if (e.length < 2) continue;
+    const t0 = Math.min(...e.map(x => x[1]));
+    for (const [src, t] of e) {
+      const s = out[src]; if (!s) continue;
+      s.shared++;
+      if (src === st.first) s.first++; else s.behind.push(Math.round((t - t0) / 60000));
+    }
+  }
+  return Object.values(out).map(s => ({
+    source: s.source, pushes: s.pushes, shared: s.shared, first: s.first, lastTs: s.lastTs,
+    avgBehindMin: s.behind.length ? Math.round(s.behind.reduce((a, b) => a + b, 0) / s.behind.length) : null,
+  }));
+}
+
 /** לכל אפליקציה: בכמה סיפורים הרדיו הקדים אותה, ובכמה דקות בממוצע. */
 function stats(days = 7) {
   const since = Date.now() - days * 86400000;
@@ -280,4 +377,11 @@ function idle() {
   return new Promise(r => { const t = setInterval(() => { if (!_busy && !_queue.length) { clearInterval(t); r(); } }, 100); });
 }
 
-module.exports = { addMany, onHeadline, recent, stats, stories, idle, tick };
+// After a restart: the last 12 hours' pushes that were never grouped.
+setTimeout(() => {
+  const since = Date.now() - 12 * 3600000;
+  for (const p of _load().filter(x => !x.skip && !x.story && x.ts >= since).sort((a, b) => a.ts - b.ts)) _queue.push({ kind: 'twin', id: p.id });
+  _drain();
+}, 30000);
+
+module.exports = { addMany, onHeadline, recent, stats, stories, latest, duel, idle, tick };
