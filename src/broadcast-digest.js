@@ -146,6 +146,14 @@ async function analyseHour({ fromTs, toTs } = {}) {
     .map(c => `[${_hhmm(c.ts)} · ${c.station}] ${c.text}`)
     .join('\n');
 
+  // What he was already told in the last hours. A story running all
+  // morning came back as a "topic" every hour — the same line, again.
+  const earlier = _loadDigests().filter(d => d.from < from && d.from >= from - 4 * 3600000)
+    .flatMap(d => (d.topics || []).map(t => `• ${t.title} — ${t.summary}`)).slice(0, 20);
+  const avoid = earlier.length
+    ? `\n\nנושאים שכבר דווחו לו בשעות הקודמות — אל תחזור עליהם. אם יש בנושא כזה התפתחות חדשה של ממש, כלול אותו עם title שמתחיל ב"עדכון:" ו-summary שאומר רק מה חדש:\n${earlier.join('\n')}`
+    : '';
+
   const claude = require('./claude');
   // 2600 truncated the JSON mid-array every time and the parse then failed —
   // the errors landed at character 3949, 4273, 4404. Hebrew costs roughly two
@@ -155,7 +163,7 @@ async function analyseHour({ fromTs, toTs } = {}) {
   // radio for a limit set here.
   const result = await claude.classifyJSON(
     `תמלולי רדיו מהשעה האחרונה (${_hhmm(from)}–${_hhmm(to)}):\n\n${body}\n\n` +
-    `הגבל ל-4 נושאים ו-4 ציטוטים לכל היותר, ושמור על summary של משפט אחד.`,
+    `הגבל ל-4 נושאים ו-4 ציטוטים לכל היותר, ושמור על summary של משפט אחד.` + avoid,
     { system: SYSTEM, maxTokens: 6000 }
   );
   if (!result) {
@@ -214,6 +222,16 @@ async function analyseHour({ fromTs, toTs } = {}) {
   return digest;
 }
 
+/** המהדורה של השעה העגולה, מצורפת לתקציר שלפניה. */
+function setBulletin(id, bulletin) {
+  const list = _loadDigests();
+  const d = list.find(x => x.id === id);
+  if (!d) return null;
+  d.bulletin = bulletin;
+  _saveDigests(list);
+  return d;
+}
+
 function recentDigests(n = 24) {
   return _loadDigests().slice(0, n);
 }
@@ -270,10 +288,14 @@ function formatDigest(d) {
       lines.push(`"${q.text}"`);
     }
   }
-  if (!d.topics?.length && !d.quotes?.length) lines.push('', '_שעה שקטה — לא נאמר משהו שדורש אותך._');
+  // The round-hour bulletin: only what is new (see news-bulletins).
+  if (d.bulletin) lines.push(...require('./news-bulletins').formatForDigest(d.bulletin));
+  if (!d.topics?.length && !d.quotes?.length && !(d.bulletin && (d.bulletin.headlines || []).some(h => h.status !== 'repeat'))) {
+    lines.push('', '_שעה שקטה — לא נאמר משהו שדורש אותך._');
+  }
   return lines.join('\n');
 }
 
 module.exports = {
-  recordChunk, chunksBetween, analyseHour, recentDigests, recentChunks, prune, formatDigest,
+  recordChunk, chunksBetween, analyseHour, recentDigests, recentChunks, prune, formatDigest, setBulletin,
 };

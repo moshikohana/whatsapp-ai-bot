@@ -24,11 +24,14 @@ const STATIONS = [
   { id: 'glz', name: 'גלי צה"ל', url: 'https://glzwizzlv.bynetcdn.com/glz_mp3' },
   { id: '103fm', name: '103FM', url: 'https://cdn.cybercdn.live/103FM/Live/icecast.audio' },
   { id: 'glglz', name: 'גלגלצ', url: 'https://glzwizzlv.bynetcdn.com/glglz_mp3' },
+  // Kan's own servers refuse this server (TLS alert); the StreamTheWorld relay
+  // plays — checked 12.9 with a transcribed sample of the live programme.
+  { id: 'kanbet', name: 'כאן ב', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/KAN_BET.mp3' },
 ];
 
 const DEFAULTS = {
   enabled: false,
-  stations: ['glz', '103fm'],
+  stations: ['glz', '103fm', 'kanbet'],
   intervalMin: 4,        // how often each station is sampled
   chunkSec: 55,          // how much audio per sample
   activeFrom: 6,         // Israel hours — outside this window we don't spend

@@ -8392,6 +8392,8 @@ setInterval(async () => {
 // 14:00–15:00 should mean that, and this bot restarts often enough that an
 // uptime-relative schedule would drift into meaningless windows.
 let _digestHour = null;
+// 🗞️ The round-hour bulletins — four minutes from each news station.
+try { require('./src/news-bulletins').start(); } catch (e) { logger.warn('news-bulletins: ' + e.message); }
 setInterval(async () => {
   try {
     if (!profile.jobEnabled('broadcast-monitor')) return;
@@ -8403,12 +8405,16 @@ setInterval(async () => {
     const il = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
     const hourKey = `${il.toDateString()}-${il.getHours()}`;
     if (_digestHour === hourKey) return;
-    // A few minutes past the hour, so the window it covers is already complete.
-    if (il.getMinutes() < 3) return;
+    // A few minutes past the hour, so the window it covers is already complete —
+    // and the round-hour bulletin (4 minutes of audio from each station) is in.
+    if (il.getMinutes() < 6) return;
+    const to = new Date(now); to.setMinutes(0, 0, 0);
+    const nb = require('./src/news-bulletins');
+    const bulletin = nb.forHour(to.getTime());
+    if (!bulletin && il.getMinutes() < 12) return;
     _digestHour = hourKey;
 
     const bd = require('./src/broadcast-digest');
-    const to = new Date(now); to.setMinutes(0, 0, 0);
     const from = new Date(to.getTime() - 60 * 60 * 1000);
     // _digestHour lives in memory, so every restart treated the hour as not
     // yet done — on 10.9 the 09:00–10:00 digest was analysed and pushed to his
@@ -8419,10 +8425,12 @@ setInterval(async () => {
     catch (err) { logger.warn("broadcast digest: " + (err.code || err.message)); }
     bd.prune();
     if (!d) return;
+    if (bulletin) { d.bulletin = bulletin; bd.setBulletin(d.id, bulletin); }
 
     // Only worth interrupting him when there is something in it. A quiet hour
     // is still stored and visible in the app, but it does not buzz the phone.
-    if (!(d.topics || []).length && !(d.quotes || []).length) return;
+    const freshNews = bulletin ? (bulletin.headlines || []).filter(h => h.status !== 'repeat').length : 0;
+    if (!(d.topics || []).length && !(d.quotes || []).length && !freshNews) return;
     try {
       require('./src/jarvis-api').pushAlert({
         title: `📻 מה נאמר בשידור · ${d.label}`,
