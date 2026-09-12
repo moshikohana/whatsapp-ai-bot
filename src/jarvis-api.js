@@ -512,8 +512,12 @@ function attach(app, deps = {}) {
       if (entry && entry.count <= 1) {
         return res.status(400).json({ error: `ל-${name} יש ייחוס אחד בלבד — מחיקה תבטל את הזיהוי לגמרי.` });
       }
+      // The photo list is the newest part of the vectors — the same photo
+      // is further along there. Deleting by the photo's own index removed
+      // an older, unrelated reference.
+      const _off = Math.max(0, ((entry && entry.count) || list.length) - list.length);
       const r = fr.removeReferenceIndex
-        ? fr.removeReferenceIndex(String(name).trim(), idx)
+        ? fr.removeReferenceIndex(String(name).trim(), _off + idx)
         : { success: false, error: 'לא נתמך' };
       res.json({ ok: !!r.success, result: r, separation: fr.separation() });
     } catch (e) {

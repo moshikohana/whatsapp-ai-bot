@@ -4147,21 +4147,24 @@ client.on('message_create', async (msg) => {
                   // he actually looks at, and it was the one saying "שי" under
                   // a picture with two girls boxed.
                   const _ambG = matches.ambiguous || [];
-                  const _ambCands = [...new Set(_ambG.flatMap(a => a.between))];
+                  const _found = matches.map(m => m.name);
+                  const _ambCands = [...new Set(_ambG.flatMap(a => a.between))].filter(n => !_found.includes(n));
                   const _ambTxt = _ambG.length
-                    ? `\n🟠 ועוד ${_ambG.length} פרצוף שלא שויך — קרוב מדי בין ${_ambCands.join(' / ')}` +
-                      `\n↩️ מי זה? ענה על ההודעה הזו: ${_ambCands.map(n => '*' + n + '*').join(' / ')} / *אף אחת*`
+                    ? `\n🟠 ועוד ${_ambG.length} פרצוף (במסגרת *הכתומה המקווקוות*) שלא שויך` +
+                      (_ambCands.length
+                        ? `\n↩️ *רק על הפרצוף בכתום* — זו ${_ambCands.map(n => '*' + n + '*').join(' / ')}? ענה על ההודעה הזו בשם, או *אף אחת*`
+                        : '')
                     : '';
                   let _gSent = null;
                   const _gTok = _askToken();
-                  const _gT = _ambG.length ? _gTok.text : '';
+                  const _gT = _ambG.length && _ambCands.length ? _gTok.text : '';
                   if (markedBuf) {
                     const gm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'result.jpg');
                     _gSent = await msg.reply(gm, null, { caption: `🟢 זוהה: *${allNames}*${_ambTxt}` + _gT + BOT_MARKER });
                   } else {
                     _gSent = await msg.reply(`🟢 זוהה: *${allNames}*${_ambTxt}` + _gT + BOT_MARKER);
                   }
-                  if (_ambG.length) _rememberAsk(_gSent, { imageBuffer, faceIndex: _ambG[0].faceIndex, candidates: _ambCands, groupName, checkTs: null, at: Date.now(), token: _gTok.seq });
+                  if (_ambG.length && _ambCands.length) _rememberAsk(_gSent, { imageBuffer, faceIndex: _ambG[0].faceIndex, candidates: _ambCands, found: _found, groupName, checkTs: null, at: Date.now(), token: _gTok.seq });
                 } catch (e) { console.warn(`face group-reply failed: ${e.message?.substring(0, 60)}`); }
                 // Then notify owner DM — also best-effort.
                 try {
@@ -4317,6 +4320,11 @@ client.on('message_create', async (msg) => {
           const _none = /^(אף אחת|אף אחד|לא|אחר|אחרת|לא היא|לא אף אחת)$/.test(_t);
           const _known = require('./src/face-archive').people().map(p => p.name);
           const _name = _known.find(n => _t === n || _t === 'זו ' + n || _t === 'זאת ' + n || _t === 'כן ' + n) || (/^(כן|נכון)$/.test(_t) && _ask.candidates.length === 1 ? _ask.candidates[0] : null);
+          if (_name && (_ask.found || []).includes(_name)) {
+            try { await msg.reply(`⚠️ *${_name}* כבר זוהתה בתמונה הזו (במסגרת הירוקה). השאלה הייתה על הפרצוף *בכתום* — מישהי אחרת. לא שמרתי כלום.\nאם זו ${_ask.candidates.map(n => '*' + n + '*').join(' / ')} — ענה בשם; אחרת *אף אחת*.` + BOT_MARKER); } catch (_) {}
+            logger.info(`🤔 face answer: "${_t}" — already found in the photo, not learned`);
+            return;
+          }
           if (_none || _name) {
             for (const [k, v] of _faceAsks) if (v === _ask) _faceAsks.delete(k);
             let _out;

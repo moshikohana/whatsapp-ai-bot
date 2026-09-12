@@ -1058,13 +1058,20 @@ function removeReferenceIndex(name, index) {
   if (index < 0 || index >= descs.length) {
     return { success: false, error: `אין ייחוס מספר ${index + 1} (יש ${descs.length})` };
   }
+  // The saved photos began after the first references (מיה: 14 vectors,
+  // 8 photos) — the photos are the newest ones, so their index is offset.
+  let archIndex = -1;
+  try {
+    const n = require('./face-archive').referenceCount(name);
+    archIndex = index - (descs.length - n);
+  } catch (_) {}
   descs.splice(index, 1);
   saveConfig(config);
 
   let photoRemoved = false;
   try {
     const arch = require('./face-archive');
-    if (arch.removeReferenceAt) photoRemoved = arch.removeReferenceAt(name, index);
+    if (arch.removeReferenceAt && archIndex >= 0) photoRemoved = arch.removeReferenceAt(name, archIndex);
   } catch (_) {}
 
   logger.info(`🗑️ removeReferenceIndex "${name}": dropped #${index + 1} (${descs.length} left)`);
