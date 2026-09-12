@@ -71,7 +71,7 @@ async function runHour(hourTs, fromDisk = false) {
     { system: SYSTEM, maxTokens: 2000 }
   );
   // Sport still slipped through the prompt (a windsurfing medal at 18:00, 12.9).
-  const SPORT = /(מדליי|אליפות|אולימפ|גמר|ליגה|ליגת|כדורגל|כדורסל|טניס|גלישת רוח|שחייה|ג'ודו|נבחרת|שער|ניצחון על)/;
+  const SPORT = /(פרמייר|ליג(?![א-ת])|קבוצתו|קבוצתה|יורוליג|מדליי|אליפות|אולימפ|גמר|ליגה|ליגת|כדורגל|כדורסל|טניס|גלישת רוח|שחייה|ג'ודו|נבחרת|שער|ניצחון על)/;
   const all = Array.isArray(r && r.headlines) ? r.headlines.filter(h => h && h.text && !SPORT.test(h.text)) : [];
   const b = {
     hourTs, label: _hhmm(hourTs), stations: heard.map(h => h.station), ts: Date.now(),
