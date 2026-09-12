@@ -39,11 +39,13 @@ const SYSTEM = `אתה עורך חדשות. לפניך תמלול של תחיל�
 async function _captureAll() {
   const bm = require('./broadcast-monitor');
   const stations = bm.STATIONS.filter(s => BULLETIN_STATIONS.includes(s.id));
+  logger.info('🗞️ bulletin: capturing ' + stations.map(s => s.name).join(', '));
   const results = await Promise.all(stations.map(async st => {
     const f = await bm.captureChunk(st.url, CAPTURE_SEC);
-    if (!f) return null;
+    if (!f) { logger.warn('🗞️ bulletin: no audio from ' + st.name); return null; }
     try {
       const text = await bm.transcribe(f);
+      logger.info('🗞️ bulletin: ' + st.name + ' → ' + (text || '').length + ' chars');
       if (!text) return null;
       // The bulletin is transcript like any other: searchable, and in the digest.
       try { require('./broadcast-digest').recordChunk({ station: st.name, text }); } catch (_) {}
@@ -54,8 +56,12 @@ async function _captureAll() {
 }
 
 /** מהדורה אחת: קליטה, תמלול, כותרות, וסימון מה חדש. */
-async function runHour(hourTs) {
-  const heard = await _captureAll();
+async function runHour(hourTs, fromDisk = false) {
+  // After a restart mid-bulletin the live audio is gone; what was recorded
+  // around the round hour (the regular samples included) is used instead.
+  const heard = fromDisk
+    ? Object.values(require('./broadcast-digest').chunksBetween(hourTs - 30000, hourTs + 8 * 60000).reduce((m, c) => { (m[c.station] = m[c.station] || { station: c.station, text: '' }).text += ' ' + c.text; return m; }, {}))
+    : await _captureAll();
   if (!heard.length) { logger.warn('🗞️ bulletin: nothing captured'); return null; }
   const prev = _load().filter(b => b.hourTs >= hourTs - LOOKBACK_MS && b.hourTs < hourTs)
     .flatMap(b => (b.headlines || []).map(h => `${_hhmm(b.hourTs)}: ${h.text}${h.update ? ` (${h.update})` : ''}`));
@@ -107,6 +113,17 @@ function formatForDigest(b) {
 let _timer = null, _running = false;
 function start() {
   if (_timer) return;
+  // A bulletin cut off by a restart: finish it from what is on disk.
+  setTimeout(async () => {
+    try {
+      const st = _state();
+      if (st.lastHour && !forHour(st.lastHour) && Date.now() - st.lastHour < 40 * 60000 && Date.now() - st.lastHour > 6 * 60000) {
+        logger.info('🗞️ bulletin: recovering ' + _hhmm(st.lastHour) + ' from the transcript');
+        _running = true; await runHour(st.lastHour, true);
+      }
+    } catch (e) { logger.warn('🗞️ bulletin recover: ' + (e.message || '').substring(0, 60)); }
+    finally { _running = false; }
+  }, 45000);
   _timer = setInterval(async () => {
     if (_running) return;
     try {

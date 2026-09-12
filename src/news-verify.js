@@ -152,8 +152,11 @@ async function check(story) {
       if (pr && pr.apps && !appSources.includes(pr.apps.source)) sources.push({ type: 'app', name: pr.apps.source, ts: pr.apps.ts, excerpt: pr.apps.excerpt });
     } catch (_) {}
     const seen = new Set(sources.map(x => `${x.type}|${x.name}`));
+    const own = new Set(appSources.map(a => String(a).trim()));
     for (const h of hits.sort((a, b) => a.ts - b.ts)) {
       const name = h.type === 'whatsapp' ? await _name(h.cid) : h.name;
+      // A reporter's own post found again in Telegram is not a second source.
+      if (own.has(String(name).trim()) || [...own].some(o => o && String(name).includes(o))) continue;
       const k = `${h.type}|${name}`;
       if (seen.has(k)) continue;
       seen.add(k);
