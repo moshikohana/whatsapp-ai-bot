@@ -337,6 +337,7 @@ async function addReference(name, imageBuffer, { force = false, chooseIndex = nu
       return {
         success: false,
         error: `הפנים בתמונה רחוקות מאוד מ-${existing.length} הייחוסים הקיימים של *${name}* — כנראה אדם אחר. אם זו באמת ${name}, שלח עם כיתוב "ייחוס ${name}!" (עם סימן קריאה) כדי לאלץ 🙏`,
+        reason: 'outlier',
         facesFound: detections.length,
       };
     }
@@ -378,6 +379,7 @@ async function addReference(name, imageBuffer, { force = false, chooseIndex = nu
       return {
         success: false,
         error: `הפנים האלה דומות יותר ל-*${otherName}* מאשר ל-*${name}* (${bestOther.toFixed(2)} מול ${bestOwn.toFixed(2)}) — כנראה בחרת את הפרצוף הלא נכון. בדוק את המספר, או שלח עם "!" בסוף כדי לאלץ.`,
+        reason: 'closer', other: otherName,
         facesFound: detections.length,
       };
     }

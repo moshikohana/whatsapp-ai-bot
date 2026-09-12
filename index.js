@@ -4317,6 +4317,8 @@ client.on('message_create', async (msg) => {
         }
         if (_ask) {
           const _t = msg.body.trim().replace(/[.!]/g, '');
+          // "מיה!" — he is sure: past the "looks more like her sister" guard.
+          const _force = /!\s*$/.test(msg.body.trim());
           const _none = /^(אף אחת|אף אחד|לא|אחר|אחרת|לא היא|לא אף אחת)$/.test(_t);
           const _known = require('./src/face-archive').people().map(p => p.name);
           const _name = _known.find(n => _t === n || _t === 'זו ' + n || _t === 'זאת ' + n || _t === 'כן ' + n) || (/^(כן|נכון)$/.test(_t) && _ask.candidates.length === 1 ? _ask.candidates[0] : null);
@@ -4326,18 +4328,25 @@ client.on('message_create', async (msg) => {
             return;
           }
           if (_none || _name) {
-            for (const [k, v] of _faceAsks) if (v === _ask) _faceAsks.delete(k);
-            let _out;
+            let _out, _settled = true;
             if (_name) {
               const _fr = require('./src/face-recognition');
-              const _r = await _fr.addReference(_name, _ask.imageBuffer, { chooseIndex: _ask.faceIndex });
+              const _r = await _fr.addReference(_name, _ask.imageBuffer, { chooseIndex: _ask.faceIndex, force: _force });
               if (_r && _r.success) {
                 require('./src/album').add({ name: _name, buffer: _ask.imageBuffer, group: _ask.groupName, source: 'confirm' }).catch(() => {});
-                _out = `✅ *${_name}* — נשמרה כתמונת ייחוס (${_fr.getReferenceCount(_name)} סה"כ) ונוספה לאלבום שלה.`;
-              } else _out = `❌ לא הצלחתי לשמור: ${(_r && (_r.error || _r.message)) || 'שגיאה'}`;
+                _out = `✅ *${_name}* — נשמרה כתמונת ייחוס (${_fr.getReferenceCount(_name)} סה"כ) ונוספה לאלבום שלה.` +
+                  (_force ? `\n⚠️ היא דמתה יותר לתמונות של אחותה — ייתכן שאחת מהן שמורה בשם הלא נכון. כדאי לעבור עליהן באפליקציה.` : '');
+              } else {
+                // Refused — the question stays open, to be answered again with "!".
+                _settled = false;
+                _out = _r && _r.reason === 'closer'
+                  ? `⚠️ *לא שמרתי:* הפרצוף הזה דומה יותר לתמונות של *${_r.other}* מאשר של *${_name}*.\nאם אתה בטוח שזו ${_name} — ענה על אותה הודעה *${_name}!* (עם סימן קריאה) ואשמור בכל זאת.`
+                  : `❌ לא הצלחתי לשמור: ${(_r && (_r.error || _r.message)) || 'שגיאה'}`;
+              }
             } else _out = '👍 סומן — זה לא אף אחת מהן. לא נלמד כלום.';
-            // Settled either way: out of "לא זוהה" in the app.
-            if (_ask.checkTs) { try { require('./src/face-archive').removeChecks({ ts: _ask.checkTs }); } catch (_) {} }
+            if (_settled) for (const [k, v] of _faceAsks) if (v === _ask) _faceAsks.delete(k);
+            // Settled: out of "לא זוהה" in the app. Refused is not settled.
+            if (_settled && _ask.checkTs) { try { require('./src/face-archive').removeChecks({ ts: _ask.checkTs }); } catch (_) {} }
             try { await msg.reply(_out + BOT_MARKER); } catch (_) {}
             logger.info(`🤔 face answer: "${_t}" → ${_name || 'none'} (by ${_how || 'reply'})`);
             return;
