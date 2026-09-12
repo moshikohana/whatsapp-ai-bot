@@ -707,8 +707,17 @@ function attach(app, deps = {}) {
     const { id, text } = req.body || {};
     if (!deps.videoAudio) return res.status(503).json({ error: 'לא זמין' });
     if (!require('./videos').find(String(id || ''))) return res.status(404).json({ error: 'הסרטון לא נמצא' });
-    deps.videoAudio(String(id), !!text).catch(e => logger.warn('video audio: ' + (e.message || '').substring(0, 60)));
-    res.json({ ok: true });
+    const jobs = require('./jobs');
+    const etaSec = deps.videoEta ? deps.videoEta(String(id), !!text) : null;
+    const job = jobs.create('video-audio', text ? 'תמלול + MP3 לוואטסאפ' : 'MP3 לוואטסאפ', etaSec);
+    deps.videoAudio(String(id), !!text, job).catch(e => logger.warn('video audio: ' + (e.message || '').substring(0, 60)));
+    res.json({ ok: true, job, etaSec });
+  });
+  // The progress of a long action (see jobs.js) — the app polls it.
+  app.get('/api/jarvis/jobs', guard, (req, res) => {
+    const j = require('./jobs').get(String(req.query.id || ''));
+    if (!j) return res.status(404).json({ error: 'לא נמצא' });
+    res.json({ ok: true, ...j });
   });
   app.get('/api/jarvis/videos', guard, (req, res) => {
     const v = require('./videos');

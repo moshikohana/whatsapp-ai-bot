@@ -169,7 +169,7 @@ async function toMp3(id) {
  * Whisper takes up to 25MB. Speech at 16kHz mono 32kbps is ~14MB an hour;
  * longer videos are cut into 20-minute pieces and joined back.
  */
-async function transcribe(id, transcribeAudio) {
+async function transcribe(id, transcribeAudio, onProgress = null) {
   const p = _pending.get(id);
   const src = p ? p.file : (() => { const v = _load().find(x => x.id === id); return v ? path.join(DIR, v.file) : null; })();
   if (!src || !fs.existsSync(src)) throw new Error('הסרטון כבר לא ממתין');
@@ -179,10 +179,12 @@ async function transcribe(id, transcribeAudio) {
   const parts = fs.readdirSync(TMP).filter(f => f.startsWith(`${id}-stt-`)).sort();
   const texts = [];
   try {
-    for (const f of parts) {
+    for (const [i, f] of parts.entries()) {
+      if (onProgress) try { onProgress(i, parts.length); } catch (_) {}
       const t = await transcribeAudio(fs.readFileSync(path.join(TMP, f)), 'audio/mpeg', f);
       if (t) texts.push(t);
     }
+    if (onProgress) try { onProgress(parts.length, parts.length); } catch (_) {}
   } finally {
     for (const f of parts) { try { fs.unlinkSync(path.join(TMP, f)); } catch (_) {} }
   }

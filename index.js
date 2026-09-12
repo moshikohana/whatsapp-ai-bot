@@ -115,7 +115,10 @@ const _jidNames = new Map();    // JID -> name cache (avoid repeat lookups)
 let _msgCacheDirty = false;
 // 📞 The call with Boti: reads his private chats (who is waiting for an
 // answer) through the same client, and rings the phone at the daily time.
-require('./src/call-brief').init({ client: () => client, owner: () => OWNER_ID });
+require('./src/call-brief').init({
+  client: () => client, owner: () => OWNER_ID,
+  send: async (text) => botSend(await client.getChatById(OWNER_ID), text),
+});
 
 // ✅ 'אומת במקור נוסף' reads the same groups cache.
 setImmediate(() => require('./src/news-verify').setGroupSource(require('./src/news-prior')._groupSource()));
@@ -1634,7 +1637,8 @@ app.use(express.json({ limit: '1mb' }));            // JARVIS posts JSON bodies
 try {
   require('./src/jarvis-api').attach(app, {
     botName: () => botName,
-    videoAudio: (id, withText) => _sendVideoAudio(id, withText),
+    videoAudio: (id, withText, jobId) => _sendVideoAudio(id, withText, jobId),
+    videoEta: (id, withText) => { const v = require('./src/videos').find(id); return _videoEta(v && v.duration, withText); },
     // Commands run through route() rather than a parallel implementation, so
     // JARVIS inherits the entire command surface. route() writes some of its
     // output through botSend(chat, …) instead of returning it, so it gets a
@@ -3904,25 +3908,42 @@ let _lastAttention = null;
  * 🎧 A saved video → MP3 (and, if asked, the transcript) into his WhatsApp.
  * The app's videos folder asks for this; the video already sits on the server.
  */
-async function _sendVideoAudio(id, withText = false) {
+/** זמן משוער, בשניות: המרה ~1/40 מהאורך, תמלול ~1/25 מהאורך, ומשלוחים. */
+function _videoEta(durationSec, withText) {
+  const d = Math.max(durationSec || 30, 5);
+  return Math.round(4 + d / 40 + 3 + (withText ? 3 + d / 25 : 0));
+}
+
+async function _sendVideoAudio(id, withText = false, jobId = null) {
   const vids = require('./src/videos');
+  const jobs = require('./src/jobs');
   const v = vids.find(id);
   if (!v) throw new Error('הסרטון לא נמצא');
-  const oc = await client.getChatById(OWNER_ID);
-  const { MessageMedia } = require('whatsapp-web.js');
-  const stamp = new Date(v.ts).toLocaleString('sv-SE', { timeZone: 'Asia/Jerusalem' }).slice(0, 16).replace(' ', '-').replace(':', '');
-  const f = await vids.toMp3(id);
+  const eta = _videoEta(v.duration, withText);
+  const t0 = Date.now();
+  const left = () => Math.max(1, eta - (Date.now() - t0) / 1000);
   try {
-    const buf = fs.readFileSync(f);
-    if (buf.length > 95 * 1024 * 1024) throw new Error('ה-MP3 גדול מדי לוואטסאפ');
-    const name = `סרטון-${stamp}.mp3`;
-    await oc.sendMessage(new MessageMedia('audio/mpeg', buf.toString('base64'), name), { sendMediaAsDocument: true, caption: `🎧 ${name}` + BOT_MARKER });
-  } finally { try { fs.unlinkSync(f); } catch (_) {} }
-  if (withText) {
-    const tr = await vids.transcribe(id, transcribeAudio);
-    await botSend(oc, tr ? `📝 *תמלול*${v.caption ? ` — ${v.caption.substring(0, 60)}` : ''}\n\n${tr}` : '📝 לא נשמע דיבור בסרטון.');
-  }
-  return true;
+    const oc = await client.getChatById(OWNER_ID);
+    const { MessageMedia } = require('whatsapp-web.js');
+    const stamp = new Date(v.ts).toLocaleString('sv-SE', { timeZone: 'Asia/Jerusalem' }).slice(0, 16).replace(' ', '-').replace(':', '');
+    jobs.update(jobId, { stage: '🎧 ממיר ל-MP3…', pct: 5, etaSec: left() });
+    const f = await vids.toMp3(id);
+    try {
+      const buf = fs.readFileSync(f);
+      if (buf.length > 95 * 1024 * 1024) throw new Error('ה-MP3 גדול מדי לוואטסאפ');
+      const name = `סרטון-${stamp}.mp3`;
+      jobs.update(jobId, { stage: '📤 שולח את ה-MP3 לוואטסאפ…', pct: withText ? 30 : 70, etaSec: left() });
+      await oc.sendMessage(new MessageMedia('audio/mpeg', buf.toString('base64'), name), { sendMediaAsDocument: true, caption: `🎧 ${name}` + BOT_MARKER });
+    } finally { try { fs.unlinkSync(f); } catch (_) {} }
+    if (withText) {
+      jobs.update(jobId, { stage: '📝 מתמלל…', pct: 40, etaSec: left() });
+      const tr = await vids.transcribe(id, transcribeAudio, (i, n) => jobs.update(jobId, { stage: n > 1 ? `📝 מתמלל — חלק ${Math.min(i + 1, n)} מתוך ${n}…` : '📝 מתמלל…', pct: 40 + 50 * (i / Math.max(n, 1)), etaSec: left() }));
+      jobs.update(jobId, { stage: '📤 שולח את התמלול…', pct: 95, etaSec: 1 });
+      await botSend(oc, tr ? `📝 *תמלול*${v.caption ? ` — ${v.caption.substring(0, 60)}` : ''}\n\n${tr}` : '📝 לא נשמע דיבור בסרטון.');
+    }
+    jobs.done(jobId, withText ? '✅ ה-MP3 והתמלול נשלחו לוואטסאפ' : '✅ ה-MP3 נשלח לוואטסאפ');
+    return true;
+  } catch (e) { jobs.fail(jobId, e.message); throw e; }
 }
 
 // 🎬 The open "what to do with the video" question.
@@ -3998,7 +4019,8 @@ async function _tryVideoChoice(text) {
     }
   })().catch(e => logger.warn('video choice: ' + (e.message || '').substring(0, 60)));
   const what = [choice.save && 'שומר', choice.mp3 && 'מכין MP3', choice.text && 'מתמלל'].filter(Boolean).join(', ');
-  return `⏳ ${what}${ids.length > 1 ? ` (${ids.length} סרטונים)` : ''}… ${choice.mp3 || choice.text ? 'הקובץ יגיע לכאן בוואטסאפ.' : ''}`.trim();
+  const secs = ids.reduce((a, id) => { const p = vids.getPending(id); return a + (p ? _videoEta(p.info && p.info.duration, choice.text) : 20); }, 0);
+  return `⏳ ${what}${ids.length > 1 ? ` (${ids.length} סרטונים)` : ''}… ${choice.mp3 || choice.text ? `זה ייקח כ-${secs < 60 ? secs + ' שניות' : Math.round(secs / 60) + ' דקות'}, והקובץ יגיע לכאן בוואטסאפ.` : ''}`.trim();
 }
 client.on('message_create', async (msg) => {
   // Feed the zombie watchdog — any event here proves listeners are alive

@@ -131,9 +131,16 @@ async function _unanswered(since) {
             const arr = c.msgs && c.msgs.getModelsArray ? c.msgs.getModelsArray() : [];
             const m = arr[arr.length - 1];
             const name = c.formattedTitle || c.name || (c.contact && (c.contact.name || c.contact.pushname)) || '';
+            // Newer chats carry a LID, not a number — the store can map it
+            // back. Without it "תתקשר לתמיר" opened a broken WhatsApp link.
+            let pn = null;
+            try {
+              if (/@c\.us$/.test(id)) pn = id.split('@')[0];
+              else if (S.LidUtils && S.LidUtils.getPhoneNumber) { const w = S.LidUtils.getPhoneNumber(c.id); pn = w ? (w.user || String(w._serialized || '').split('@')[0]) : null; }
+            } catch (_) {}
             out.push(m
-              ? { id, name, t: (m.t || c.t || 0) * 1000, unread: c.unreadCount || 0, fromMe: !!(m.id && m.id.fromMe), type: m.type, body: String(m.body || '').slice(0, 200) }
-              : { id, name, t, unread: c.unreadCount || 0, fromMe: !(c.unreadCount > 0), type: null, body: '' });
+              ? { id, name, pn, t: (m.t || c.t || 0) * 1000, unread: c.unreadCount || 0, fromMe: !!(m.id && m.id.fromMe), type: m.type, body: String(m.body || '').slice(0, 200) }
+              : { id, name, pn, t, unread: c.unreadCount || 0, fromMe: !(c.unreadCount > 0), type: null, body: '' });
           } catch (_) {}
         }
         return out;
@@ -146,7 +153,7 @@ async function _unanswered(since) {
       if (own.has(c.id) || c.fromMe || c.t < since) continue;
       const kind = { ptt: 'הודעה קולית', audio: 'הקלטה', image: 'תמונה', video: 'סרטון', document: 'קובץ', sticker: 'מדבקה', call_log: 'שיחה' }[c.type] || null;
       out.push({
-        chatId: c.id, phone: c.id.endsWith('@c.us') ? c.id.split('@')[0] : null,
+        chatId: c.id, phone: c.pn || (c.id.endsWith('@c.us') ? c.id.split('@')[0] : null),
         name: c.name || 'איש קשר', unread: c.unread, time: _hm(c.t), ts: c.t,
         last: kind ? `[${kind}]${c.body && c.type !== 'ptt' ? ' ' + c.body.substring(0, 150) : ''}` : c.body,
       });
@@ -187,6 +194,8 @@ function _missed(list, since) {
 // ── The script ───────────────────────────────────────────────────────
 const SCRIPT_SYSTEM = `אתה בוטי, העוזר האישי של מושיקו, ואתה מתקשר אליו בשיחה קולית קצרה. לפניך כל מה שאספת מאז השיחה הקודמת.
 כתוב תסריט דיבור בעברית מדוברת, חמה וקצרה — כמו עוזר אישי טוב בטלפון. משפטים קצרים. בלי אימוג'י, בלי כוכביות, בלי רשימות.
+שעות — בדיוק כפי שהן בחומר, בספרות (למשל 16:09). אל תמיר לבד ל"בשמונה בערב".
+ידיעה שהופיעה כבר קודם — אמור "זה כבר עלה ב..." ולא "שמעת", כי אתה לא יודע מה הוא שמע.
 סדר ובחירה:
 1. פתיחה של משפט אחד (ברכה לפי השעה, ומה פרק הזמן).
 2. חדשות: רק אחת או שתיים — החזקות ביותר (כמה ערוצים, מבזק, פוליטיקה וביטחון, מה שקשור לח"כ אריאל קלנר). אם ידיעה כבר הייתה ידועה קודם, אמור את זה במילה.
@@ -256,11 +265,17 @@ function done(id) {
 
 const ASK_SYSTEM = `אתה בוטי בשיחה קולית עם מושיקו. כבר הקראת לו תדריך, ולפניך כל החומר שממנו הוא נכתב, והשיחה עד עכשיו.
 ענה על מה שהוא אמר או שאל — בעברית מדוברת, קצר: משפט עד שלושה. בלי אימוג'י ובלי רשימות. אם השאלה על פרט — תן את הפרט המדויק מהחומר (מי, מה נכתב, מתי, איפה).
+שעות בספרות, בדיוק כמו בחומר (16:09). הזיהוי הקולי טועה לפעמים ("אבא" במקום "הבא") — אם זה נשמע כמו בקשה להמשיך, action=next.
+אם הוא טוען שאמרת משהו — בדוק בשיחה עד עכשיו. אל תתנצל על משהו שלא אמרת; הסבר בנחמדות מה כן אמרת.
+אתה כן יכול לשלוח לו דברים לוואטסאפ ולפתוח כתבות — השתמש בפעולות. אל תגיד שאינך יכול.
 אם אין לך את זה בחומר — אמור בכנות שאין לך, והצע מה כן יש.
 פעולות שאתה יכול לבצע כשהוא מבקש במפורש:
  calendar — הכנסת פריט "דורש התייחסות" ליומן (ref = id הפריט)
  done — סימון פריט "דורש התייחסות" כטופל (ref = id)
- open_chat — פתיחת הצ'אט בוואטסאפ עם מי שכתב לו (ref = chatId)
+ open_chat — פתיחת הצ'אט בוואטסאפ עם מי שכתב לו (ref = chatId, או השם כפי שנאמר)
+ call — להתקשר למישהו בטלפון ("תתקשר ל...", "חייג ל...") (ref = chatId אם הוא ברשימת האנשים, אחרת השם)
+ send_whatsapp — לשלוח לו לוואטסאפ את הידיעה עם הפרטים והקישורים ("תשלח לי", "שלח קישור") (ref = id הידיעה)
+ open_article — לפתוח את הכתבה עצמה בטלפון ("פתח את הכתבה") (ref = id הידיעה)
  next — להמשיך לנושא הבא בתדריך;  repeat — לחזור על הנושא האחרון;  end — לסיים את השיחה
 החזר JSON בלבד: {"say":"מה לענות","action":"calendar|done|open_chat|next|repeat|end|null","ref":"מזהה או null"}`;
 
@@ -287,10 +302,31 @@ async function ask(id, question, segmentIndex = null) {
       else { att.markDone(refId); }
     } catch (e) { out.say = e.code === 'NO_DATE' ? 'אין בהזמנה תאריך מדויק, אז לא הכנסתי כדי לא לנחש.' : 'לא הצלחתי לבצע את זה עכשיו.'; out.action = null; }
   }
-  if (out.action === 'open_chat') {
-    const p = (b.raw.people || []).find(x => x.chatId === out.ref) || (b.raw.people || [])[0];
+  if (out.action === 'open_chat' || out.action === 'call') {
+    const ref = String(out.ref || '');
+    const p = (b.raw.people || []).find(x => x.chatId === ref || (ref && (x.name.includes(ref) || ref.includes(x.name.split(' ')[0]))))
+      || (b.raw.people || [])[0];
     out.phone = p ? p.phone : null;
+    // The name, so the phone can look it up in contacts when there is no number.
+    out.name = p ? p.name : (ref || null);
+    const missed = (b.raw.missedCalls || []).find(m => ref && (m.text.includes(ref) || m.title.includes(ref)));
+    if (!out.name && missed) out.name = missed.text || missed.title;
   }
+  if (out.action === 'send_whatsapp') {
+    try {
+      const sid = out.ref || (cur && cur.kind === 'news' ? cur.ref : null) || (b.raw.news[0] && b.raw.news[0].id);
+      const st = sid && require('./news-apps').story(sid);
+      if (st && _deps.send) {
+        const hm = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+        const lines = [`📰 *${st.title}*`, ''];
+        for (const m of st.members) lines.push(`• *${m.source}* ${hm(m.ts)} — ${m.full || m.text}${m.link ? `\n  ${m.link}` : ''}`);
+        lines.push('', '_נשלח מהשיחה עם בוטי. באפליקציה: בית ← לחיצה על הידיעה ← "פתח בכתבה"._');
+        await _deps.send(lines.join('\n'));
+        out.sent = true;
+      } else { out.say = 'לא מצאתי את הידיעה כדי לשלוח אותה.'; out.action = null; }
+    } catch (e) { out.say = 'לא הצלחתי לשלוח לוואטסאפ עכשיו.'; out.action = null; }
+  }
+  if (out.action === 'open_article') out.ref = out.ref || (cur && cur.kind === 'news' ? cur.ref : null);
   b.history.push({ he: question, boti: out.say });
   try { fs.writeFileSync(LAST, JSON.stringify(b)); } catch (_) {}
   return out;
