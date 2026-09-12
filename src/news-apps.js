@@ -320,6 +320,8 @@ function latest(hours = 12, limit = 20) {
     for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) { apps[m.source] = m.ts; texts[m.source] = m.text.substring(0, 160); }
     const order = Object.entries(apps).sort((a, b) => a[1] - b[1]);
     return {
+      id: st.members[0].id,
+      memberIds: st.members.map(m => m.id),
       title: order.length ? texts[order[0][0]] : st.members[0].text.substring(0, 160),
       apps, texts,
       first: order.length > 1 ? order[0][0] : null,
@@ -406,4 +408,9 @@ setTimeout(() => {
   _drain();
 }, 30000);
 
-module.exports = { addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick };
+/** התראות בטווח זמן — לבדיקה "האם כבר דווח". */
+function pushesBetween(from, to) {
+  return _load().filter(x => !x.skip && x.ts >= from && x.ts <= to);
+}
+
+module.exports = { addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, overlap: _overlap };

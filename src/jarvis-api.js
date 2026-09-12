@@ -752,7 +752,7 @@ function attach(app, deps = {}) {
   app.get('/api/jarvis/news-compare', guard, (req, res) => {
     try {
       const na = require('./news-apps');
-      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7), stories: na.stories(24, 15), latest: na.latest(24, 40), hot: na.hot(12, 12), duel: na.duel(24) });
+      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7), stories: na.stories(24, 15), latest: na.latest(24, 40), hot: require('./news-prior').attach(na.hot(12, 12)), duel: na.duel(24) });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }
@@ -1004,6 +1004,16 @@ function attach(app, deps = {}) {
   });
 
   // יומן הבדיקות — כל תמונה שהבוט הסתכל עליה, כולל כשלא מצא כלום.
+  // Delete from 'נבדקו לאחרונה': one photo (ts) or every photo with an outcome.
+  app.post('/api/jarvis/faces/checks/remove', guard, (req, res) => {
+    const { ts, outcomes } = req.body || {};
+    const ok = ['nofaces', 'nomatch', 'candidate', 'ambiguous', 'match'];
+    const r = require('./face-archive').removeChecks({
+      ts: ts != null ? Number(ts) : null,
+      outcomes: Array.isArray(outcomes) ? outcomes.filter(o => ok.includes(o)) : null,
+    });
+    res.json({ ok: true, ...r });
+  });
   app.get('/api/jarvis/faces/checks', guard, (req, res) => {
     try {
       const arch = require('./face-archive');

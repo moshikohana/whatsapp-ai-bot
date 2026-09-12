@@ -277,6 +277,30 @@ function checks(limit = 30, withData = true) {
 }
 
 /**
+ * מחיקה מ"נבדקו לאחרונה" — תמונה אחת (ts), או כל מה שיצא בתוצאה מסוימת
+ * ("אין פנים", "לא זוהה"). הקבצים הולכים עם הרשומה: זה כל הטעם — מקום.
+ * @returns { removed, freedMB }
+ */
+function removeChecks({ ts = null, outcomes = null } = {}) {
+  const list = _loadChecks();
+  const keep = [], drop = [];
+  for (const c of list) {
+    const hit = (ts != null && c.ts === ts) || (Array.isArray(outcomes) && outcomes.includes(c.outcome));
+    (hit ? drop : keep).push(c);
+  }
+  let bytes = 0;
+  for (const d of drop) {
+    for (const f of [d.file, d.full]) {
+      if (!f) continue;
+      const p = path.join(CHECK_ROOT, f);
+      try { bytes += fs.statSync(p).size; fs.unlinkSync(p); } catch {}
+    }
+  }
+  if (drop.length) _saveChecks(keep);
+  return { removed: drop.length, freedMB: Math.round(bytes / 1024 / 1024 * 10) / 10 };
+}
+
+/**
  * התמונה בגודל מלא, לצופה. לבדיקות מלפני שהגרסה המלאה נשמרה — הממוזערת,
  * עם סימון, כדי שהאפליקציה תגיד את זה במקום להציג תמונה קטנה כאילו היא המקור.
  */
@@ -445,5 +469,5 @@ module.exports = {
   record, people, photos, totalCount,
   recordReference, references, referenceCount, removeReferenceAt,
   removePhoto, removePerson,
-  recordCheck, checks, checkStats, checkFull,
+  recordCheck, checks, checkStats, checkFull, removeChecks,
 };

@@ -113,6 +113,17 @@ const _jidNames = new Map();    // JID -> name cache (avoid repeat lookups)
 })();
 
 let _msgCacheDirty = false;
+// 🆕 "חדש או כבר ידוע" searches the groups' recent messages — the same
+// in-memory cache, and the chat name for the one it cites.
+require('./src/news-prior').setGroupSource({
+  cache: () => _msgCache,
+  name: async (cid) => {
+    if (_jidNames.get(cid)) return _jidNames.get(cid);
+    try { const c = await client.getChatById(cid); if (c?.name) { _jidNames.set(cid, c.name); return c.name; } } catch (_) {}
+    return null;
+  },
+});
+
 function _cacheGroupMsg(msg) {
   // Cache messages from BOTH groups (@g.us) AND WhatsApp channels (@newsletter).
   // wwebjs Store.Chat.get(cid) returns undefined for newsletter cids, so
