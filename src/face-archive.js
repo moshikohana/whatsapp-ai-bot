@@ -251,8 +251,16 @@ async function _confirmedAlready(buffer) {
 async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts = Date.now() }) {
   if (!buffer || !buffer.length) return null;
   // Sent again after he already said who is in it: nothing to check.
-  const known = await _confirmedAlready(buffer);
-  if (known) { logger.info(`🧹 face-checks: a photo already confirmed as ${known} — not listed again`); return null; }
+  let known = await _confirmedAlready(buffer);
+  if (!known) {
+    try {
+      const s0 = await require('sharp')(buffer).rotate().resize(16, 16, { fit: 'fill' }).greyscale().raw().toBuffer();
+      if (_isSettledSig(s0)) known = 'decided';
+    } catch {}
+  }
+  if (known) { logger.info(`🧹 face-checks: a photo already ${known === 'decided' ? 'decided on' : 'confirmed as ' + known} — not listed again`); return null; }
+  let sigArr = null;
+  try { sigArr = Array.from(await require('sharp')(buffer).rotate().resize(16, 16, { fit: 'fill' }).greyscale().raw().toBuffer()); } catch {}
   try {
     fs.mkdirSync(CHECK_ROOT, { recursive: true });
     const thumb = await _thumbOf(buffer);
@@ -270,7 +278,7 @@ async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts 
       ts, file, full,
       group: String(group || '').substring(0, 80),
       outcome, detail: String(detail || '').substring(0, 120),
-      faces,
+      faces, sig: sigArr,
     });
 
     // Trimmed by both age and count, and the files go with the entries — a
@@ -291,8 +299,17 @@ async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts 
 }
 
 function checks(limit = 30, withData = true) {
-  return _loadChecks().slice(0, limit).map(c => {
-    const out = { ts: c.ts, group: c.group, outcome: c.outcome, detail: c.detail, faces: c.faces, hasFull: !!c.full };
+  // The same photo sent four times was four entries to go through. Shown
+  // once — the newest — with how many copies; deciding on it settles all.
+  const d = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += Math.abs(x[i] - y[i]); return s / x.length; };
+  const shown = [];
+  for (const c of _loadChecks()) {
+    const twin = c.sig && shown.find(x => x.sig && d(x.sig, c.sig) < 8);
+    if (twin) { twin.copies = (twin.copies || 1) + 1; continue; }
+    shown.push({ ...c });
+  }
+  return shown.slice(0, limit).map(c => {
+    const out = { ts: c.ts, group: c.group, outcome: c.outcome, detail: c.detail, faces: c.faces, hasFull: !!c.full, copies: c.copies || 1 };
     if (withData) {
       try { out.image = fs.readFileSync(path.join(CHECK_ROOT, c.file)).toString('base64'); }
       catch { out.image = null; }
@@ -495,12 +512,29 @@ function totalCount() {
  * גם העותקים האחרים יוצאים (12.9: אישר את מיה על הספה, והעותק מ-19:00
  * נשאר "לא זוהה" — נראה כאילו האפליקציה לא התעדכנה).
  */
+// Photos he already decided on, by a 16×16 signature. The album could not
+// be the record: a confirmed photo that was already in the album (the bot's
+// own match) is not added again, so it never showed up as "confirmed", and
+// its copies stayed in "נבדקו לאחרונה" (12.9).
+const SETTLED_FILE = path.join(CHECK_ROOT, 'settled.json');
+function _loadSettled() { try { return JSON.parse(fs.readFileSync(SETTLED_FILE, 'utf8')); } catch { return []; } }
+function _isSettledSig(s0) {
+  const diff = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += Math.abs(x[i] - y[i]); return s / x.length; };
+  return _loadSettled().some(e => diff(s0, e.sig) < 8);
+}
+
 async function settleSame(buffer, { since = Date.now() - 72 * 3600000 } = {}) {
   const sharp = require('sharp');
   const sig = b => sharp(b).rotate().resize(16, 16, { fit: 'fill' }).greyscale().raw().toBuffer();
   const diff = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += Math.abs(x[i] - y[i]); return s / x.length; };
   let s0;
   try { s0 = await sig(buffer); } catch { return 0; }
+  try {
+    const list = _loadSettled().filter(e => Date.now() - e.ts < 60 * 24 * 3600000);
+    if (!list.some(e => diff(s0, e.sig) < 4)) list.push({ ts: Date.now(), sig: Array.from(s0) });
+    fs.mkdirSync(CHECK_ROOT, { recursive: true });
+    fs.writeFileSync(SETTLED_FILE, JSON.stringify(list.slice(-800)));
+  } catch {}
   // All outcomes: a copy the bot called "זוהה" stayed in the list after he
   // had confirmed the same photo (12.9, ten of 22 were copies).
   const same = [];
@@ -523,8 +557,21 @@ function checkBuffer(ts) {
   try { return fs.readFileSync(path.join(CHECK_ROOT, c.full || c.file)); } catch { return null; }
 }
 
+/** חתימות לבדיקות שנרשמו לפני שנשמרה חתימה. */
+async function backfillCheckSigs() {
+  const sharp = require('sharp');
+  const list = _loadChecks();
+  let n = 0;
+  for (const c of list) {
+    if (c.sig) continue;
+    try { c.sig = Array.from(await sharp(fs.readFileSync(path.join(CHECK_ROOT, c.full || c.file))).rotate().resize(16, 16, { fit: 'fill' }).greyscale().raw().toBuffer()); n++; } catch {}
+  }
+  if (n) _saveChecks(list);
+  return n;
+}
+
 module.exports = {
-  settleSame, checkBuffer,
+  settleSame, checkBuffer, backfillCheckSigs,
   record, people, photos, totalCount,
   recordReference, references, referenceCount, removeReferenceAt,
   removePhoto, removePerson,

@@ -371,7 +371,7 @@ function attach(app, deps = {}) {
         try { require('./face-archive').removeChecks({ ts: Number(req.body.checkTs) }); } catch (_) {}
       }
       // The same photo sent again is its own check — settled with this one.
-      if (r && r.success && (album || req.body.checkTs)) {
+      if (r && r.success) {
         await require('./face-archive').settleSame(buf).catch(() => 0);
       }
       res.json({ ok: true, result: r, total: fr.getReferenceCount(String(name).trim()) });
@@ -1143,7 +1143,10 @@ function attach(app, deps = {}) {
     try {
       const arch = require('./face-archive');
       const limit = Math.min(parseInt(req.query.limit, 10) || 20, 80);
-      res.json({ ok: true, checks: arch.checks(limit), stats: arch.checkStats() });
+      // Counted as photos, not sends — the list shows each photo once.
+      const stats = arch.checkStats();
+      stats.last24h = arch.checks(500, false).filter(c => c.ts > Date.now() - 86400000).length;
+      res.json({ ok: true, checks: arch.checks(limit), stats });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }

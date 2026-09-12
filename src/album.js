@@ -59,7 +59,14 @@ async function add({ name, buffer, group = '', confidence = null, ts = Date.now(
     if (!idx[key]) idx[key] = { name, photos: [] };
     const sig = await _sig(buffer);
     const dup = idx[key].photos.find(p => Math.abs(p.ts - ts) < DUP_WINDOW_MS && p.sig && _diff(p.sig, sig) < DUP_DIFF);
-    if (dup) return { added: false, dup: true };
+    if (dup) {
+      // Already here from the bot's own match — his word makes it confirmed.
+      if (source === 'confirm' && dup.source !== 'confirm') {
+        dup.source = 'confirm'; _save(idx);
+        logger.info(`🎞️ album: ${name} — already in, now confirmed`);
+      }
+      return { added: false, dup: true };
+    }
     if (idx[key].photos.length >= SAFETY_CAP) return { added: false, full: true };
 
     const month = _monthKey(ts);
