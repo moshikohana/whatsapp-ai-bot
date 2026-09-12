@@ -141,6 +141,8 @@ function _cacheGroupMsg(msg) {
   if (!msg.body || msg.body.length < 5) return;
   const cid = from;
   if (_blockedJids.has(cid)) return; // known blocked group — skip
+  // 📡 News channels and update groups in his scan lists feed 'חדשות' too.
+  try { require('./src/news-feed').onWhatsApp({ cid, body: msg.body, ts: (msg.timestamp || 0) * 1000 }); } catch (_) {}
 
   // Lazy name resolution — first time we see a JID, check against blocklist
   if (!_jidNames.has(cid) && _BLOCKED_GROUP_PATTERNS.length > 0) {
@@ -8392,6 +8394,8 @@ setInterval(async () => {
 // 14:00–15:00 should mean that, and this bot restarts often enough that an
 // uptime-relative schedule would drift into meaningless windows.
 let _digestHour = null;
+// 📡 WhatsApp/Telegram news channels as news sources (see news-feed).
+try { require('./src/news-feed').start(); } catch (e) { logger.warn('news-feed: ' + e.message); }
 // 🗞️ The round-hour bulletins — four minutes from each news station.
 try { require('./src/news-bulletins').start(); } catch (e) { logger.warn('news-bulletins: ' + e.message); }
 setInterval(async () => {

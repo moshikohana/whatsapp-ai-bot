@@ -18,7 +18,10 @@ const FILE = path.join(__dirname, '..', 'data', 'news-apps.json');
 const HEADLINES = path.join(__dirname, '..', 'data', 'broadcast', 'headlines.json');
 const KEEP_DAYS = 7;
 const MATCH_WINDOW_MS = 6 * 3600000;
-const MAX_CHECKS_PER_HOUR = 90;
+// Channels (news-feed) added many more items to group into stories.
+const MAX_CHECKS_PER_HOUR = 300;
+// An item from a phone news app (no via) — the app table and duel count only these.
+const _isApp = x => !x.via || x.via === 'app';
 
 const STOP = new Set(('של את על עם זה זו לא כי גם אם או אבל רק כל יש אין היה היא הוא הם הן אני אנחנו ' +
   'אתה מה מי איך למה כמו עוד כבר אחרי לפני בין תחת מול אל עד שלא שהוא שהיא הזה הזאת היום אמר אמרה ' +
@@ -50,7 +53,7 @@ function addMany(items) {
   let added = 0;
   const fresh = [];
   for (const it of items || []) {
-    const source = String(it.source || '').substring(0, 20);
+    const source = String(it.source || '').substring(0, 40);
     const title = String(it.title || '').trim();
     const body = String(it.text || '').trim();
     const text = (_GENERIC.test(title) || !title ? body : (body && !body.startsWith(title) ? `${title} — ${body}` : title)).substring(0, 400);
@@ -59,12 +62,20 @@ function addMany(items) {
     const key = `${source}|${_norm(text).substring(0, 80)}`;
     if (list.some(x => x.key === key)) continue;
     const item = { id: `${ts}-${Math.random().toString(36).slice(2, 6)}`, source, text, ts, key, skip: _SKIP.test(text) || undefined };
+    if (it.via && it.via !== 'app') {
+      item.via = it.via;
+      if (it.reporter) item.reporter = true;
+      if (it.full) item.full = String(it.full).substring(0, 1500);
+      if (it.link) item.link = String(it.link).substring(0, 200);
+    }
     list.push(item);
     if (!item.skip) fresh.push(item);
     added++;
   }
-  _save(list.filter(x => x.ts >= cutoff).sort((a, b) => b.ts - a.ts).slice(0, 1500));
-  for (const it of fresh) { _queue.push({ kind: 'twin', id: it.id }); _queue.push({ kind: 'push', id: it.id }); }
+  _save(list.filter(x => x.ts >= cutoff).sort((a, b) => b.ts - a.ts).slice(0, 5000));
+  // Radio matching (a model call per push, up to three times) is for the
+  // apps' race against the radio; channel posts only join stories.
+  for (const it of fresh) { _queue.push({ kind: 'twin', id: it.id }); if (_isApp(it)) _queue.push({ kind: 'push', id: it.id }); }
   _drain();
   return added;
 }
@@ -77,7 +88,7 @@ function addMany(items) {
 function tick() {
   const now = Date.now();
   for (const p of _load()) {
-    if (p.radio || p.skip) continue;
+    if (p.radio || p.skip || !_isApp(p)) continue;
     const age = now - p.ts;
     const due = [20, 60, 120][(p.checks || 1) - 1];
     if (due && age >= due * 60000 && age < 135 * 60000) _queue.push({ kind: 'push', id: p.id });
@@ -259,7 +270,7 @@ async function _drain() {
 
 // ── למסך ─────────────────────────────────────────────────────────
 function recent(n = 30) {
-  return _load().filter(x => !x.skip).slice(0, n)
+  return _load().filter(x => !x.skip && _isApp(x)).slice(0, n)
     .map(x => ({ id: x.id, source: x.source, text: x.text, ts: x.ts, radio: x.radio || null }));
 }
 
@@ -270,7 +281,7 @@ function recent(n = 30) {
  */
 function stories(hours = 24, limit = 15) {
   const since = Date.now() - hours * 3600000;
-  const pushes = _load().filter(x => !x.skip && x.ts >= since).sort((a, b) => a.ts - b.ts);
+  const pushes = _load().filter(x => !x.skip && x.ts >= since && _isApp(x)).sort((a, b) => a.ts - b.ts);
   const out = [];
   for (const p of pushes) {
     const s = out.find(st => Math.abs(st.last - p.ts) < 3 * 3600000 && st.members.some(m => _overlap(m.text, p.text) >= 3.5));
@@ -316,15 +327,20 @@ function latest(hours = 12, limit = 20) {
     else out.push({ members: [p], last: p.ts });
   }
   return out.map(st => {
-    const apps = {}, texts = {};
-    for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) { apps[m.source] = m.ts; texts[m.source] = m.text.substring(0, 160); }
+    const apps = {}, texts = {}, vias = {};
+    for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) { apps[m.source] = m.ts; texts[m.source] = m.text.substring(0, 160); vias[m.source] = m.via || 'app'; }
     const order = Object.entries(apps).sort((a, b) => a[1] - b[1]);
+    const appOrder = order.filter(([src]) => vias[src] === 'app');
+    const reporters = [...new Set(st.members.filter(m => m.reporter).map(m => m.source))];
+    // The headline: an app's wording when there is one (edited), else a reporter's.
+    const titleSrc = (appOrder[0] || order.find(([src]) => reporters.includes(src)) || order[0] || [null])[0];
     return {
       id: st.members[0].id,
       memberIds: st.members.map(m => m.id),
-      title: order.length ? texts[order[0][0]] : st.members[0].text.substring(0, 160),
-      apps, texts,
-      first: order.length > 1 ? order[0][0] : null,
+      title: titleSrc ? texts[titleSrc] : st.members[0].text.substring(0, 160),
+      apps, texts, vias, reporters,
+      first: appOrder.length > 1 ? appOrder[0][0] : null,
+      firstAny: order.length > 1 ? order[0][0] : null,
       firstTs: order.length ? order[0][1] : st.members[0].ts,
       count: st.members.length,
       radio: st.members.some(m => m.radio),
@@ -345,9 +361,16 @@ function hot(hours = 6, limit = 12) {
   const now = Date.now();
   return latest(hours, 300).map(s => {
     const channels = Object.keys(s.apps).length;
+    const nApps = Object.values(s.vias || {}).filter(v => v === 'app').length;
+    const nOther = channels - nApps;
     const breaking = _BREAKING.test(Object.values(s.texts).join(' '));
     const ageH = (now - s.firstTs) / 3600000;
-    const score = (channels - 1) * 4 + Math.min(s.count - channels, 3) + (breaking ? 3 : 0) + (s.radio ? 2 : 0) - ageH * 1.5;
+    const rep = (s.reporters || []).length;
+    // A single post in one WhatsApp group, no app and no reporter: rarely the
+    // story of the hour, and the groups post all day.
+    const lone = nApps === 0 && rep === 0 && nOther <= 1 ? -3 : 0;
+    const score = Math.max(nApps - 1, 0) * 4 + Math.min(nOther, 4) * 1.5 + (nApps && nOther ? 1 : 0)
+      + Math.min(s.count - channels, 3) + (breaking ? 3 : 0) + (s.radio ? 2 : 0) + (rep ? 3 : 0) + lone - ageH * 1.5;
     return { ...s, channels, breaking, score: Math.round(score * 10) / 10 };
   }).sort((a, b) => b.score - a.score).slice(0, limit);
 }
@@ -359,18 +382,18 @@ function hot(hours = 6, limit = 12) {
 function duel(hours = 24) {
   const out = {};
   const since = Date.now() - hours * 3600000;
-  for (const p of _load().filter(x => !x.skip && x.ts >= since)) {
+  for (const p of _load().filter(x => !x.skip && x.ts >= since && _isApp(x))) {
     const s = out[p.source] || (out[p.source] = { source: p.source, pushes: 0, shared: 0, first: 0, behind: [], lastTs: 0 });
     s.pushes++; s.lastTs = Math.max(s.lastTs, p.ts);
   }
   for (const st of latest(hours, 500)) {
-    const e = Object.entries(st.apps);
+    const e = Object.entries(st.apps).filter(([src]) => (st.vias || {})[src] === 'app');
     if (e.length < 2) continue;
     const t0 = Math.min(...e.map(x => x[1]));
     for (const [src, t] of e) {
       const s = out[src]; if (!s) continue;
       s.shared++;
-      if (src === st.first) s.first++; else s.behind.push(Math.round((t - t0) / 60000));
+      if (t === t0) s.first++; else s.behind.push(Math.round((t - t0) / 60000));
     }
   }
   return Object.values(out).map(s => ({
@@ -383,7 +406,7 @@ function duel(hours = 24) {
 function stats(days = 7) {
   const since = Date.now() - days * 86400000;
   const out = {};
-  for (const p of _load().filter(x => x.ts >= since && !x.skip)) {
+  for (const p of _load().filter(x => x.ts >= since && !x.skip && _isApp(x))) {
     const s = out[p.source] || (out[p.source] = { source: p.source, pushes: 0, matched: 0, radioFirst: 0, appFirst: 0, leads: [] });
     s.pushes++;
     if (p.radio) {
@@ -422,7 +445,8 @@ function story(id) {
   if (!s) return null;
   const ids = new Set(s.memberIds || []);
   const members = _load().filter(p => ids.has(p.id)).sort((a, b) => a.ts - b.ts).map(p => ({
-    id: p.id, source: p.source, ts: p.ts, text: p.text,
+    id: p.id, source: p.source, ts: p.ts, text: p.text, via: p.via || 'app',
+    full: p.full || null, link: p.link || null, reporter: !!p.reporter,
     radio: p.radio ? { station: p.radio.station || null, ts: p.radio.ts, headline: p.radio.headline || p.radio.excerpt || null, leadMin: p.radio.leadMin } : null,
   }));
   return { ...s, members };

@@ -140,7 +140,9 @@ async function check(story) {
       hits = nums.map(x => cands[x - 1]);
     }
     const sources = [];
-    for (const a of appSources.slice(1)) sources.push({ type: 'app', name: a, ts: story.apps[a] });
+    // Every other source already in the story confirms it — an app, a channel, a reporter.
+    const _t = { wa: 'whatsapp', tg: 'telegram' };
+    for (const a of appSources.slice(1)) sources.push({ type: _t[(story.vias || {})[a]] || 'app', name: a, ts: story.apps[a] });
     // What 'new or already known' found before the push is confirmation too:
     // the same event, from somewhere else, earlier.
     try {
