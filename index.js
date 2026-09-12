@@ -117,6 +117,9 @@ let _msgCacheDirty = false;
 // answer) through the same client, and rings the phone at the daily time.
 require('./src/call-brief').init({ client: () => client, owner: () => OWNER_ID });
 
+// ✅ 'אומת במקור נוסף' reads the same groups cache.
+setImmediate(() => require('./src/news-verify').setGroupSource(require('./src/news-prior')._groupSource()));
+
 // 🆕 "חדש או כבר ידוע" searches the groups' recent messages — the same
 // in-memory cache, and the chat name for the one it cites.
 require('./src/news-prior').setGroupSource({

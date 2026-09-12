@@ -25,6 +25,7 @@ const SAME_MOMENT_MS = 5 * 60000;
 
 let _groups = null;   // { cache: () => {cid: [{ts(sec), body, sender}]}, name: async cid => string }
 function setGroupSource(src) { _groups = src; }
+function _groupSource() { return _groups; }
 
 function _load() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return {}; } }
 function _save(m) {
@@ -168,4 +169,4 @@ async function _drain() {
   finally { _busy = false; }
 }
 
-module.exports = { setGroupSource, check, attach };
+module.exports = { setGroupSource, _groupSource, check, attach };
