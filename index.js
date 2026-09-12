@@ -113,6 +113,10 @@ const _jidNames = new Map();    // JID -> name cache (avoid repeat lookups)
 })();
 
 let _msgCacheDirty = false;
+// 📞 The call with Boti: reads his private chats (who is waiting for an
+// answer) through the same client, and rings the phone at the daily time.
+require('./src/call-brief').init({ client: () => client, owner: () => OWNER_ID });
+
 // 🆕 "חדש או כבר ידוע" searches the groups' recent messages — the same
 // in-memory cache, and the chat name for the one it cites.
 require('./src/news-prior').setGroupSource({
@@ -1625,6 +1629,7 @@ app.use(express.json({ limit: '1mb' }));            // JARVIS posts JSON bodies
 try {
   require('./src/jarvis-api').attach(app, {
     botName: () => botName,
+    videoAudio: (id, withText) => _sendVideoAudio(id, withText),
     // Commands run through route() rather than a parallel implementation, so
     // JARVIS inherits the entire command surface. route() writes some of its
     // output through botSend(chat, …) instead of returning it, so it gets a
@@ -3889,6 +3894,31 @@ function _seenAndMark(msgIdSerialized) {
 
 // The "דורש התייחסות" card the bot sent last — "ליומן" right after it is about it.
 let _lastAttention = null;
+
+/**
+ * 🎧 A saved video → MP3 (and, if asked, the transcript) into his WhatsApp.
+ * The app's videos folder asks for this; the video already sits on the server.
+ */
+async function _sendVideoAudio(id, withText = false) {
+  const vids = require('./src/videos');
+  const v = vids.find(id);
+  if (!v) throw new Error('הסרטון לא נמצא');
+  const oc = await client.getChatById(OWNER_ID);
+  const { MessageMedia } = require('whatsapp-web.js');
+  const stamp = new Date(v.ts).toLocaleString('sv-SE', { timeZone: 'Asia/Jerusalem' }).slice(0, 16).replace(' ', '-').replace(':', '');
+  const f = await vids.toMp3(id);
+  try {
+    const buf = fs.readFileSync(f);
+    if (buf.length > 95 * 1024 * 1024) throw new Error('ה-MP3 גדול מדי לוואטסאפ');
+    const name = `סרטון-${stamp}.mp3`;
+    await oc.sendMessage(new MessageMedia('audio/mpeg', buf.toString('base64'), name), { sendMediaAsDocument: true, caption: `🎧 ${name}` + BOT_MARKER });
+  } finally { try { fs.unlinkSync(f); } catch (_) {} }
+  if (withText) {
+    const tr = await vids.transcribe(id, transcribeAudio);
+    await botSend(oc, tr ? `📝 *תמלול*${v.caption ? ` — ${v.caption.substring(0, 60)}` : ''}\n\n${tr}` : '📝 לא נשמע דיבור בסרטון.');
+  }
+  return true;
+}
 
 // 🎬 The open "what to do with the video" question.
 let _videoMenu = null;        // { ids, at }

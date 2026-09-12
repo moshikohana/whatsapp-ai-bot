@@ -679,7 +679,37 @@ function attach(app, deps = {}) {
     res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'התמונה לא נמצאה' });
   });
 
+  // ── 📞 שיחה עם בוטי ───────────────────────────────────────────────
+  // prepare: the scan and the script (10–40s — the phone rings meanwhile).
+  app.post('/api/jarvis/call/prepare', guard, async (req, res) => {
+    try {
+      const { missed, reason } = req.body || {};
+      const b = await require('./call-brief').prepare({ missed, reason: reason === 'daily' ? 'daily' : 'manual' });
+      res.json({ ok: true, id: b.id, from: b.from, until: b.until, counts: b.counts, segments: b.segments, people: b.raw.people, attention: b.raw.attention, photos: b.raw.photos });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.post('/api/jarvis/call/ask', guard, async (req, res) => {
+    try {
+      const { id, q, seg } = req.body || {};
+      res.json({ ok: true, ...(await require('./call-brief').ask(String(id || ''), String(q || ''), Number.isInteger(seg) ? seg : null)) });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.post('/api/jarvis/call/done', guard, (req, res) => {
+    res.json({ ok: require('./call-brief').done(String((req.body || {}).id || '')) });
+  });
+  app.get('/api/jarvis/call/settings', guard, (req, res) => res.json({ ok: true, ...require('./call-brief').settings() }));
+  app.post('/api/jarvis/call/settings', guard, (req, res) => res.json({ ok: true, ...require('./call-brief').settings(req.body || {}) }));
+
   // ── 🎬 סרטונים לצפייה מאוחרת ────────────────────────────────────
+  // A saved video → MP3 (and transcript) into his WhatsApp. Answers at once;
+  // the file follows in WhatsApp when it is ready.
+  app.post('/api/jarvis/videos/audio', guard, (req, res) => {
+    const { id, text } = req.body || {};
+    if (!deps.videoAudio) return res.status(503).json({ error: 'לא זמין' });
+    if (!require('./videos').find(String(id || ''))) return res.status(404).json({ error: 'הסרטון לא נמצא' });
+    deps.videoAudio(String(id), !!text).catch(e => logger.warn('video audio: ' + (e.message || '').substring(0, 60)));
+    res.json({ ok: true });
+  });
   app.get('/api/jarvis/videos', guard, (req, res) => {
     const v = require('./videos');
     res.json({
