@@ -1866,7 +1866,24 @@ function _logFaceCheck(buffer, groupName, outcome, detail, faces) {
 // WhatsApp build ("Cannot read properties of null (reading 'serialize')"),
 // and his answer went unanswered. The quoted id on the message itself works.
 const _faceAsks = new Map();
+// msg.reply() here comes back without an id (12.9: every ask was "noid"),
+// so the quoted id of his answer had nothing to match. Each question now
+// carries an invisible number: read back from the quoted text, or from the
+// question itself when it shows up in message_create.
+let _askSeq = 0;
+const _ZW = { 0: '\u200B', 1: '\u200C' };
+function _askToken() {
+  _askSeq = (_askSeq % 4095) + 1;
+  return { seq: _askSeq, text: '\u2060' + _askSeq.toString(2).split('').map(b => _ZW[b]).join('') + '\u2060' };
+}
+function _askFromText(t) {
+  const m = String(t || '').match(/\u2060([\u200B\u200C]{1,12})\u2060/);
+  if (!m) return null;
+  const seq = parseInt([...m[1]].map(c => c === '\u200C' ? '1' : '0').join(''), 2);
+  return _faceAsks.get('tok:' + seq) || null;
+}
 function _rememberAsk(sent, ask) {
+  if (ask.token) _faceAsks.set('tok:' + ask.token, ask);
   // Kept even when the sent message came back without an id — the answer
   // can still be matched by group and time.
   const keys = [];
@@ -4069,6 +4086,12 @@ client.on('message_create', async (msg) => {
     // Supports: @g.us (modern groups), @g (legacy groups), @newsletter (WhatsApp Channels)
     const _isGroupJid = (jid) => jid && (jid.endsWith('@g.us') || jid.endsWith('@g') || jid.includes('@newsletter') || jid.includes('@newsle'));
     const _isGroupMsg = _isGroupJid(msg.from) || _isGroupJid(msg.to);
+    if (msg.fromMe && _isGroupMsg && msg.body && msg.body.includes('\u2060') && msg.id && msg.id.id) {
+      const _mid = msg.id.id, _body = msg.body;
+      // The reply may still be on its way back to _rememberAsk — look again shortly.
+      const _bind = () => { const a = _askFromText(_body); if (a) { _faceAsks.set(_mid, a); return true; } return false; };
+      if (!_bind()) setTimeout(_bind, 4000);
+    }
     if (msg.fromMe && (msg.type === 'image' || msg.type === 'album') && _isGroupMsg) {
       // Guard: skip the bot's own result photos to prevent infinite loop
       if (msg.body?.includes(BOT_MARKER)) return;
@@ -4130,13 +4153,15 @@ client.on('message_create', async (msg) => {
                       `\n↩️ מי זה? ענה על ההודעה הזו: ${_ambCands.map(n => '*' + n + '*').join(' / ')} / *אף אחת*`
                     : '';
                   let _gSent = null;
+                  const _gTok = _askToken();
+                  const _gT = _ambG.length ? _gTok.text : '';
                   if (markedBuf) {
                     const gm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'result.jpg');
-                    _gSent = await msg.reply(gm, null, { caption: `🟢 זוהה: *${allNames}*${_ambTxt}` + BOT_MARKER });
+                    _gSent = await msg.reply(gm, null, { caption: `🟢 זוהה: *${allNames}*${_ambTxt}` + _gT + BOT_MARKER });
                   } else {
-                    _gSent = await msg.reply(`🟢 זוהה: *${allNames}*${_ambTxt}` + BOT_MARKER);
+                    _gSent = await msg.reply(`🟢 זוהה: *${allNames}*${_ambTxt}` + _gT + BOT_MARKER);
                   }
-                  if (_ambG.length) _rememberAsk(_gSent, { imageBuffer, faceIndex: _ambG[0].faceIndex, candidates: _ambCands, groupName, checkTs: null, at: Date.now() });
+                  if (_ambG.length) _rememberAsk(_gSent, { imageBuffer, faceIndex: _ambG[0].faceIndex, candidates: _ambCands, groupName, checkTs: null, at: Date.now(), token: _gTok.seq });
                 } catch (e) { console.warn(`face group-reply failed: ${e.message?.substring(0, 60)}`); }
                 // Then notify owner DM — also best-effort.
                 try {
@@ -4213,6 +4238,7 @@ client.on('message_create', async (msg) => {
                 const _at = _where ? `הפרצוף ${_where} (מסומן)` : 'הפרצוף המסומן';
                 const _cands = amb ? amb.between.slice(0, 3) : nm ? [nm.name] : [];
                 const _pct = amb && amb.scores ? ' (' + amb.between.map((n, i) => `${n} ${amb.scores[i]}%`).join(' · ') + ')' : '';
+                const _tok = _askToken();
                 const noMatchMsg = amb
                   ? `🤔 *לא בטוח:* ${_at} — ${amb.between.join(' או ')}?${_pct}\nההפרש קטן מדי כדי להחליט לבד.\n↩️ ענה על ההודעה הזו: ${_cands.map(n => '*' + n + '*').join(' / ')} / *אף אחת*`
                   : nm
@@ -4222,11 +4248,11 @@ client.on('message_create', async (msg) => {
                   let _sent = null;
                   if (_marked) {
                     const { MessageMedia: _MM2 } = require('whatsapp-web.js');
-                    _sent = await msg.reply(new _MM2('image/jpeg', _marked.toString('base64'), 'which.jpg'), null, { caption: noMatchMsg + BOT_MARKER });
+                    _sent = await msg.reply(new _MM2('image/jpeg', _marked.toString('base64'), 'which.jpg'), null, { caption: noMatchMsg + (_cands.length ? _tok.text : '') + BOT_MARKER });
                   } else {
-                    _sent = await msg.reply(noMatchMsg + BOT_MARKER);
+                    _sent = await msg.reply(noMatchMsg + (_cands.length ? _tok.text : '') + BOT_MARKER);
                   }
-                  if (_cands.length) _rememberAsk(_sent, { imageBuffer, faceIndex: _idx, candidates: _cands, groupName, checkTs: _ckTs, at: Date.now() });
+                  if (_cands.length) _rememberAsk(_sent, { imageBuffer, faceIndex: _idx, candidates: _cands, groupName, checkTs: _ckTs, at: Date.now(), token: _tok.seq });
                 } catch (e) { /* silent */ }
                 // A near miss is the most useful photo there is: the bot came
                 // close and could not commit. Archived under that name as a
@@ -4262,6 +4288,8 @@ client.on('message_create', async (msg) => {
       try {
         const _qid = msg._data?.quotedStanzaID || msg._data?.quotedMsg?.id?.id || null;
         let _ask = _qid ? _faceAsks.get(_qid) : null;
+        let _how = _ask ? 'id' : '';
+        if (!_ask) { _ask = _askFromText(msg._data?.quotedMsg?.caption || msg._data?.quotedMsg?.body); if (_ask) _how = 'token'; }
         let _qkey = _qid;
         if (!_ask) {
           try { const _q = await msg.getQuotedMessage(); if (_q && _q.id) { _qkey = _q.id._serialized; _ask = _faceAsks.get(_qkey) || _faceAsks.get(_q.id.id); } } catch (_) {}
@@ -4280,6 +4308,7 @@ client.on('message_create', async (msg) => {
             const _recent = [...new Set(_faceAsks.values())].filter(v => Date.now() - v.at < 30 * 60000 && (!_gName || v.groupName === _gName));
             // By the quoted text when it names the candidates; else the newest.
             _ask = _recent.filter(v => v.candidates.every(n => !_qt || _qt.includes(n))).pop() || _recent.pop() || null;
+            if (_ask) _how = 'newest';
           }
           if (!_ask) logger.info(`🤔 face answer: no ask for quoted ${String(_qid || '')} · asks=${_faceAsks.size} · group="${_gName}" · qkeys=${Object.keys(msg._data?.quotedMsg || {}).slice(0, 8).join(',')}`);
         }
@@ -4302,7 +4331,7 @@ client.on('message_create', async (msg) => {
             // Settled either way: out of "לא זוהה" in the app.
             if (_ask.checkTs) { try { require('./src/face-archive').removeChecks({ ts: _ask.checkTs }); } catch (_) {} }
             try { await msg.reply(_out + BOT_MARKER); } catch (_) {}
-            logger.info(`🤔 face answer: "${_t}" → ${_name || 'none'}`);
+            logger.info(`🤔 face answer: "${_t}" → ${_name || 'none'} (by ${_how || 'reply'})`);
             return;
           }
         }
