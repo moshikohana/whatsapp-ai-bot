@@ -169,4 +169,7 @@ async function _drain() {
   finally { _busy = false; }
 }
 
-module.exports = { setGroupSource, _groupSource, check, attach };
+/** Cached results only — for long lists, where checking everything would cost a call per story. */
+function peek(stories) { const m = _load(); for (const s of stories) if (m[s.id]) s.prior = m[s.id]; return stories; }
+
+module.exports = { setGroupSource, _groupSource, check, attach, peek };

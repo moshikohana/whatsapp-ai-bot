@@ -779,6 +779,52 @@ function attach(app, deps = {}) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }
   });
+  // 📰 חדשות בהרחבה: all stories of the last hours (cached checks only), one
+  // story in full, and a short "what is known" written from all its sources.
+  app.get('/api/jarvis/news/stories', guard, (req, res) => {
+    try {
+      const na = require('./news-apps');
+      const hours = Math.min(Math.max(parseInt(req.query.hours, 10) || 24, 1), 48);
+      const list = na.latest(hours, 120);
+      require('./news-prior').peek(list); require('./news-verify').peek(list);
+      const hotIds = new Set(na.hot(12, 12).map(s => s.id));
+      res.json({ ok: true, stories: list.map(s => ({ ...s, hot: hotIds.has(s.id) })) });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.get('/api/jarvis/news/story', guard, (req, res) => {
+    try {
+      const s = require('./news-apps').story(String(req.query.id || ''));
+      if (!s) return res.status(404).json({ error: 'הידיעה לא נמצאה' });
+      // Checked now if it never was: opening a story is asking about it.
+      require('./news-prior').attach([s]); require('./news-verify').attach([s]);
+      res.json({ ok: true, story: s });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  const _briefCache = new Map();
+  app.post('/api/jarvis/news/story/brief', guard, async (req, res) => {
+    try {
+      const s = require('./news-apps').story(String((req.body || {}).id || ''));
+      if (!s) return res.status(404).json({ error: 'הידיעה לא נמצאה' });
+      require('./news-prior').peek([s]); require('./news-verify').peek([s]);
+      const key = `${s.id}|${s.members.length}|${(s.verify && s.verify.sources || []).length}`;
+      if (_briefCache.has(key)) return res.json({ ok: true, text: _briefCache.get(key) });
+      const material = {
+        pushes: s.members.map(m => ({ app: m.source, time: new Date(m.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' }), text: m.text, radio: m.radio })),
+        alsoReported: (s.verify && s.verify.sources) || [],
+        knownBefore: s.prior && s.prior.status === 'known' ? { radio: s.prior.radio, groups: s.prior.groups, apps: s.prior.apps } : null,
+      };
+      const r = await require('./claude').classifyJSON(JSON.stringify(material).substring(0, 12000), {
+        system: 'אתה עורך חדשות. כתוב למושיקו בעברית פשוטה 3–5 משפטים: מה ידוע עד עכשיו על הידיעה, מי דיווח ומתי, מה אומת במקור נוסף ומה עדיין רק מפי מקור אחד, ואם יש סתירות בין המקורות. ' +
+          'בלי להמציא דבר שאינו בחומר. החזר JSON בלבד: {"text":"..."}',
+        maxTokens: 600,
+      });
+      const text = (r && r.text) || 'לא הצלחתי לסכם את הידיעה.';
+      _briefCache.set(key, text);
+      if (_briefCache.size > 200) _briefCache.delete([..._briefCache.keys()][0]);
+      res.json({ ok: true, text });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+
   app.get('/api/jarvis/news-compare', guard, (req, res) => {
     try {
       const na = require('./news-apps');

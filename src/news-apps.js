@@ -413,4 +413,19 @@ function pushesBetween(from, to) {
   return _load().filter(x => !x.skip && x.ts >= from && x.ts <= to);
 }
 
-module.exports = { addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, overlap: _overlap };
+/**
+ * ידיעה אחת במלואה — כל התראה שנשלחה עליה, מכל אפליקציה, עם הטקסט המלא,
+ * ומתי נשמעה ברדיו. זה מה שנפתח כשלוחצים על כותרת.
+ */
+function story(id) {
+  const s = latest(48, 2000).find(x => x.id === id || (x.memberIds || []).includes(id));
+  if (!s) return null;
+  const ids = new Set(s.memberIds || []);
+  const members = _load().filter(p => ids.has(p.id)).sort((a, b) => a.ts - b.ts).map(p => ({
+    id: p.id, source: p.source, ts: p.ts, text: p.text,
+    radio: p.radio ? { station: p.radio.station || null, ts: p.radio.ts, headline: p.radio.headline || p.radio.excerpt || null, leadMin: p.radio.leadMin } : null,
+  }));
+  return { ...s, members };
+}
+
+module.exports = { addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

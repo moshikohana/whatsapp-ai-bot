@@ -206,4 +206,6 @@ async function _drain() {
   finally { _busy = false; }
 }
 
-module.exports = { setGroupSource, check, attach };
+function peek(stories) { const m = _load(); for (const s of stories) if (m[s.id]) s.verify = m[s.id]; return stories; }
+
+module.exports = { setGroupSource, check, attach, peek };
