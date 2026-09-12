@@ -316,6 +316,17 @@ async function addReference(name, imageBuffer, { force = false, chooseIndex = nu
     config.referenceDescriptors[name] = [];
   }
 
+  // ── Already there: the same face, saved twice ───────────────────
+  {
+    const own = config.referenceDescriptors[name] || [];
+    for (const refArr of own) {
+      if (faceapi.euclideanDistance(chosen.descriptor, new Float32Array(refArr)) < 0.06) {
+        logger.info(`📸 addReference "${name}": the same face is already a reference — not added again`);
+        return { success: true, duplicate: true, facesAdded: 0, totalReferences: own.length };
+      }
+    }
+  }
+
   // ── Contamination guard ───────────────────────────────────────
   // If this person already has references, make sure the new face actually
   // resembles them. A face that's far from EVERY existing reference is very

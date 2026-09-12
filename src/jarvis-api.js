@@ -751,6 +751,10 @@ function attach(app, deps = {}) {
   });
   // The video itself. sendFile answers Range requests, so the player can
   // start before the whole file arrives and seek without re-downloading.
+  app.post('/api/jarvis/news/radio/recheck', guard, async (req, res) => {
+    try { res.json({ ok: true, ...(await require('./news-apps').recheckRadio(Number((req.body || {}).hours) || 24)) }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
+  });
   // 📻 What the radio said around a moment: the transcript, and the audio when kept.
   app.get('/api/jarvis/radio/clip', guard, (req, res) => {
     try {

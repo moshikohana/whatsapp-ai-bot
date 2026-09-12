@@ -136,6 +136,32 @@ async function _sameApps(a, b) {
   return !!(r && r.same === true);
 }
 
+// "פיצוצים נשמעו באיראן" was linked to Kan Bet's "נשיא איראן: אין מלחמה עם
+// סעודיה" (12.9, 21:01) — same two countries, a different story — and the app
+// said "הרדיו הקדים ב-8 דק׳". Haiku waved it through; the claim is shown to
+// him as fact, so the last word is Sonnet's, with that exact case as the
+// example of "no".
+const RADIO_JUDGE = 'אתה עורך חדשות קפדן. יש התראה מאפליקציית חדשות וטקסט מהרדיו. האם הרדיו דיווח על אותה ידיעה בדיוק — ' +
+  'אותו אירוע ספציפי (מה קרה, למי, איפה), או אותה אמירה של אותו אדם? אותן מדינות, אותם אנשים או אותו נושא — זה לא מספיק. ' +
+  'דוגמה ל"לא": התראה "פיצוצים נשמעו באיראן, במקביל: התרעות בסעודיה" מול רדיו "נשיא איראן אמר שארצו אינה במלחמה עם סעודיה" — אותן מדינות, ידיעה אחרת. ' +
+  'אם כן — צטט מהטקסט של הרדיו, מילה במילה, את המשפט שמדווח את הידיעה. החזר JSON בלבד: {"same": true|false, "excerpt": "המשפט" או null}';
+async function _confirmRadio(pushText, radioText) {
+  const hk = Math.floor(Date.now() / 3600000);
+  if (hk !== _hourKey) { _hourKey = hk; _checks = 0; }
+  if (_checks >= MAX_CHECKS_PER_HOUR) return null;
+  _checks++;
+  return require('./claude').classifyJSON(
+    `התראה מאפליקציית חדשות:\n"${pushText}"\n\nמהרדיו:\n"${String(radioText).substring(0, 1500)}"`,
+    { system: RADIO_JUDGE, maxTokens: 250, model: 'claude-sonnet-4-6' }
+  );
+}
+/** הציטוט באמת נמצא בתמלול — ולא משפט שהמודל ניסח בעצמו. */
+function _quoteIn(excerpt, text) {
+  const ws = String(excerpt || '').replace(/[^\u0590-\u05FFa-zA-Z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3).map(_stem);
+  if (ws.length < 3) return false;
+  return ws.filter(w => String(text).includes(w)).length / ws.length >= 0.6;
+}
+
 async function _same(headline, quote, text) {
   const hk = Math.floor(Date.now() / 3600000);
   if (hk !== _hourKey) { _hourKey = hk; _checks = 0; }
@@ -160,7 +186,7 @@ function _link(h, p) {
   const lead = Math.round((p.ts - h.ts) / 60000);   // > 0: radio was first
   const list = _load();
   const pp = list.find(x => x.id === p.id);
-  if (pp && !pp.radio) { pp.radio = { headlineId: h.id, ts: h.ts, headline: h.headline, station: h.station, leadMin: lead }; _save(list); }
+  if (pp && !pp.radio) { pp.radio = { headlineId: h.id, ts: h.ts, headline: h.headline, station: h.station, leadMin: lead }; pp.radioChecked = true; _save(list); }
   const hs = _loadH();
   const hh = hs.find(x => x.id === h.id);
   if (hh) {
@@ -186,20 +212,15 @@ async function _matchTranscript(p) {
     if (hk !== _hourKey) { _hourKey = hk; _checks = 0; }
     if (_checks >= MAX_CHECKS_PER_HOUR) return;
     _checks++;
-    const r = await require('./claude').classifyJSON(
-      `התראה מאפליקציית חדשות:\n"${p.text}"\n\nקטע מתמלול רדיו (${c.station}):\n"${c.text.substring(0, 1500)}"`,
-      {
-        system: 'האם קטע הרדיו מדבר על אותו אירוע כמו ההתראה — לא רק על אותו נושא כללי? אם כן, צטט את המשפט הרלוונטי מהתמלול. ' +
-          'החזר JSON בלבד: {"same": true|false, "excerpt": "המשפט מהתמלול או null"}',
-        maxTokens: 200, model: 'claude-haiku-4-5-20251001',
-      }
-    );
+    const r = await _confirmRadio(p.text, c.text);
     if (!r || r.same !== true) continue;
+    if (!_quoteIn(r.excerpt, c.text)) { logger.info(`📲 ${p.source} ↔ ${c.station}: quote not in the transcript — not linked`); continue; }
     const lead = Math.round((p.ts - c.ts) / 60000);   // > 0: on air before the push
     const list = _load();
     const pp = list.find(x => x.id === p.id);
     if (pp && !pp.radio) {
       pp.radio = { ts: c.ts, station: c.station, excerpt: String(r.excerpt || '').substring(0, 220), leadMin: lead, via: 'transcript' };
+      pp.radioChecked = true;
       _save(list);
       logger.info(`📲 ${p.source} ↔ ${c.station} transcript: ${lead > 0 ? `radio first by ${lead} min` : `${p.source} first by ${-lead} min`}`);
     }
@@ -239,7 +260,11 @@ async function _drain() {
         .map(h => ({ h, n: _overlap(`${h.headline} ${h.speaker || ''} ${h.quote || ''}`, p.text) }))
         .filter(c => c.n >= 3).sort((a, b) => b.n - a.n).slice(0, 2);
       for (const c of cands) {
-        if (await _same(c.h.headline, c.h.quote, p.text)) { _link(c.h, p); break; }
+        if (await _same(c.h.headline, c.h.quote, p.text)) {
+        const ok = await _confirmRadio(p.text, c.h.headline + (c.h.quote ? ' — ' + c.h.quote : ''));
+        if (ok && ok.same === true) { _link(c.h, p); break; }
+        logger.info(`📲 ${p.source} ↔ radio headline: Sonnet said no — "${c.h.headline.substring(0, 40)}"`);
+      }
       }
       // Not a headline — was it said on air at all? Radio headlines are
       // statements from interviews; app pushes are breaking news, so the two
@@ -447,9 +472,39 @@ function story(id) {
   const members = _load().filter(p => ids.has(p.id)).sort((a, b) => a.ts - b.ts).map(p => ({
     id: p.id, source: p.source, ts: p.ts, text: p.text, via: p.via || 'app',
     full: p.full || null, link: p.link || null, reporter: !!p.reporter,
-    radio: p.radio ? { station: p.radio.station || null, ts: p.radio.ts, headline: p.radio.headline || p.radio.excerpt || null, leadMin: p.radio.leadMin } : null,
+    radio: p.radio ? { station: p.radio.station || null, ts: p.radio.ts, headline: p.radio.headline || p.radio.excerpt || null, quote: p.radio.excerpt || p.radio.headline || null, leadMin: p.radio.leadMin } : null,
   }));
   return { ...s, members };
 }
 
-module.exports = { addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
+/** בודק מחדש קישורי רדיו קיימים עם השופט המחמיר; מה שלא עומד בו — יורד. */
+async function recheckRadio(hours = 24) {
+  const since = Date.now() - hours * 3600000;
+  const bd = require('./broadcast-digest');
+  let kept = 0, dropped = 0;
+  for (const p of _load().filter(x => x.radio && x.ts >= since && !x.radioChecked)) {
+    let radioText = null;
+    if (p.radio.via === 'transcript') {
+      const c = bd.chunksBetween(p.radio.ts - 2000, p.radio.ts + 2000).find(x => x.station === p.radio.station);
+      radioText = c && c.text;
+    } else radioText = p.radio.headline;
+    if (!radioText) continue;
+    const r = await _confirmRadio(p.text, radioText);
+    if (!r) break;   // out of checks this hour
+    const ok = r.same === true && (p.radio.via !== 'transcript' || _quoteIn(r.excerpt, radioText));
+    const l = _load(); const pp = l.find(x => x.id === p.id);
+    if (!pp || !pp.radio) continue;
+    if (ok) {
+      if (pp.radio.via === 'transcript' && r.excerpt) pp.radio.excerpt = String(r.excerpt).substring(0, 220);
+      pp.radioChecked = true; kept++;
+    } else {
+      logger.info(`📻 radio link dropped: ${p.source} "${p.text.substring(0, 40)}" ≠ ${p.radio.station}`);
+      pp.radioRejected = pp.radio; delete pp.radio; dropped++;
+    }
+    _save(l);
+  }
+  logger.info(`📻 radio links rechecked: ${kept} kept, ${dropped} dropped`);
+  return { kept, dropped };
+}
+
+module.exports = { recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

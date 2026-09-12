@@ -226,8 +226,33 @@ function _fullOf(buffer) {
     .jpeg({ quality: 85 }).toBuffer();
 }
 
+// Signatures of the photos he confirmed (album, source 'confirm'), cached by file.
+const _confSig = new Map();
+async function _confirmedAlready(buffer) {
+  try {
+    const sharp = require('sharp');
+    const sig = b => sharp(b).rotate().resize(16, 16, { fit: 'fill' }).greyscale().raw().toBuffer();
+    const diff = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += Math.abs(x[i] - y[i]); return s / x.length; };
+    const ALB = path.join(__dirname, '..', 'data', 'album');
+    const idx = JSON.parse(fs.readFileSync(path.join(ALB, 'index.json'), 'utf8'));
+    const since = Date.now() - 30 * 24 * 3600000;
+    const s0 = await sig(buffer);
+    for (const [name, v] of Object.entries(idx)) for (const p of v.photos || []) {
+      if (p.source !== 'confirm' || p.ts < since) continue;
+      const f = path.join(ALB, name, p.month || '', p.file);
+      let s = _confSig.get(f);
+      if (!s) { try { s = await sig(fs.readFileSync(f)); _confSig.set(f, s); } catch { continue; } }
+      if (diff(s0, s) < 8) return name;
+    }
+  } catch {}
+  return null;
+}
+
 async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts = Date.now() }) {
   if (!buffer || !buffer.length) return null;
+  // Sent again after he already said who is in it: nothing to check.
+  const known = await _confirmedAlready(buffer);
+  if (known) { logger.info(`🧹 face-checks: a photo already confirmed as ${known} — not listed again`); return null; }
   try {
     fs.mkdirSync(CHECK_ROOT, { recursive: true });
     const thumb = await _thumbOf(buffer);
@@ -476,10 +501,11 @@ async function settleSame(buffer, { since = Date.now() - 72 * 3600000 } = {}) {
   const diff = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += Math.abs(x[i] - y[i]); return s / x.length; };
   let s0;
   try { s0 = await sig(buffer); } catch { return 0; }
-  const open = ['nomatch', 'candidate', 'ambiguous', 'nofaces'];
+  // All outcomes: a copy the bot called "זוהה" stayed in the list after he
+  // had confirmed the same photo (12.9, ten of 22 were copies).
   const same = [];
   for (const c of _loadChecks()) {
-    if (c.ts < since || !open.includes(c.outcome)) continue;
+    if (c.ts < since) continue;
     try {
       const s = await sig(fs.readFileSync(path.join(CHECK_ROOT, c.full || c.file)));
       if (diff(s0, s) < 8) same.push(c.ts);
