@@ -1851,12 +1851,18 @@ const MAX_WEEKLY_PHOTOS = 50; // keep max 50 photos
  * עליה כששלחו 40 תמונות בגן ולא קרה כלום.
  */
 function _logFaceCheck(buffer, groupName, outcome, detail, faces) {
+  const ts = Date.now();
   try {
     require('./src/face-archive').recordCheck({
-      buffer, group: groupName, outcome, detail, faces,
+      buffer, group: groupName, outcome, detail, faces, ts,
     }).catch(() => {});
   } catch (_) {}
+  return ts;
 }
+
+// 🤔 The bot's "which one is it?" replies in the test group: reply id →
+// what is needed to settle it when he answers "מיה" / "שי" / "אף אחת".
+const _faceAsks = new Map();
 
 // ── 🟡 "אולי" — התאמה חלשה לילד הנכון, בצרור אחד לכל אצווה ──────
 // Below this it is noise (a random child scores 10–15%); above the group
@@ -4171,19 +4177,43 @@ client.on('message_create', async (msg) => {
                 } catch (_) {}
               } else {
                 console.log(`📷 No match in owner test photo from "${groupName}"`);
-                _logFaceCheck(
+                const amb = (matches.ambiguous || [])[0];
+                const _ckTs = _logFaceCheck(
                   imageBuffer, groupName,
                   (matches.detections || []).length ? 'nomatch' : 'nofaces',
-                  matches.nearMiss ? `הכי קרוב ל-${matches.nearMiss.name} (~${matches.nearMiss.closeness}%)` : '',
+                  amb ? `התלבט בין ${amb.between.join(' ל-')}` : matches.nearMiss ? `הכי קרוב ל-${matches.nearMiss.name} (~${matches.nearMiss.closeness}%)` : '',
                   (matches.detections || []).length
                 );
-                // Quoted reply on the photo itself so it's clear WHICH image
-                // wasn't recognized. If a face was close to a daughter, say so.
+                // Replied with the photo itself, the face in question marked —
+                // eleven photos sent at once got eleven text replies, and which
+                // "not recognized" belonged to which photo was guesswork.
                 const nm = matches.nearMiss;
-                const noMatchMsg = nm
-                  ? `🔍 לא זוהה בוודאות — אבל הכי קרוב ל-*${nm.name}* (קרבה ~${nm.closeness}%). אם זו באמת ${nm.name}, שלח עוד תמונת ייחוס שלה 💡`
-                  : `🔍 לא זוהו פנים מוכרים`;
-                try { await msg.reply(noMatchMsg + BOT_MARKER); } catch (e) { /* silent */ }
+                const _idx = amb ? amb.faceIndex : (nm ? nm.faceIndex : null);
+                let _marked = null, _where = '';
+                if (_idx != null && matches.detections && matches.detections[_idx]) {
+                  try { const _r = await require('./src/face-recognition').markFace(imageBuffer, matches.detections[_idx]); _marked = _r.buffer; _where = _r.geometry.where; } catch (_) {}
+                }
+                const _at = _where ? `הפרצוף ${_where} (מסומן)` : 'הפרצוף המסומן';
+                const _cands = amb ? amb.between.slice(0, 3) : nm ? [nm.name] : [];
+                const _pct = amb && amb.scores ? ' (' + amb.between.map((n, i) => `${n} ${amb.scores[i]}%`).join(' · ') + ')' : '';
+                const noMatchMsg = amb
+                  ? `🤔 *לא בטוח:* ${_at} — ${amb.between.join(' או ')}?${_pct}\nההפרש קטן מדי כדי להחליט לבד.\n↩️ ענה על ההודעה הזו: ${_cands.map(n => '*' + n + '*').join(' / ')} / *אף אחת*`
+                  : nm
+                    ? `🔍 *לא זוהה.* ${_at} הכי דומה ל-${nm.name} (~${nm.closeness}%).\n↩️ ענה על ההודעה הזו: *${nm.name}* אם זו היא, או *אף אחת*`
+                    : (matches.detections || []).length ? '🔍 *לא זוהו פנים מוכרים* בתמונה הזו.' : '🔍 *לא נמצאו פנים* בתמונה הזו.';
+                try {
+                  let _sent = null;
+                  if (_marked) {
+                    const { MessageMedia: _MM2 } = require('whatsapp-web.js');
+                    _sent = await msg.reply(new _MM2('image/jpeg', _marked.toString('base64'), 'which.jpg'), null, { caption: noMatchMsg + BOT_MARKER });
+                  } else {
+                    _sent = await msg.reply(noMatchMsg + BOT_MARKER);
+                  }
+                  if (_sent && _sent.id && _cands.length) {
+                    _faceAsks.set(_sent.id._serialized, { imageBuffer, faceIndex: _idx, candidates: _cands, groupName, checkTs: _ckTs, at: Date.now() });
+                    if (_faceAsks.size > 300) _faceAsks.delete([..._faceAsks.keys()][0]);
+                  }
+                } catch (e) { /* silent */ }
                 // A near miss is the most useful photo there is: the bot came
                 // close and could not commit. Archived under that name as a
                 // candidate so it can be confirmed in one tap, which is
@@ -4211,6 +4241,37 @@ client.on('message_create', async (msg) => {
       }
       }); // closes _queueFace
       return; // done — don't fall through to self-chat handler
+    }
+
+    // ── 🤔 His answer to "which one is it?" in the test group ────────
+    if (msg.fromMe && _isGroupMsg && msg.hasQuotedMsg && msg.body && !msg.body.includes(BOT_MARKER)) {
+      try {
+        const _q = await msg.getQuotedMessage();
+        const _ask = _q && _q.id && _faceAsks.get(_q.id._serialized);
+        if (_ask) {
+          const _t = msg.body.trim().replace(/[.!]/g, '');
+          const _none = /^(אף אחת|אף אחד|לא|אחר|אחרת|לא היא|לא אף אחת)$/.test(_t);
+          const _known = require('./src/face-archive').people().map(p => p.name);
+          const _name = _known.find(n => _t === n || _t === 'זו ' + n || _t === 'זאת ' + n || _t === 'כן ' + n) || (/^(כן|נכון)$/.test(_t) && _ask.candidates.length === 1 ? _ask.candidates[0] : null);
+          if (_none || _name) {
+            _faceAsks.delete(_q.id._serialized);
+            let _out;
+            if (_name) {
+              const _fr = require('./src/face-recognition');
+              const _r = await _fr.addReference(_name, _ask.imageBuffer, { chooseIndex: _ask.faceIndex });
+              if (_r && _r.success) {
+                require('./src/album').add({ name: _name, buffer: _ask.imageBuffer, group: _ask.groupName, source: 'confirm' }).catch(() => {});
+                _out = `✅ *${_name}* — נשמרה כתמונת ייחוס (${_fr.getReferenceCount(_name)} סה"כ) ונוספה לאלבום שלה.`;
+              } else _out = `❌ לא הצלחתי לשמור: ${(_r && (_r.error || _r.message)) || 'שגיאה'}`;
+            } else _out = '👍 סומן — זה לא אף אחת מהן. לא נלמד כלום.';
+            // Settled either way: out of "לא זוהה" in the app.
+            try { require('./src/face-archive').removeChecks({ ts: _ask.checkTs }); } catch (_) {}
+            try { await msg.reply(_out + BOT_MARKER); } catch (_) {}
+            logger.info(`🤔 face answer: "${_t}" → ${_name || 'none'}`);
+            return;
+          }
+        }
+      } catch (e) { logger.warn('face answer: ' + (e.message || '').substring(0, 60)); }
     }
 
     // ── Keyword alert for owner's OWN messages to groups ─────────────
