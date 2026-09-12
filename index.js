@@ -4347,6 +4347,7 @@ client.on('message_create', async (msg) => {
             if (_settled) for (const [k, v] of _faceAsks) if (v === _ask) _faceAsks.delete(k);
             // Settled: out of "לא זוהה" in the app. Refused is not settled.
             if (_settled && _ask.checkTs) { try { require('./src/face-archive').removeChecks({ ts: _ask.checkTs }); } catch (_) {} }
+            if (_settled) await require('./src/face-archive').settleSame(_ask.imageBuffer).catch(() => 0);
             try { await msg.reply(_out + BOT_MARKER); } catch (_) {}
             logger.info(`🤔 face answer: "${_t}" → ${_name || 'none'} (by ${_how || 'reply'})`);
             return;

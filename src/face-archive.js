@@ -465,7 +465,40 @@ function totalCount() {
   return Object.values(idx).reduce((s, v) => s + (v.photos || []).length, 0);
 }
 
+/**
+ * אותה תמונה שנשלחה כמה פעמים — כל שליחה היא בדיקה נפרדת. כשאחת הוכרעה,
+ * גם העותקים האחרים יוצאים (12.9: אישר את מיה על הספה, והעותק מ-19:00
+ * נשאר "לא זוהה" — נראה כאילו האפליקציה לא התעדכנה).
+ */
+async function settleSame(buffer, { since = Date.now() - 72 * 3600000 } = {}) {
+  const sharp = require('sharp');
+  const sig = b => sharp(b).rotate().resize(16, 16, { fit: 'fill' }).greyscale().raw().toBuffer();
+  const diff = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += Math.abs(x[i] - y[i]); return s / x.length; };
+  let s0;
+  try { s0 = await sig(buffer); } catch { return 0; }
+  const open = ['nomatch', 'candidate', 'ambiguous', 'nofaces'];
+  const same = [];
+  for (const c of _loadChecks()) {
+    if (c.ts < since || !open.includes(c.outcome)) continue;
+    try {
+      const s = await sig(fs.readFileSync(path.join(CHECK_ROOT, c.full || c.file)));
+      if (diff(s0, s) < 8) same.push(c.ts);
+    } catch {}
+  }
+  for (const ts of same) removeChecks({ ts });
+  if (same.length) logger.info(`🧹 face-checks: ${same.length} more cop${same.length === 1 ? 'y' : 'ies'} of the same photo settled`);
+  return same.length;
+}
+
+/** התמונה של בדיקה (המלאה אם יש) — לפני שמוחקים אותה. */
+function checkBuffer(ts) {
+  const c = _loadChecks().find(x => x.ts === ts);
+  if (!c) return null;
+  try { return fs.readFileSync(path.join(CHECK_ROOT, c.full || c.file)); } catch { return null; }
+}
+
 module.exports = {
+  settleSame, checkBuffer,
   record, people, photos, totalCount,
   recordReference, references, referenceCount, removeReferenceAt,
   removePhoto, removePerson,

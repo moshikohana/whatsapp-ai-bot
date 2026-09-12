@@ -370,6 +370,10 @@ function attach(app, deps = {}) {
       if (r && r.success && req.body.checkTs) {
         try { require('./face-archive').removeChecks({ ts: Number(req.body.checkTs) }); } catch (_) {}
       }
+      // The same photo sent again is its own check — settled with this one.
+      if (r && r.success && (album || req.body.checkTs)) {
+        await require('./face-archive').settleSame(buf).catch(() => 0);
+      }
       res.json({ ok: true, result: r, total: fr.getReferenceCount(String(name).trim()) });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
@@ -1101,14 +1105,19 @@ function attach(app, deps = {}) {
 
   // יומן הבדיקות — כל תמונה שהבוט הסתכל עליה, כולל כשלא מצא כלום.
   // Delete from 'נבדקו לאחרונה': one photo (ts) or every photo with an outcome.
-  app.post('/api/jarvis/faces/checks/remove', guard, (req, res) => {
+  app.post('/api/jarvis/faces/checks/remove', guard, async (req, res) => {
     const { ts, outcomes } = req.body || {};
     const ok = ['nofaces', 'nomatch', 'candidate', 'ambiguous', 'match'];
-    const r = require('./face-archive').removeChecks({
+    const arch = require('./face-archive');
+    // One photo settled ("זהו", ✕): its other copies go with it.
+    const buf = ts != null ? arch.checkBuffer(Number(ts)) : null;
+    const r = arch.removeChecks({
       ts: ts != null ? Number(ts) : null,
       outcomes: Array.isArray(outcomes) ? outcomes.filter(o => ok.includes(o)) : null,
     });
-    res.json({ ok: true, ...r });
+    let same = 0;
+    if (buf) same = await arch.settleSame(buf).catch(() => 0);
+    res.json({ ok: true, ...r, removed: (r.removed || 0) + same });
   });
   app.get('/api/jarvis/faces/checks', guard, (req, res) => {
     try {
