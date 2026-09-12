@@ -48,7 +48,11 @@ async function _captureAll() {
       logger.info('🗞️ bulletin: ' + st.name + ' → ' + (text || '').length + ' chars');
       if (!text) return null;
       // The bulletin is transcript like any other: searchable, and in the digest.
-      try { require('./broadcast-digest').recordChunk({ station: st.name, text }); } catch (_) {}
+      try {
+        const bd = require('./broadcast-digest');
+        const ts = Date.now();
+        bd.recordChunk({ station: st.name, text, ts, audio: bd.keepAudio(f, st.id, ts) });
+      } catch (_) {}
       return { station: st.name, text };
     } finally { try { fs.unlinkSync(f); } catch (_) {} }
   }));

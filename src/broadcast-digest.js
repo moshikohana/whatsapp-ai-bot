@@ -34,12 +34,69 @@ function _dayFile(d = new Date()) {
  * שומר קטע תמלול. נקרא מכל דגימה, גם כשאין שום מילת מפתח —
  * זו בדיוק הנקודה: מה שנזרק עד עכשיו הוא רוב החומר.
  */
-function recordChunk({ station, text, ts = Date.now() }) {
+// ── 🎧 The audio behind each transcript, for 48 hours ─────────────
+// "הרדיו הקדים ב-8 דק׳" said so, and there was nothing to press: the audio
+// was deleted as soon as it was transcribed. Now it is kept two days —
+// ~48kbps mono, a few hundred MB — so the claim can be heard.
+const AUDIO_DIR = path.join(DIR, 'audio');
+const AUDIO_KEEP_MS = 48 * 3600000;
+let _lastSweep = 0;
+function keepAudio(tmpFile, stationId, ts) {
+  if (!tmpFile) return null;
+  try {
+    fs.mkdirSync(AUDIO_DIR, { recursive: true });
+    const name = `${ts}-${String(stationId).replace(/[^a-z0-9]/gi, '')}.mp3`;
+    // Copied, not renamed: /tmp can be another filesystem.
+    fs.copyFileSync(tmpFile, path.join(AUDIO_DIR, name));
+    try { fs.unlinkSync(tmpFile); } catch {}
+    if (Date.now() - _lastSweep > 30 * 60000) {
+      _lastSweep = Date.now();
+      for (const f of fs.readdirSync(AUDIO_DIR)) {
+        const t = parseInt(f, 10);
+        if (t && Date.now() - t > AUDIO_KEEP_MS) { try { fs.unlinkSync(path.join(AUDIO_DIR, f)); } catch {} }
+      }
+    }
+    return name;
+  } catch (e) {
+    try { fs.unlinkSync(tmpFile); } catch {}
+    logger.warn('broadcast audio keep: ' + (e.message || '').substring(0, 60));
+    return null;
+  }
+}
+function audioPath(name) {
+  const n = String(name || '');
+  if (!/^\d+-[a-z0-9]+\.mp3$/i.test(n)) return null;
+  const p = path.join(AUDIO_DIR, n);
+  return fs.existsSync(p) ? p : null;
+}
+
+/**
+ * הקטע ששודר סביב רגע מסוים בתחנה: הקטע שהכי מתאים לטקסט שחיפשו (q), ואם
+ * אין — האחרון שנשמע עד אז. יחד עם הקטע שלפניו ושאחריו.
+ */
+function clipAround(station, ts, q = '') {
+  const list = chunksBetween(ts - 25 * 60000, ts + 12 * 60000)
+    .filter(c => !station || c.station === station).sort((a, b) => a.ts - b.ts);
+  if (!list.length) return null;
+  const words = String(q || '').replace(/[^\u0590-\u05FFa-zA-Z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
+  const score = c => words.reduce((s, w) => s + (c.text.includes(w) ? 1 : 0), 0);
+  let i = -1;
+  if (words.length) {
+    let best = 0;
+    list.forEach((c, k) => { const s = score(c); if (s > best || (s === best && s > 0 && Math.abs(c.ts - ts) < Math.abs(list[i].ts - ts))) { best = s; i = k; } });
+    if (best < Math.min(2, words.length)) i = -1;
+  }
+  if (i < 0) { i = list.findIndex(c => c.ts > ts + 90000); i = (i < 0 ? list.length : i) - 1; if (i < 0) i = 0; }
+  const out = c => c && { ts: c.ts, station: c.station, text: c.text, audio: !!(c.audio && audioPath(c.audio)), audioName: c.audio && audioPath(c.audio) ? c.audio : null };
+  return { chunk: out(list[i]), prev: out(list[i - 1]), next: out(list[i + 1]) };
+}
+
+function recordChunk({ station, text, ts = Date.now(), audio = null }) {
   const clean = String(text || '').trim();
   if (!clean) return false;
   try {
     fs.mkdirSync(DIR, { recursive: true });
-    fs.appendFileSync(_dayFile(ts), JSON.stringify({ ts, station, text: clean }) + '\n');
+    fs.appendFileSync(_dayFile(ts), JSON.stringify(audio ? { ts, station, text: clean, audio } : { ts, station, text: clean }) + '\n');
     return true;
   } catch (e) {
     logger.warn('broadcast-digest record: ' + (e.message || '').substring(0, 60));
@@ -297,5 +354,6 @@ function formatDigest(d) {
 }
 
 module.exports = {
+  keepAudio, audioPath, clipAround,
   recordChunk, chunksBetween, analyseHour, recentDigests, recentChunks, prune, formatDigest, setBulletin,
 };

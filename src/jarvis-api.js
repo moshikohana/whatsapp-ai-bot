@@ -751,6 +751,22 @@ function attach(app, deps = {}) {
   });
   // The video itself. sendFile answers Range requests, so the player can
   // start before the whole file arrives and seek without re-downloading.
+  // 📻 What the radio said around a moment: the transcript, and the audio when kept.
+  app.get('/api/jarvis/radio/clip', guard, (req, res) => {
+    try {
+      const ts = parseInt(req.query.ts, 10);
+      if (!ts) return res.status(400).json({ error: 'צריך זמן' });
+      const r = require('./broadcast-digest').clipAround(String(req.query.station || ''), ts, String(req.query.q || ''));
+      if (!r) return res.status(404).json({ error: 'לא נמצא תמלול מהזמן הזה' });
+      res.json({ ok: true, ...r });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
+  });
+  app.get('/api/jarvis/radio/audio', guard, (req, res) => {
+    const p = require('./broadcast-digest').audioPath(String(req.query.name || ''));
+    if (!p) return res.status(404).json({ error: 'קטע השמע כבר לא שמור' });
+    res.type('audio/mpeg');
+    res.sendFile(p);
+  });
   app.get('/api/jarvis/videos/file', guard, (req, res) => {
     const p = require('./videos').filePath(String(req.query.id || ''));
     if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'הסרטון לא נמצא' });

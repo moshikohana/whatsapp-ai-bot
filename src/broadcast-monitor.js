@@ -122,17 +122,20 @@ async function checkOnce() {
     const file = await captureChunk(st.url, c.chunkSec);
     if (!file) { logger.warn?.(`broadcast: capture failed for ${st.name}`); continue; }
     const text = await transcribe(file);
+    const _ts = Date.now();
+    let _audio = null;
+    if (text) { try { _audio = require('./broadcast-digest').keepAudio(file, st.id, _ts); } catch (_) {} }
     try { fs.unlinkSync(file); } catch {}
     if (!text) continue;
 
-    recent.push({ station: st.name, ts: Date.now(), text });
+    recent.push({ station: st.name, ts: _ts, text });
     if (recent.length > 60) recent = recent.slice(-60);
 
     // Kept on disk as well as in memory. `recent` is 60 chunks that vanish on
     // every restart, so until now the only transcript that survived was the
     // sentence around a keyword — the rest was transcribed, paid for, and
     // dropped. The hourly digest reads from the file, not from this array.
-    try { require('./broadcast-digest').recordChunk({ station: st.name, text }); } catch (_) {}
+    try { require('./broadcast-digest').recordChunk({ station: st.name, text, ts: _ts, audio: _audio }); } catch (_) {}
 
     // Checked for a headline right away, not at the next hourly digest. The
     // Ohana interview was in the transcript at 08:15 and only reached him as

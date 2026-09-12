@@ -64,11 +64,12 @@ async function _telegram(text, from) {
       logger.info(`✈️ tg search "${q}": ${(x.messages || []).length} results`);
       if (r.messages.length >= 8) break;
     }
-    const titles = {};
-    for (const ch of r.chats || []) titles[String(ch.id)] = ch.title;
+    const titles = {}, users = {};
+    for (const ch of r.chats || []) { titles[String(ch.id)] = ch.title; if (ch.username) users[String(ch.id)] = ch.username; }
     return (r.messages || []).filter(m => m.message && m.message.length > 15).map(m => {
       const pid = m.peerId && (m.peerId.channelId || m.peerId.chatId || m.peerId.userId);
-      return { type: 'telegram', name: titles[String(pid)] || 'טלגרם', ts: (m.date || 0) * 1000, text: m.message.substring(0, 800) };
+      const u = users[String(pid)];
+      return { type: 'telegram', name: titles[String(pid)] || 'טלגרם', ts: (m.date || 0) * 1000, text: m.message.substring(0, 800), link: u ? `https://t.me/${u}/${m.id}` : null };
     });
   } catch (e) { logger.warn('verify telegram: ' + (e.message || '').substring(0, 50)); return []; }
 }
@@ -160,7 +161,7 @@ async function check(story) {
       const k = `${h.type}|${name}`;
       if (seen.has(k)) continue;
       seen.add(k);
-      sources.push({ type: h.type, name, ts: h.ts, excerpt: h.text.replace(/\s+/g, ' ').substring(0, 200) });
+      sources.push({ type: h.type, name, ts: h.ts, excerpt: h.text.replace(/\s+/g, ' ').substring(0, 200), full: h.text.substring(0, 800), link: h.link || null });
     }
     const m = _load();
     const prev = m[key] || { checks: 0 };
