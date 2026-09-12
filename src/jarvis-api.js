@@ -679,6 +679,39 @@ function attach(app, deps = {}) {
     res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'התמונה לא נמצאה' });
   });
 
+  // ── 🎬 סרטונים לצפייה מאוחרת ────────────────────────────────────
+  app.get('/api/jarvis/videos', guard, (req, res) => {
+    const v = require('./videos');
+    res.json({
+      ok: true, stats: v.stats(),
+      videos: v.list().map(x => ({
+        id: x.id, ts: x.ts, caption: x.caption, size: x.size, duration: x.duration,
+        width: x.width, height: x.height, watched: !!x.watched, hasThumb: !!x.thumb,
+      })),
+    });
+  });
+  app.get('/api/jarvis/videos/thumb', guard, (req, res) => {
+    const p = require('./videos').thumbPath(String(req.query.id || ''));
+    if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'אין תמונה' });
+    res.json({ ok: true, image: fs.readFileSync(p).toString('base64') });
+  });
+  // The video itself. sendFile answers Range requests, so the player can
+  // start before the whole file arrives and seek without re-downloading.
+  app.get('/api/jarvis/videos/file', guard, (req, res) => {
+    const p = require('./videos').filePath(String(req.query.id || ''));
+    if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'הסרטון לא נמצא' });
+    res.sendFile(p);
+  });
+  app.post('/api/jarvis/videos/watched', guard, (req, res) => {
+    const { id, watched = true } = req.body || {};
+    const ok = require('./videos').setWatched(String(id || ''), !!watched);
+    res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'הסרטון לא נמצא' });
+  });
+  app.post('/api/jarvis/videos/remove', guard, (req, res) => {
+    const ok = require('./videos').remove(String((req.body || {}).id || ''));
+    res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'הסרטון לא נמצא' });
+  });
+
   // ── 📌 דורש התייחסות ─────────────────────────────────────────────
   app.get('/api/jarvis/attention', guard, (req, res) => {
     try { res.json({ ok: true, open: require('./attention').open(), recent: require('./attention').recent(20) }); }
@@ -719,7 +752,7 @@ function attach(app, deps = {}) {
   app.get('/api/jarvis/news-compare', guard, (req, res) => {
     try {
       const na = require('./news-apps');
-      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7), stories: na.stories(24, 15), latest: na.latest(24, 40), duel: na.duel(24) });
+      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7), stories: na.stories(24, 15), latest: na.latest(24, 40), hot: na.hot(12, 12), duel: na.duel(24) });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }

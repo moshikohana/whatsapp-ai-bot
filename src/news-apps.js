@@ -38,7 +38,7 @@ function _saveH(list) { try { fs.writeFileSync(HEADLINES, JSON.stringify(list, n
 // sometimes a real headline; only a real one is part of the story.
 const _GENERIC = /^(ynet|c14|כאן|כאן 11|כאן חדשות|ערוץ 14|עכשיו 14|i24news)$/i;
 // Podcasts, sport and culture channels inside the same apps are not news.
-const _SKIP = /(הסכתים|פודקאסט|פופ אפ|כדורגל|כדורסל|ליגת|מונדיאל|פיפ"א|אירוויזיון|מתכון|מגזין חג|\| מגזין|פרויקט מיוחד|כאן גימל|כאן 88|כאן תרבות|הצטרפו לשידור החי|למתחילים:)/;
+const _SKIP = /(הסכתים|פודקאסט|פופ אפ|כדורגל|כדורסל|ליגת|מונדיאל|פיפ"א|אירוויזיון|מתכון|מגזין חג|\| מגזין|פרויקט מיוחד|כאן גימל|כאן 88|כאן תרבות|הצטרפו לשידור החי|\| הצטרפו|כאן חדשות ברשת ב' —|למתחילים:)/;
 
 /**
  * התראות חדשות מהטלפון. חוזרות פעמיים לפעמים (עדכון של אותה התראה) — נשמר פעם אחת.
@@ -323,9 +323,31 @@ function latest(hours = 12, limit = 20) {
       title: order.length ? texts[order[0][0]] : st.members[0].text.substring(0, 160),
       apps, texts,
       first: order.length > 1 ? order[0][0] : null,
+      firstTs: order.length ? order[0][1] : st.members[0].ts,
+      count: st.members.length,
+      radio: st.members.some(m => m.radio),
       last: st.last,
     };
   }).sort((a, b) => b.last - a.last).slice(0, limit);
+}
+
+// Words that make a push breaking news rather than a feature.
+const _BREAKING = /(מבזק|דחוף|בלעדי|פרסום ראשון|לראשונה|חוסל|חיסול|נהרג|נהרגו|נרצח|הרוג|פצוע|אזעק|ירי |פיגוע|שיגור|יירוט|טיל|רעידת אדמה|התפטר|נעצר|כתב אישום|צה"ל מאשר|הודעה רשמית)/;
+
+/**
+ * 🔥 הכי חם עכשיו — הסיפורים ששווה לראות ראשונים.
+ * חם = כמה ערוצים שלחו (הסימן החזק ביותר), עדכונים נוספים, מילות מבזק,
+ * ואם נשמע גם ברדיו — פחות הזמן שעבר מאז שהתחיל. בלי מודל: שקוף וחינם.
+ */
+function hot(hours = 6, limit = 12) {
+  const now = Date.now();
+  return latest(hours, 300).map(s => {
+    const channels = Object.keys(s.apps).length;
+    const breaking = _BREAKING.test(Object.values(s.texts).join(' '));
+    const ageH = (now - s.firstTs) / 3600000;
+    const score = (channels - 1) * 4 + Math.min(s.count - channels, 3) + (breaking ? 3 : 0) + (s.radio ? 2 : 0) - ageH * 1.5;
+    return { ...s, channels, breaking, score: Math.round(score * 10) / 10 };
+  }).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 /**
@@ -384,4 +406,4 @@ setTimeout(() => {
   _drain();
 }, 30000);
 
-module.exports = { addMany, onHeadline, recent, stats, stories, latest, duel, idle, tick };
+module.exports = { addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick };

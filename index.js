@@ -3878,6 +3878,82 @@ function _seenAndMark(msgIdSerialized) {
 
 // The "דורש התייחסות" card the bot sent last — "ליומן" right after it is about it.
 let _lastAttention = null;
+
+// 🎬 The open "what to do with the video" question.
+let _videoMenu = null;        // { ids, at }
+let _videoAskTimer = null;
+
+/**
+ * An answer to the video question — "1", "1+2", "שמור", "mp3", "תמלל".
+ * Called from route(), so it works from WhatsApp and from the app's chat.
+ * Returns the reply text, or null when the text is not an answer to it.
+ * Media always goes to the real WhatsApp chat: from the app, route() gets a
+ * stand-in chat that would swallow the MP3.
+ */
+async function _tryVideoChoice(text) {
+  if (!_videoMenu) return null;
+  let t = String(text || '').trim();
+  let quotedMenu = false;
+  const q = t.match(/^\[בתגובה ל: "([\s\S]*?)"\]\n([\s\S]*)$/);
+  if (q) { quotedMenu = q[1].includes('קיבלתי') && q[1].includes('סרטון'); if (!quotedMenu) return null; t = q[2].trim(); }
+  const vids = require('./src/videos');
+  const choice = vids.parseChoice(t);
+  if (!choice) return null;
+  // A bare digit is only about the video while the question is fresh; words
+  // ("שמור", "תמלל") are clear for as long as the video waits.
+  const age = Date.now() - _videoMenu.at;
+  if (/^[\d\s+,ו.-]+$/.test(t) && !quotedMenu && age > 30 * 60000) return null;
+  if (!quotedMenu && age > 3 * 3600000) return null;
+  const ids = _videoMenu.ids.filter(id => vids.getPending(id));
+  _videoMenu = null;
+  if (!ids.length) return '🎬 הסרטון כבר לא ממתין (עברו יותר מ-6 שעות) — שלח אותו שוב.';
+  if (choice.none) { ids.forEach(vids.dropPending); return '👍 בסדר, לא עשיתי כלום עם הסרטון.'; }
+  (async () => {
+    const oc = await client.getChatById(OWNER_ID);
+    const { MessageMedia } = require('whatsapp-web.js');
+    const out = [];
+    let saved = 0;
+    const stamp = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Jerusalem' }).slice(0, 16).replace(' ', '-').replace(':', '');
+    for (const [i, id] of ids.entries()) {
+      const label = ids.length > 1 ? ` ${i + 1}/${ids.length}` : '';
+      const p = vids.getPending(id);
+      if (choice.save) {
+        try { await vids.save(id); saved++; } catch (e) { out.push(`❌ שמירה${label}: ${e.message}`); }
+      }
+      if (choice.mp3) {
+        if (p && p.info && !p.info.hasAudio) out.push(`🔇 בסרטון${label} אין פס קול — אין מה להפוך ל-MP3`);
+        else try {
+          const f = await vids.toMp3(id);
+          const buf = fs.readFileSync(f);
+          const name = `סרטון-${stamp}${ids.length > 1 ? '-' + (i + 1) : ''}.mp3`;
+          if (buf.length > 95 * 1024 * 1024) out.push(`❌ ה-MP3${label} גדול מדי לוואטסאפ (${Math.round(buf.length / 1024 ** 2)}MB)`);
+          else await oc.sendMessage(new MessageMedia('audio/mpeg', buf.toString('base64'), name),
+            { sendMediaAsDocument: true, caption: `🎧 ${name}` + BOT_MARKER });
+          try { fs.unlinkSync(f); } catch (_) {}
+        } catch (e) { out.push(`❌ MP3${label}: ${(e.message || '').substring(0, 100)}`); }
+      }
+      if (choice.text && !(p && p.info && !p.info.hasAudio)) {
+        try {
+          const tr = await vids.transcribe(id, transcribeAudio);
+          await botSend(oc, tr ? `📝 *תמלול${label}*\n\n${tr}` : `📝 לא נשמע דיבור בסרטון${label}.`);
+        } catch (e) { out.push(`❌ תמלול${label}: ${(e.message || '').substring(0, 100)}`); }
+      }
+      vids.dropPending(id);
+    }
+    if (saved) out.unshift(`💾 ${saved > 1 ? `${saved} סרטונים נשמרו` : 'הסרטון נשמר'} לצפייה מאוחרת — באפליקציה: בית ← 🎬 סרטונים`);
+    if (out.length) await botSend(oc, out.join('\n'));
+    if (saved) {
+      try {
+        require('./src/jarvis-api').pushAlert({
+          title: `🎬 ${saved > 1 ? `${saved} סרטונים נשמרו` : 'סרטון נשמר'} לצפייה`, summary: 'בית ← 🎬 סרטונים',
+          body: 'נשמר בתיקיית הסרטונים. פותחים מהבית ← 🎬 סרטונים.', kind: 'video', urgency: 'low',
+        });
+      } catch (_) {}
+    }
+  })().catch(e => logger.warn('video choice: ' + (e.message || '').substring(0, 60)));
+  const what = [choice.save && 'שומר', choice.mp3 && 'מכין MP3', choice.text && 'מתמלל'].filter(Boolean).join(', ');
+  return `⏳ ${what}${ids.length > 1 ? ` (${ids.length} סרטונים)` : ''}… ${choice.mp3 || choice.text ? 'הקובץ יגיע לכאן בוואטסאפ.' : ''}`.trim();
+}
 client.on('message_create', async (msg) => {
   // Feed the zombie watchdog — any event here proves listeners are alive
   _lastMsgEventAt = Date.now();
@@ -3895,7 +3971,10 @@ client.on('message_create', async (msg) => {
   if (!msg.fromMe) _cacheGroupMsg(msg);
   try {
     // Only handle text and images
-    if (!ALLOWED_TYPES.has(msg.type)) return;
+    if (!ALLOWED_TYPES.has(msg.type)) {
+      const _grp = j => j && (j.endsWith('@g.us') || j.endsWith('@g') || j.includes('@newsle'));
+      if (!(msg.type === 'video' && !_grp(msg.from) && !_grp(msg.to))) return;
+    }
 
     // ── Owner-sent group photo → ownerGroups face recognition ──────
     // Must run BEFORE the self-chat-only check below.
@@ -4125,6 +4204,7 @@ client.on('message_create', async (msg) => {
       return;
     }
     if (_trimSelf.startsWith('🎬 הנה הסרטון!') || _trimSelf.includes('🧪 *בדיקת חיבור מ-Railway')) return;
+    if (_trimSelf.startsWith('🎧 סרטון-')) return;
     // Image captions from face test / feedback (only BOT_MARKER — may be stripped on echo)
     if (/^🟢 \d+ מסומן|^🔴 אף אחד לא זוהה|^🔒 \d+ פנים טושטשו|^🟢 \*תיקון:\*|^📸 תמונה מקורית ללא עיבוד/.test(_trimSelf)) {
       return;
@@ -4360,6 +4440,41 @@ ${rawBody}`;
       await botSend(chat, response);
       stats.sent++;
       log({ time: ts(), from: 'בוטי', text: response.substring(0, 120), direction: 'out' });
+      return;
+    }
+
+    // ── 🎬 סרטון — שומרים זמנית ושואלים מה לעשות ─────────────────
+    // Also a video sent as a file. Downloaded now: fetching an older
+    // message's media is broken on this WhatsApp build, so once he answers
+    // there would be nothing left to download.
+    if (msg.type === 'video' || (msg.type === 'document' && /^video\//.test(msg._data?.mimetype || ''))) {
+      stats.received++;
+      log({ time: ts(), from: 'מושיקו', text: '🎬 סרטון', direction: 'in' });
+      const chat = await msg.getChat();
+      try {
+        const _sz = msg._data?.size || 0;
+        if (_sz > 300 * 1024 * 1024) throw new Error(`הסרטון גדול מדי (${Math.round(_sz / 1024 ** 2)}MB) — עד 300MB`);
+        const media = await safeDownloadMedia(msg);
+        if (!media || !media.data) throw new Error('לא הצלחתי להוריד את הסרטון מוואטסאפ — נסה לשלוח שוב');
+        const vids = require('./src/videos');
+        await vids.receive({
+          buffer: Buffer.from(media.data, 'base64'), mimetype: media.mimetype,
+          caption: (msg.body || '').trim(), name: msg._data?.filename || null,
+        });
+        // Five videos forwarded together get one question, not five.
+        clearTimeout(_videoAskTimer);
+        _videoAskTimer = setTimeout(async () => {
+          try {
+            const list = vids.pending().filter(x => !x.asked);
+            if (!list.length) return;
+            list.forEach(x => { x.asked = true; });
+            _videoMenu = { ids: list.map(x => x.id), at: Date.now() };
+            await botSend(await client.getChatById(OWNER_ID), vids.menu(list));
+          } catch (e) { logger.warn('video ask: ' + (e.message || '').substring(0, 60)); }
+        }, 5000);
+      } catch (e) {
+        await botSend(chat, `🎬 ❌ ${(e.message || '').substring(0, 150)}`);
+      }
       return;
     }
 
@@ -6631,6 +6746,11 @@ function _canonicalizeCommand(text, quotedText = '') {
 }
 
 async function route(chatId, text, chat) {
+  // 🎬 An answer to the open video question.
+  if (chatId === OWNER_ID && _videoMenu) {
+    const _v = await _tryVideoChoice(text);
+    if (_v) return _v;
+  }
   // "למה הניטור שידורים כבוי? תפעיל" => "שידורים הפעל" (see _canonicalizeCommand).
   {
     const _canon = _canonicalizeCommand(text);
