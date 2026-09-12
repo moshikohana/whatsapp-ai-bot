@@ -365,6 +365,11 @@ function attach(app, deps = {}) {
       if (album && r && r.success) {
         require('./album').add({ name: String(name).trim(), buffer: buf, group: String(req.body.group || ''), source: 'confirm' }).catch(() => {});
       }
+      // Settled from 'נבדקו לאחרונה': it is in the album now, and leaving it in
+      // the list read as if nothing had been done.
+      if (r && r.success && req.body.checkTs) {
+        try { require('./face-archive').removeChecks({ ts: Number(req.body.checkTs) }); } catch (_) {}
+      }
       res.json({ ok: true, result: r, total: fr.getReferenceCount(String(name).trim()) });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 200) });
@@ -411,6 +416,8 @@ function attach(app, deps = {}) {
         // way, and changing its type would break that build.
         faces: out.count != null ? out.count : 0,
         image: out.buffer.toString('base64'),
+        // Who can be in this photo — a button per name, not only 'the nearest'.
+        allowed: fr.allowedNames(String(group || '')) || require('./face-archive').people().map(p => p.name).slice(0, 6),
         // Per-face labels, so the app can offer the same two corrections
         // WhatsApp offers — name a face, or delete the reference that
         // mislabelled it.
