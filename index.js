@@ -1867,9 +1867,14 @@ function _logFaceCheck(buffer, groupName, outcome, detail, faces) {
 // and his answer went unanswered. The quoted id on the message itself works.
 const _faceAsks = new Map();
 function _rememberAsk(sent, ask) {
-  if (!sent || !sent.id) return;
-  if (sent.id._serialized) _faceAsks.set(sent.id._serialized, ask);
-  if (sent.id.id) _faceAsks.set(sent.id.id, ask);
+  // Kept even when the sent message came back without an id — the answer
+  // can still be matched by group and time.
+  const keys = [];
+  if (sent && sent.id && sent.id._serialized) keys.push(sent.id._serialized);
+  if (sent && sent.id && sent.id.id) keys.push(sent.id.id);
+  if (!keys.length) keys.push('noid:' + Date.now() + ':' + Math.random());
+  for (const k of keys) _faceAsks.set(k, ask);
+  logger.info(`🤔 face ask remembered: ${keys.map(k => k.slice(-26)).join(' | ')} (${ask.candidates.join('/')})`);
   while (_faceAsks.size > 600) _faceAsks.delete([..._faceAsks.keys()][0]);
 }
 
@@ -4265,11 +4270,19 @@ client.on('message_create', async (msg) => {
         // one from the last half hour is the one he is answering.
         if (!_ask) {
           const _qt = String(msg._data?.quotedMsg?.caption || msg._data?.quotedMsg?.body || '');
-          if (_qt.includes('ענה על ההודעה הזו')) {
-            _ask = [..._faceAsks.values()].filter(v => Date.now() - v.at < 30 * 60000).pop() || null;
+          // The answer is only a name or "none", in the same group as a
+          // question from the last half hour: that is the question.
+          const _t0 = msg.body.trim().replace(/[.!]/g, '');
+          const _short = _t0.length <= 12;
+          let _gName = '';
+          try { _gName = (await msg.getChat()).name || ''; } catch (_) {}
+          if (_qt.includes('ענה על ההודעה הזו') || _short) {
+            const _recent = [...new Set(_faceAsks.values())].filter(v => Date.now() - v.at < 30 * 60000 && (!_gName || v.groupName === _gName));
+            // By the quoted text when it names the candidates; else the newest.
+            _ask = _recent.filter(v => v.candidates.every(n => !_qt || _qt.includes(n))).pop() || _recent.pop() || null;
           }
+          if (!_ask) logger.info(`🤔 face answer: no ask for quoted ${String(_qid || '')} · asks=${_faceAsks.size} · group="${_gName}" · qkeys=${Object.keys(msg._data?.quotedMsg || {}).slice(0, 8).join(',')}`);
         }
-        if (!_ask && (msg.hasQuotedMsg || _qid)) logger.info(`🤔 face answer: no ask for quoted ${String(_qid || '').substring(0, 12)}`);
         if (_ask) {
           const _t = msg.body.trim().replace(/[.!]/g, '');
           const _none = /^(אף אחת|אף אחד|לא|אחר|אחרת|לא היא|לא אף אחת)$/.test(_t);
