@@ -70,7 +70,9 @@ async function runHour(hourTs, fromDisk = false) {
     `\n\nכותרות שכבר נאמרו ב-6 השעות האחרונות:\n${prev.length ? prev.slice(-60).join('\n') : '(אין)'}`,
     { system: SYSTEM, maxTokens: 2000 }
   );
-  const all = Array.isArray(r && r.headlines) ? r.headlines.filter(h => h && h.text) : [];
+  // Sport still slipped through the prompt (a windsurfing medal at 18:00, 12.9).
+  const SPORT = /(מדליי|אליפות|אולימפ|גמר|ליגה|ליגת|כדורגל|כדורסל|טניס|גלישת רוח|שחייה|ג'ודו|נבחרת|שער|ניצחון על)/;
+  const all = Array.isArray(r && r.headlines) ? r.headlines.filter(h => h && h.text && !SPORT.test(h.text)) : [];
   const b = {
     hourTs, label: _hhmm(hourTs), stations: heard.map(h => h.station), ts: Date.now(),
     // Repeats are kept in the record — the next hour compares against them too.
