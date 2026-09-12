@@ -79,7 +79,8 @@ function clipAround(station, ts, q = '') {
     .filter(c => !station || c.station === station).sort((a, b) => a.ts - b.ts);
   if (!list.length) return null;
   const words = String(q || '').replace(/[^\u0590-\u05FFa-zA-Z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
-  const score = c => words.reduce((s, w) => s + (c.text.includes(w) ? 1 : 0), 0);
+  const stems = words.map(w => (w.length >= 5 && 'בהוכלמש'.includes(w[0])) ? w.slice(1) : w);
+  const score = c => stems.reduce((s, w) => s + (c.text.includes(w) ? 1 : 0), 0);
   let i = -1;
   if (words.length) {
     let best = 0;
