@@ -1862,7 +1862,16 @@ function _logFaceCheck(buffer, groupName, outcome, detail, faces) {
 
 // 🤔 The bot's "which one is it?" replies in the test group: reply id →
 // what is needed to settle it when he answers "מיה" / "שי" / "אף אחת".
+// Kept under the short id too: in groups getQuotedMessage() fails on this
+// WhatsApp build ("Cannot read properties of null (reading 'serialize')"),
+// and his answer went unanswered. The quoted id on the message itself works.
 const _faceAsks = new Map();
+function _rememberAsk(sent, ask) {
+  if (!sent || !sent.id) return;
+  if (sent.id._serialized) _faceAsks.set(sent.id._serialized, ask);
+  if (sent.id.id) _faceAsks.set(sent.id.id, ask);
+  while (_faceAsks.size > 600) _faceAsks.delete([..._faceAsks.keys()][0]);
+}
 
 // ── 🟡 "אולי" — התאמה חלשה לילד הנכון, בצרור אחד לכל אצווה ──────
 // Below this it is noise (a random child scores 10–15%); above the group
@@ -4110,16 +4119,19 @@ client.on('message_create', async (msg) => {
                   // he actually looks at, and it was the one saying "שי" under
                   // a picture with two girls boxed.
                   const _ambG = matches.ambiguous || [];
+                  const _ambCands = [...new Set(_ambG.flatMap(a => a.between))];
                   const _ambTxt = _ambG.length
-                    ? `\n🟠 ועוד ${_ambG.length} פרצוף שלא שויך — קרוב מדי בין ` +
-                      [...new Set(_ambG.flatMap(a => a.between))].join(' / ')
+                    ? `\n🟠 ועוד ${_ambG.length} פרצוף שלא שויך — קרוב מדי בין ${_ambCands.join(' / ')}` +
+                      `\n↩️ מי זה? ענה על ההודעה הזו: ${_ambCands.map(n => '*' + n + '*').join(' / ')} / *אף אחת*`
                     : '';
+                  let _gSent = null;
                   if (markedBuf) {
                     const gm = new MessageMedia('image/jpeg', markedBuf.toString('base64'), 'result.jpg');
-                    await msg.reply(gm, null, { caption: `🟢 זוהה: *${allNames}*${_ambTxt}` + BOT_MARKER });
+                    _gSent = await msg.reply(gm, null, { caption: `🟢 זוהה: *${allNames}*${_ambTxt}` + BOT_MARKER });
                   } else {
-                    await msg.reply(`🟢 זוהה: *${allNames}*${_ambTxt}` + BOT_MARKER);
+                    _gSent = await msg.reply(`🟢 זוהה: *${allNames}*${_ambTxt}` + BOT_MARKER);
                   }
+                  if (_ambG.length) _rememberAsk(_gSent, { imageBuffer, faceIndex: _ambG[0].faceIndex, candidates: _ambCands, groupName, checkTs: null, at: Date.now() });
                 } catch (e) { console.warn(`face group-reply failed: ${e.message?.substring(0, 60)}`); }
                 // Then notify owner DM — also best-effort.
                 try {
@@ -4209,10 +4221,7 @@ client.on('message_create', async (msg) => {
                   } else {
                     _sent = await msg.reply(noMatchMsg + BOT_MARKER);
                   }
-                  if (_sent && _sent.id && _cands.length) {
-                    _faceAsks.set(_sent.id._serialized, { imageBuffer, faceIndex: _idx, candidates: _cands, groupName, checkTs: _ckTs, at: Date.now() });
-                    if (_faceAsks.size > 300) _faceAsks.delete([..._faceAsks.keys()][0]);
-                  }
+                  if (_cands.length) _rememberAsk(_sent, { imageBuffer, faceIndex: _idx, candidates: _cands, groupName, checkTs: _ckTs, at: Date.now() });
                 } catch (e) { /* silent */ }
                 // A near miss is the most useful photo there is: the bot came
                 // close and could not commit. Archived under that name as a
@@ -4244,17 +4253,30 @@ client.on('message_create', async (msg) => {
     }
 
     // ── 🤔 His answer to "which one is it?" in the test group ────────
-    if (msg.fromMe && _isGroupMsg && msg.hasQuotedMsg && msg.body && !msg.body.includes(BOT_MARKER)) {
+    if (msg.fromMe && _isGroupMsg && msg.body && !msg.body.includes(BOT_MARKER) && (msg.hasQuotedMsg || msg._data?.quotedStanzaID)) {
       try {
-        const _q = await msg.getQuotedMessage();
-        const _ask = _q && _q.id && _faceAsks.get(_q.id._serialized);
+        const _qid = msg._data?.quotedStanzaID || msg._data?.quotedMsg?.id?.id || null;
+        let _ask = _qid ? _faceAsks.get(_qid) : null;
+        let _qkey = _qid;
+        if (!_ask) {
+          try { const _q = await msg.getQuotedMessage(); if (_q && _q.id) { _qkey = _q.id._serialized; _ask = _faceAsks.get(_qkey) || _faceAsks.get(_q.id.id); } } catch (_) {}
+        }
+        // Last resort: the quoted text is one of these questions — the newest
+        // one from the last half hour is the one he is answering.
+        if (!_ask) {
+          const _qt = String(msg._data?.quotedMsg?.caption || msg._data?.quotedMsg?.body || '');
+          if (_qt.includes('ענה על ההודעה הזו')) {
+            _ask = [..._faceAsks.values()].filter(v => Date.now() - v.at < 30 * 60000).pop() || null;
+          }
+        }
+        if (!_ask && (msg.hasQuotedMsg || _qid)) logger.info(`🤔 face answer: no ask for quoted ${String(_qid || '').substring(0, 12)}`);
         if (_ask) {
           const _t = msg.body.trim().replace(/[.!]/g, '');
           const _none = /^(אף אחת|אף אחד|לא|אחר|אחרת|לא היא|לא אף אחת)$/.test(_t);
           const _known = require('./src/face-archive').people().map(p => p.name);
           const _name = _known.find(n => _t === n || _t === 'זו ' + n || _t === 'זאת ' + n || _t === 'כן ' + n) || (/^(כן|נכון)$/.test(_t) && _ask.candidates.length === 1 ? _ask.candidates[0] : null);
           if (_none || _name) {
-            _faceAsks.delete(_q.id._serialized);
+            for (const [k, v] of _faceAsks) if (v === _ask) _faceAsks.delete(k);
             let _out;
             if (_name) {
               const _fr = require('./src/face-recognition');
@@ -4265,7 +4287,7 @@ client.on('message_create', async (msg) => {
               } else _out = `❌ לא הצלחתי לשמור: ${(_r && (_r.error || _r.message)) || 'שגיאה'}`;
             } else _out = '👍 סומן — זה לא אף אחת מהן. לא נלמד כלום.';
             // Settled either way: out of "לא זוהה" in the app.
-            try { require('./src/face-archive').removeChecks({ ts: _ask.checkTs }); } catch (_) {}
+            if (_ask.checkTs) { try { require('./src/face-archive').removeChecks({ ts: _ask.checkTs }); } catch (_) {} }
             try { await msg.reply(_out + BOT_MARKER); } catch (_) {}
             logger.info(`🤔 face answer: "${_t}" → ${_name || 'none'}`);
             return;
