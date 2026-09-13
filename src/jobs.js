@@ -25,8 +25,15 @@ function update(id, { stage, pct, etaSec } = {}) {
   j.updated = Date.now();
 }
 
-function done(id, result = 'הושלם') { const j = _jobs.get(id); if (j) Object.assign(j, { done: true, pct: 100, etaSec: 0, stage: result, result }); }
-function fail(id, err) { const j = _jobs.get(id); if (j) Object.assign(j, { done: true, error: String(err || 'נכשל').substring(0, 200), stage: 'נכשל' }); }
+function done(id, result = 'הושלם') { const j = _jobs.get(id); if (j) Object.assign(j, { done: true, pct: 100, etaSec: 0, stage: result, result, updated: Date.now() }); }
+function fail(id, err) { const j = _jobs.get(id); if (j) Object.assign(j, { done: true, error: String(err || 'נכשל').substring(0, 200), stage: 'נכשל', updated: Date.now() }); }
 function get(id) { return _jobs.get(id) || null; }
 
-module.exports = { create, update, done, fail, get };
+/** מה רץ עכשיו — ומה נגמר בדקה האחרונה, כדי שהאפליקציה תספיק להגיד "נשלח". */
+function active() {
+  const now = Date.now();
+  return [..._jobs.values()].filter(j => !j.done || now - (j.updated || j.started) < 60000)
+    .map(j => ({ id: j.id, kind: j.kind, label: j.label, stage: j.stage, pct: j.pct, etaSec: j.etaSec, done: j.done, error: j.error }));
+}
+
+module.exports = { create, update, done, fail, get, active };

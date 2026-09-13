@@ -6968,14 +6968,48 @@ function _canonicalizeCommand(text, quotedText = '') {
 // 🎞️ השבוע של מיה ושי: the film, sent to his chat — the preview picture first.
 async function _sendWeeklyVideo(chat) {
   const wv = require('./src/weekly-video');
-  const job = require('./src/jobs').create('weekly', 'סרטון שבועי', 240);
-  const r = await wv.render({ onProgress: p => require('./src/jobs').update(job, { stage: 'מרנדר את הסרטון', pct: Math.round(p * 100) }) });
-  require('./src/jobs').done(job);
-  // Always to his WhatsApp — from the app, the chat is a stand-in that drops media.
-  const oc = await client.getChatById(OWNER_ID);
-  try { await oc.sendMessage(MessageMedia.fromFilePath(r.still), { caption: `🎞️ *השבוע של מיה ושי* — ${r.photos} תמונות, ${Math.round(r.seconds)} שניות\nהסרטון בהודעה הבאה 👇` + BOT_MARKER }); } catch (_) {}
-  await oc.sendMessage(MessageMedia.fromFilePath(r.video), { caption: '🎞️ השבוע של מיה ושי' + BOT_MARKER });
+  const J = require('./src/jobs');
+  const job = J.create('weekly', '🎞️ השבוע של מיה ושי', 240);
+  const t0 = Date.now();
+  let r;
+  try {
+    J.update(job, { stage: 'בוחר תמונות מהשבוע', pct: 2 });
+    r = await wv.render({
+      onProgress: p => {
+        const el = (Date.now() - t0) / 1000;
+        // Rendering is 90% of the bar; sending to WhatsApp the rest.
+        J.update(job, { stage: 'בונה את הסרטון', pct: 5 + p * 85, etaSec: p > 0.05 ? (el / p) * (1 - p) + 20 : null });
+      },
+    });
+    J.update(job, { stage: 'שולח לוואטסאפ', pct: 92, etaSec: 20 });
+  } catch (e) { J.fail(job, e.message); throw e; }
+  await _deliverWeekly(r, job);
   return r;
+}
+
+// Sends the finished film. Every step has a time limit and says what happened:
+// the first send (13.9) went silent — no picture, no film, no error.
+async function _deliverWeekly(r, job) {
+  const J = require('./src/jobs');
+  const { MessageMedia } = require('whatsapp-web.js');
+  const cap = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(what + ': no answer in ' + ms / 1000 + 's')), ms))]);
+  // Always to his WhatsApp — from the app, the chat is a stand-in that drops media.
+  const oc = await cap(client.getChatById(OWNER_ID), 20000, 'chat');
+  try {
+    await cap(oc.sendMessage(MessageMedia.fromFilePath(r.still), { caption: (r.photos ? `🎞️ *השבוע של מיה ושי* — ${r.photos} תמונות, ${Math.round(r.seconds)} שניות` : '🎞️ *השבוע של מיה ושי*') + '\nהסרטון בהודעה הבאה 👇' + BOT_MARKER }), 60000, 'picture');
+    logger.info('🎞️ weekly video: picture sent');
+  } catch (e) { logger.warn('🎞️ weekly picture: ' + (e.message || '').substring(0, 100)); }
+  try {
+    // As a video; if the browser cannot take it, as a file (it plays the same).
+    try {
+      await cap(oc.sendMessage(MessageMedia.fromFilePath(r.video), { caption: '🎞️ השבוע של מיה ושי' + BOT_MARKER }), 120000, 'video');
+    } catch (e) {
+      logger.warn('🎞️ weekly video as video: ' + (e.message || '').substring(0, 100) + ' — sending as a file');
+      await cap(oc.sendMessage(MessageMedia.fromFilePath(r.video), { sendMediaAsDocument: true, caption: '🎞️ השבוע של מיה ושי' + BOT_MARKER }), 120000, 'file');
+    }
+    if (job) J.done(job, '✅ הסרטון נשלח לוואטסאפ');
+    logger.info('🎞️ weekly video: sent to his chat');
+  } catch (e) { if (job) J.fail(job, 'השליחה לוואטסאפ נכשלה'); logger.warn('🎞️ weekly send: ' + (e.message || '').substring(0, 100)); throw e; }
 }
 let _weeklySentFor = '';
 setInterval(async () => {
@@ -6991,6 +7025,17 @@ setInterval(async () => {
 }, 60000);
 
 async function route(chatId, text, chat) {
+  // 🎞️ "שלח שוב את הסרטון" — the last film, without building it again.
+  if (chatId === OWNER_ID && /^(שלח שוב (את )?(הסרטון|סרטון שבועי)|סרטון שבועי שוב)$/.test(String(text || '').trim())) {
+    const dir = path.join(__dirname, 'output', 'weekly');
+    const last = (() => { try { return fs.readdirSync(dir).filter(f => /^week-.*\.mp4$/.test(f)).sort().pop(); } catch { return null; } })();
+    if (!last) return '🎞️ עוד אין סרטון — כתוב *סרטון שבועי*.';
+    const r = { video: path.join(dir, last), still: path.join(dir, last.replace('.mp4', '.jpg')), photos: '', seconds: 0 };
+    const J = require('./src/jobs'); const job = J.create('weekly', '🎞️ השבוע של מיה ושי', 30);
+    J.update(job, { stage: 'שולח לוואטסאפ', pct: 90, etaSec: 20 });
+    _deliverWeekly(r, job).catch(() => {});
+    return '🎞️ שולח שוב את הסרטון האחרון לוואטסאפ.';
+  }
   // 🎞️ "סרטון שבועי" / "השבוע של הבנות"
   if (chatId === OWNER_ID && /^(סרטון שבועי|השבוע של (הבנות|מיה ושי)|סרטון השבוע)$/.test(String(text || '').trim())) {
     _sendWeeklyVideo(chat).catch(async e => { try { await botSend(chat, '❌ הסרטון לא נבנה: ' + (e.message || '').substring(0, 100)); } catch (_) {} });

@@ -759,6 +759,7 @@ function attach(app, deps = {}) {
     try { res.json({ ok: true, ...(await require('./news-feed').backfillMedia(Number((req.body || {}).hours) || 24, !!(req.body || {}).force)) }); }
     catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
   });
+  app.get('/api/jarvis/jobs/active', guard, (_req, res) => res.json({ ok: true, jobs: require('./jobs').active() }));
   app.get('/api/jarvis/news/img', guard, (req, res) => {
     const p = require('./news-feed').mediaPath(String(req.query.name || ''), req.query.thumb === '1');
     if (!p) return res.status(404).json({ error: 'אין תמונה' });
