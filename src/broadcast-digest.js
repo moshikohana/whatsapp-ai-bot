@@ -39,7 +39,36 @@ function _dayFile(d = new Date()) {
 // was deleted as soon as it was transcribed. Now it is kept two days —
 // ~48kbps mono, a few hundred MB — so the claim can be heard.
 const AUDIO_DIR = path.join(DIR, 'audio');
-const AUDIO_KEEP_MS = 48 * 3600000;
+// 4 hours of everything; what mattered — a mention, a strong headline, a
+// quote, a hot topic — 30 days ("שמור רק 4 שעות אחרונות אלא אם כן…", 13.9).
+const AUDIO_KEEP_MS = 4 * 3600000;
+const PIN_KEEP_MS = 30 * 86400000;
+const PIN_FILE = path.join(DIR, 'audio-keep.json');
+function _pins() { try { return JSON.parse(fs.readFileSync(PIN_FILE, 'utf8')); } catch { return {}; } }
+/** 📌 קטע שמע שנשמר 30 יום, עם הסיבה. */
+function pinAudio(name, reason) {
+  if (!audioPath(name)) return false;
+  const p = _pins();
+  const until = Date.now() + PIN_KEEP_MS;
+  if (!p[name] || p[name].until < until) p[name] = { until, reason: String(reason || '').substring(0, 80) };
+  for (const k of Object.keys(p)) if (p[k].until < Date.now()) delete p[k];
+  try { fs.writeFileSync(PIN_FILE, JSON.stringify(p)); } catch (_) {}
+  return true;
+}
+/** הקטע שבו נאמר משהו חשוב — נשמר. */
+function pinAround(station, ts, q, reason) {
+  try {
+    const c = clipAround(station, ts, q);
+    const n = c && c.chunk && c.chunk.audioName;
+    if (n && pinAudio(n, reason)) { logger.info(`📌 radio audio kept 30d: ${n} — ${String(reason || '').substring(0, 50)}`); return n; }
+  } catch (_) {}
+  return null;
+}
+function keptUntil(name) {
+  const p = _pins()[name];
+  if (p && p.until > Date.now()) return { until: p.until, pinned: true, reason: p.reason || '' };
+  return { until: (parseInt(name, 10) || Date.now()) + AUDIO_KEEP_MS, pinned: false, reason: '' };
+}
 let _lastSweep = 0;
 function keepAudio(tmpFile, stationId, ts) {
   if (!tmpFile) return null;
@@ -51,8 +80,10 @@ function keepAudio(tmpFile, stationId, ts) {
     try { fs.unlinkSync(tmpFile); } catch {}
     if (Date.now() - _lastSweep > 30 * 60000) {
       _lastSweep = Date.now();
+      const pins = _pins();
       for (const f of fs.readdirSync(AUDIO_DIR)) {
         const t = parseInt(f, 10);
+        if (pins[f] && pins[f].until > Date.now()) continue;
         if (t && Date.now() - t > AUDIO_KEEP_MS) { try { fs.unlinkSync(path.join(AUDIO_DIR, f)); } catch {} }
       }
     }
@@ -92,7 +123,11 @@ function clipAround(station, ts, q = '') {
     if (best < Math.min(2, words.length)) i = -1;
   }
   if (i < 0) { i = list.findIndex(c => c.ts > ts + 90000); i = (i < 0 ? list.length : i) - 1; if (i < 0) i = 0; }
-  const out = c => c && { ts: c.ts, station: c.station, text: c.text, audio: !!(c.audio && audioPath(c.audio)), audioName: c.audio && audioPath(c.audio) ? c.audio : null };
+  const out = c => {
+    if (!c) return c;
+    const has = !!(c.audio && audioPath(c.audio));
+    return { ts: c.ts, station: c.station, text: c.text, audio: has, audioName: has ? c.audio : null, ...(has ? { keep: keptUntil(c.audio) } : {}) };
+  };
   return { chunk: out(list[i]), prev: out(list[i - 1]), next: out(list[i + 1]) };
 }
 
@@ -357,6 +392,24 @@ function clipRefs(d) {
   return out.slice(0, 12);
 }
 
+/** 📌 מהתקציר: כל ציטוט, נושא לוהט (4+), וכותרת במהדורה שנוגעת בו. */
+function pinImportant(d) {
+  if (!d) return 0;
+  let n = 0;
+  for (const q of d.quotes || []) {
+    const r = clipRefs({ ...d, topics: [], bulletin: null, quotes: [q] })[0];
+    if (r && pinAround(r.station, r.ts, r.q, `ציטוט${q.speaker ? ' של ' + q.speaker : ''}`)) n++;
+  }
+  for (const t of (d.topics || []).filter(t => (t.heat || 0) >= 4)) {
+    if (pinAround((t.stations || [])[0] || '', d.from + 35 * 60000, `${t.title} ${t.summary || ''}`, `נושא חם: ${t.title}`)) n++;
+  }
+  const b = d.bulletin;
+  for (const h of ((b && b.headlines) || []).filter(h => h.status !== 'repeat' && /קלנר|ליכוד/.test(h.text))) {
+    if (pinAround((h.stations || [])[0] || '', b.hourTs + 4 * 60000, h.text, `במהדורה: ${h.text}`)) n++;
+  }
+  return n;
+}
+
 function formatDigest(d) {
   if (!d) return '';
   const lines = [`📻 *מה נאמר בשידור* · ${d.label}`];
@@ -386,6 +439,6 @@ function formatDigest(d) {
 }
 
 module.exports = {
-  keepAudio, audioPath, clipAround, clipRefs,
+  keepAudio, audioPath, clipAround, clipRefs, pinAudio, pinAround, pinImportant, keptUntil,
   recordChunk, chunksBetween, analyseHour, recentDigests, recentChunks, prune, formatDigest, setBulletin,
 };

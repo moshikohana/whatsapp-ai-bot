@@ -8579,6 +8579,7 @@ setInterval(async () => {
           title: `📻 ${h.station || 'שידור'} — הוזכר קלנר`,
           body: (h.sentence || h.text || '').substring(0, 400),
           radio: [{ label: h.station || 'שידור', station: h.station || '', ts: h.ts || Date.now(), q: h.quote || h.term || '' }],
+          _pin: require('./src/broadcast-digest').pinAround(h.station || '', h.ts || Date.now(), h.quote || h.term || '', 'אזכור קלנר'),
           kind: 'broadcast', urgency: 'high',
         });
       } catch {}
@@ -8607,6 +8608,8 @@ setInterval(async () => {
             .filter(Boolean).join('\n\n'),
           kind: 'broadcast-headline',
           radio: [{ label: h.station, station: h.station, ts: h.ts || Date.now(), q: h.quote || h.headline }],
+          // 📌 A flash (5) or a quote: the audio is kept 30 days.
+          _pin: (h.score >= 5 || h.quote) ? require('./src/broadcast-digest').pinAround(h.station, h.ts || Date.now(), h.quote || h.headline, `כותרת: ${h.headline}`) : null,
           urgency: h.score >= 5 ? 'high' : 'normal',
         });
       } catch {}
@@ -8752,7 +8755,7 @@ setInterval(async () => {
           || (bulletin ? (bulletin.headlines || []).filter(h => h.status !== 'repeat').map(h => h.text).slice(0, 2).join(' · ') : '')
           || ((d.quotes || []).length ? `${d.quotes.length} ציטוטים` : 'שעה שקטה'),
         body: bd.formatDigest(d),
-        radio: bd.clipRefs(d),
+        radio: (() => { try { bd.pinImportant(d); } catch (_) {} return bd.clipRefs(d); })(),
         kind: 'broadcast-digest', urgency: 'normal',
         // Only the newest hour matters; older undelivered ones are stale.
         supersedes: 'broadcast-digest',

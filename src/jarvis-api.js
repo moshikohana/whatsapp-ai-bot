@@ -811,6 +811,12 @@ function attach(app, deps = {}) {
       res.json({ ok: true, ...r });
     } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
   });
+  app.post('/api/jarvis/radio/keep', guard, (req, res) => {
+    const bd = require('./broadcast-digest');
+    const name = String((req.body || {}).name || '');
+    if (!bd.pinAudio(name, 'נשמר על ידך')) return res.status(404).json({ error: 'קטע השמע כבר לא שמור' });
+    res.json({ ok: true, keep: bd.keptUntil(name) });
+  });
   app.get('/api/jarvis/radio/audio', guard, (req, res) => {
     const p = require('./broadcast-digest').audioPath(String(req.query.name || ''));
     if (!p) return res.status(404).json({ error: 'קטע השמע כבר לא שמור' });
