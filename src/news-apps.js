@@ -124,9 +124,25 @@ function addMany(items) {
  * בעוד רבע שעה או שעה. אז כל התראה נבדקת שוב, עד שלוש פעמים בשעתיים הראשונות.
  * נקרא כל 10 דקות.
  */
+/** "השר לביטחון לאומי" קוצר ל"שר הביטחון" (13.9, בן גביר) — מחזיר את התואר מהפוסט. */
+function fixRole(title, post) {
+  let t = String(title || '');
+  const p = String(post || '').replace(/["״*]/g, '');
+  if (!p) return t;
+  if (/שר הביטחון|שר הבטחון/.test(t) && !/שר הביטחון|שר הבטחון/.test(p) && /השר לביטחון לאומי|השר לבטחון לאומי|השר לביטחון פנים/.test(p)) {
+    t = t.replace(/שר הביטחון|שר הבטחון/, 'השר לביטחון לאומי');
+  }
+  return t;
+}
+
 function tick() {
   const now = Date.now();
   const all0 = _load();
+  for (const p of all0) {
+    if (now - p.ts > 24 * 3600000 || !p.full) continue;
+    const fixed = fixRole(p.text, p.full);
+    if (fixed !== p.text) { logger.info(`🔧 role fixed: "${p.text.substring(0, 40)}" → "${fixed.substring(0, 40)}"`); p.text = fixed; p.roleFixed = 1; }
+  }
   const split = [];
   let changed = false;
   for (const r of all0.filter(x => !x.roundup && !x.part && now - x.ts < 12 * 3600000 && _ROUNDUP.test(x.text))) {
@@ -134,6 +150,7 @@ function tick() {
     if (r.roundup) changed = true;
   }
   for (const p of all0) if (p.part && p.radio) { delete p.radio; changed = true; }
+  if (all0.some(p => p.roleFixed === 1)) { for (const p of all0) if (p.roleFixed === 1) p.roleFixed = 2; changed = true; }
   if (changed) {
     _save(all0);
     logger.info(`📰 roundups split: ${split.length} stories`);
@@ -447,6 +464,33 @@ function latest(hours = 12, limit = 20) {
     const apps = {}, texts = {}, vias = {};
     for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) { apps[m.source] = m.ts; texts[m.source] = m.text.substring(0, 160); vias[m.source] = m.via || 'app'; }
     const order = Object.entries(apps).sort((a, b) => a[1] - b[1]);
+    // 🔄 A story that came back with a new wave — the defence minister's
+    // statement on עלי טאהר, from eleven sources, sat under the 19:53 title
+    // about the tunnels and could not be seen (13.9). Among what came 25
+    // minutes or more after the start, the report the most different sources
+    // carried — two at least — is the headline. (Waves by quiet gaps failed:
+    // the reports ran on without a pause and a 20:22 line won.)
+    const byTime = st.members.slice().sort((a, b) => a.ts - b.ts);
+    const t0 = byTime[0].ts;
+    const later = byTime.filter(m => m.ts - t0 > 25 * 60000 && !m.part);
+    let lastWave = null;
+    if (later.length >= 2) {
+      let best = null;
+      for (const c of later) {
+        const same = later.filter(x => x === c || _overlap(c.text, x.text) >= 3);
+        const n = new Set(same.map(x => x.source)).size;
+        if (n >= 2 && (!best || n > best.n)) best = { n, same };
+      }
+      // Not the same news as the first headline said — then it is a development.
+      if (best) {
+        // The most typical wording in it — eleven near-identical Katz lines beat
+        // one 20:22 line that shares only the ridge's name.
+        const central = best.same.map(m => ({ m, c: best.same.reduce((t, x) => t + (x === m ? 0 : _overlap(m.text, x.text)), 0) }))
+          .sort((a, b) => b.c - a.c)[0].m;
+        const tight = best.same.filter(x => x === central || _overlap(central.text, x.text) >= 4.5).sort((a, b) => a.ts - b.ts);
+        if (_overlap(central.text, byTime[0].text) < 4) lastWave = tight;
+      }
+    }
     // In the story only through a recap: a source, not a contender.
     const recaps = [...new Set(st.members.filter(m => m.part).map(m => m.source))]
       .filter(src => !st.members.some(m => m.source === src && !m.part));
@@ -454,10 +498,16 @@ function latest(hours = 12, limit = 20) {
     const reporters = [...new Set(st.members.filter(m => m.reporter).map(m => m.source))];
     // The headline: an app's wording when there is one (edited), else a reporter's.
     const titleSrc = (appOrder[0] || order.find(([src]) => reporters.includes(src)) || order[0] || [null])[0];
+    const firstTitle = titleSrc ? texts[titleSrc] : st.members[0].text.substring(0, 160);
+    const waveHead = lastWave && (lastWave.find(m => _isApp(m) && !m.part) || lastWave.find(m => m.reporter) || lastWave[0]);
     return {
       id: st.members[0].id,
       memberIds: st.members.map(m => m.id),
-      title: titleSrc ? texts[titleSrc] : st.members[0].text.substring(0, 160),
+      title: waveHead ? waveHead.text.substring(0, 160) : firstTitle,
+      // What it was before the new wave, and when the wave began.
+      was: waveHead ? firstTitle : null,
+      cat: _catOf(st.members, Object.values(texts).join(' ')),
+      freshTs: waveHead ? lastWave[0].ts : null,
       apps, texts, vias, reporters, recaps,
       first: appOrder.length > 1 ? appOrder[0][0] : null,
       firstAny: order.length > 1 ? order[0][0] : null,
@@ -469,6 +519,25 @@ function latest(hours = 12, limit = 20) {
       img: (st.members.slice().reverse().find(m => m.img) || {}).img || null,
     };
   }).sort((a, b) => b.last - a.last).slice(0, limit);
+}
+
+// A statement by a minister, the PM, a party — what a Likud spokesperson must see.
+const _POLITICAL = /(ראש הממשלה|רה"מ|רה״מ|נתניהו|הליכוד|ליכוד|בחירות|פריימריז|שריונ|קואליצ|אופוזיצ|הכנסת|ח"כ|ח״כ|(^|\s)ה?שר(ה|ת)?\s|השר |דובר|הודעה רשמית|פסילה להתמודדות)/;
+
+// 🗂️ A category for a story: what the channels' model said, by majority; for
+// the apps' pushes (no model on them) — by words. ("תוסיף קטגוריות", 13.9)
+const _CATS = ['ביטחון', 'פוליטיקה', 'פנים ישראל', 'חוץ'];
+const _SECURITY = /(צה"ל|צה״ל|צבא|חיזבאללה|חמאס|חות'ים|מחבל|פיגוע|טיל|רקט|כטב"ם|כטב״ם|יירוט|חיסול|תקיפ|לבנון|עזה|יו"ש|יו״ש|יהודה ושומרון|שומרון|שב"כ|שב״כ|לוחם|חייל|מילואים|שר הביטחון|גבול|מנהר|מטח|אזעק)/;
+const _FOREIGN = /(טראמפ|ארה"ב|ארה״ב|ארצות הברית|איראן|רוסיה|אוקראינה|סעודיה|אירופה|האו"ם|האו״ם|בריטניה|סין|טורקיה|קטאר|מצרים|ירדן|סוריה|פקיסטן|הבית הלבן)/;
+function _catOf(members, text) {
+  const votes = {};
+  for (const m of members) if (m.cat && _CATS.includes(m.cat)) votes[m.cat] = (votes[m.cat] || 0) + 1;
+  const top = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+  if (top) return top[0];
+  if (_POLITICAL.test(text)) return 'פוליטיקה';
+  if (_SECURITY.test(text)) return 'ביטחון';
+  if (_FOREIGN.test(text)) return 'חוץ';
+  return 'פנים ישראל';
 }
 
 // Words that make a push breaking news rather than a feature.
@@ -486,13 +555,17 @@ function hot(hours = 6, limit = 12) {
     const nApps = Object.values(s.vias || {}).filter(v => v === 'app').length;
     const nOther = channels - nApps;
     const breaking = _BREAKING.test(Object.values(s.texts).join(' '));
-    const ageH = (now - s.firstTs) / 3600000;
+    const ageH = (now - (s.freshTs || s.firstTs)) / 3600000;
+    // His world first: ministers' statements, the PM, Likud, elections (13.9).
+    const all = Object.values(s.texts).join(' ') + ' ' + (s.title || '');
+    const political = _POLITICAL.test(all) ? 3 : 0;
+    const kellner = /קלנר/.test(all) ? 5 : 0;
     const rep = (s.reporters || []).length;
     // A single post in one WhatsApp group, no app and no reporter: rarely the
     // story of the hour, and the groups post all day.
     const lone = nApps === 0 && rep === 0 && nOther <= 1 ? -3 : 0;
     const score = Math.max(nApps - 1, 0) * 4 + Math.min(nOther, 4) * 1.5 + (nApps && nOther ? 1 : 0)
-      + Math.min(s.count - channels, 3) + (breaking ? 3 : 0) + (s.radio ? 2 : 0) + (rep ? 3 : 0) + lone - ageH * 1.5;
+      + Math.min(s.count - channels, 3) + (breaking ? 3 : 0) + (s.radio ? 2 : 0) + (rep ? 3 : 0) + lone + political + kellner - ageH * 1.5;
     return { ...s, channels, breaking, score: Math.round(score * 10) / 10 };
   }).sort((a, b) => b.score - a.score).slice(0, limit);
 }
@@ -636,4 +709,5 @@ function setImg(id, img) {
 }
 
 module.exports = {
+  fixRole,
   rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

@@ -116,6 +116,7 @@ const SYSTEM = `אתה עורך חדשות. לפניך פוסטים מערוצי
 ✅ כן ידיעה, גם כשהפוסט כתוב בכעס או עם דעה: טענה או חשיפה שכלי תקשורת פרסם מידע שגוי, הכחשה של דיווח, פרסום שנמחק או תוקן, עימות סביב דיווח — בעיקר בענייני ביטחון, יהודה ושומרון ופנים ישראל. פוסט שמשלב דעה עם עובדה חדשה הוא ידיעה, והכותרת לפי העובדה (למשל: "אבו עלי: ערוץ 13 פרסם בטעות שמתנחלים הציתו שדות — בפועל כיבו שריפה; הציוץ נמחק").
 cat — קטגוריה: "ביטחון" (צבא, מלחמה, פיגועים, יו"ש, ביטחון פנים), "פנים ישראל" (חברה, משטרה, משפט, תקשורת בישראל), "פוליטיקה", "חוץ", "אחר".
 לידיעה — כתוב כותרת של משפט אחד בעברית, נאמנה לפוסט, בלי להוסיף פרט שאין בו.
+⚠️ תפקידים ותארים — בדיוק כמו בפוסט. "השר לביטחון לאומי" (בן גביר) הוא לא "שר הביטחון" (כ"ץ); אל תקצר תואר לתואר אחר. ואל תוסיף פעולה שלא כתובה ("קרא להתפטר" כשלא נכתב).
 ⚠️ השם בסוגריים המרובעים הוא הערוץ ששלח את הפוסט — לא נושא הידיעה. אל תכניס אותו לכותרת כאילו הידיעה עליו ("רכב של אבו עלי אקספרס הותקף" — שגוי).
 ⚠️ פוסט שהוא המשך של פוסט קודם ("כך נראה הרכב שהותקף", "תיעוד מהזירה") — הכותרת לפי ההקשר שבשורת "הקודם" אם יש; בלי הקשר — news:false.
 החזר JSON בלבד: {"items":[{"n":מספר הפוסט,"news":true|false,"headline":"כותרת או null","cat":"ביטחון|פנים ישראל|פוליטיקה|חוץ|אחר"}]}`;
@@ -136,9 +137,28 @@ async function _flush() {
     for (const p of batch) _lastBySource.set(p.source, { ts: p.ts, text: p.text });
     const r = await require('./claude').classifyJSON(list, { system: SYSTEM, maxTokens: 2500, model: 'claude-haiku-4-5-20251001' });
     const out = [];
+    // 🔎 A headline with words the post does not have is written again, from
+    // the post alone ("שר הביטחון בן גביר … קרא להתפטר" from "השר לביטחון לאומי", 13.9).
+    try {
+      const g = require('./grounding');
+      const flagged = (r && Array.isArray(r.items) ? r.items : []).filter(it => it && it.news === true && it.headline && batch[(+it.n || 0) - 1])
+        .map(it => ({ it, post: batch[(+it.n || 0) - 1].text, miss: g.missingWords(it.headline, batch[(+it.n || 0) - 1].text) }))
+        .filter(x => x.miss.length);
+      if (flagged.length) {
+        const r2 = await require('./claude').classifyJSON(flagged.map((x, i) => `${i + 1}. פוסט: ${x.post.replace(/\s+/g, ' ').substring(0, 600)}\n   כותרת: ${x.it.headline}\n   מילים שאין בפוסט: ${x.miss.join(', ')}`).join('\n\n'), {
+          system: 'לכל פריט: אם בכותרת יש פרט שלא כתוב בפוסט (תואר אחר, פעולה, מקום, מספר) — כתוב אותה מחדש רק לפי הפוסט, עם התארים בדיוק כמו בפוסט. אם היא נאמנה (רק ניסוח אחר) — השאר אותה. החזר JSON בלבד: {"items":[{"n":מספר,"headline":"..."}]}',
+          maxTokens: 1500, model: 'claude-haiku-4-5-20251001', temperature: 0,
+        });
+        for (const f of ((r2 && r2.items) || [])) {
+          const x = flagged[(+f.n || 0) - 1];
+          if (x && f.headline && f.headline !== x.it.headline) { logger.info(`📡 feed: headline fixed "${x.it.headline.substring(0, 40)}" → "${String(f.headline).substring(0, 40)}"`); x.it.headline = f.headline; }
+        }
+      }
+    } catch (e) { logger.warn('📡 feed headline check: ' + (e.message || '').substring(0, 60)); }
     for (const it of (r && Array.isArray(r.items) ? r.items : [])) {
       const p = batch[(+it.n || 0) - 1];
       if (!p || it.news !== true || !it.headline) continue;
+      it.headline = require('./news-apps').fixRole(it.headline, p.text);
       let img = null;
       if (p.media) { try { img = await _saveMedia(await Promise.race([p.media(), new Promise(r2 => setTimeout(() => r2(null), 20000))])); } catch (_) {} }
       out.push({
