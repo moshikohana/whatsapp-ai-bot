@@ -197,4 +197,15 @@ async function render({ days = 7, onProgress, music = DEFAULT_TRACK } = {}) {
   } finally { _busy = false; }
 }
 
-module.exports = { render, pickPhotos, list, markSent, filePath, TRACKS };
+/** 🗑️ מוחק סרטון (והתמונה שלו) — הוא ביקש. */
+function remove(name) {
+  const n = path.basename(String(name || ''));
+  const l = _loadIndex(); const v = l.find(x => x.file === n);
+  if (!v) return false;
+  for (const f of [v.file, v.still]) { try { fs.unlinkSync(path.join(OUT, f)); } catch (_) {} }
+  _saveIndex(l.filter(x => x !== v));
+  logger.info('🎞️ weekly video removed: ' + n);
+  return true;
+}
+
+module.exports = { render, pickPhotos, list, markSent, filePath, remove, TRACKS };

@@ -779,6 +779,10 @@ function attach(app, deps = {}) {
     if (!p) return res.status(404).json({ error: 'אין תמונה' });
     res.json({ ok: true, image: fs.readFileSync(p).toString('base64') });
   });
+  app.post('/api/jarvis/weekly/remove', guard, (req, res) => {
+    const ok = require('./weekly-video').remove((req.body || {}).file);
+    res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'הסרטון לא נמצא' });
+  });
   app.post('/api/jarvis/weekly/make', guard, (_req, res) => {
     if (!deps.runCommand) return res.status(503).json({ error: 'לא מחובר' });
     deps.runCommand('סרטון שבועי').then(t => res.json({ ok: true, text: t })).catch(e => res.status(500).json({ error: (e.message || '').substring(0, 150) }));
