@@ -8830,8 +8830,10 @@ setInterval(async () => {
     for (const f of fixes) {
       require('./src/jarvis-api').pushAlert({
         title: `✏️ תיקון לתקציר ${f.label}`,
-        summary: f.after,
-        body: `בתקציר נכתב:\n"${f.before}"\n\nנכון לפי השידור:\n"${f.after}"\n${f.summary}\n\n🔎 ${f.why}`,
+        summary: f.after || f.summary,
+        body: f.after
+          ? `בתקציר נכתב:\n"${f.before}"\n\nנכון לפי השידור:\n"${f.after}"\n${f.summary}\n\n🔎 ${f.why}`
+          : `בתקציר נכתב:\n"${f.before}"\n\n${f.summary}\n\n🔎 ${f.why}`,
         kind: 'correction', urgency: 'high',
       });
       logger.info(`✏️ digest correction sent: ${f.label} — ${f.after.substring(0, 50)}`);

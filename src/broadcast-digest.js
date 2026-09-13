@@ -377,8 +377,8 @@ async function analyseHour({ fromTs, toTs } = {}) {
     digest.topics = digest.topics.map((t, i) => {
       const x = g[i] || {};
       return { ...t, title: (x.fields || {}).title || t.title, summary: (x.fields || {}).summary || t.summary,
-        ...(x.confirmed && x.confirmed.length ? { confirmed: x.confirmed } : {}), ...(x.corrected ? { corrected: x.corrected } : {}) };
-    });
+        ...(x.confirmed && x.confirmed.length ? { confirmed: x.confirmed } : {}), ...(x.corrected ? { corrected: x.corrected } : {}), ...(x.drop ? { drop: true } : {}) };
+    }).filter(t => !t.drop);
   } catch (e) { logger.warn('digest grounding: ' + (e.message || '').substring(0, 60)); }
 
   const list = _loadDigests().filter(d => d.id !== digest.id);
@@ -487,7 +487,9 @@ function pinImportant(d) {
  */
 async function recheckRecent() {
   const now = Date.now();
-  const due = _loadDigests().filter(d => !d.rechecked && (d.topics || []).length && now - (d.ts || 0) > 15 * 60000 && now - (d.ts || 0) < 90 * 60000);
+  // Twice: at 15 minutes and at 45, as the apps' headlines come in.
+  const due = _loadDigests().filter(d => (d.topics || []).length && now - (d.ts || 0) < 100 * 60000 &&
+    ((d.rechecks || 0) === 0 ? now - (d.ts || 0) > 15 * 60000 : (d.rechecks || 0) === 1 && now - (d.rechecked || 0) > 30 * 60000));
   const fixes = [];
   for (const d of due) {
     const hay = chunksBetween(d.from, d.to).map(c => c.text).join(' ');
@@ -501,15 +503,20 @@ async function recheckRecent() {
     const cur = list.find(x => x.id === d.id);
     if (!cur) continue;
     cur.rechecked = now;
+    cur.rechecks = (cur.rechecks || 0) + 1;
     (g || []).forEach((x, i) => {
       const t = cur.topics[i];
       if (!t) return;
       if (x.confirmed && x.confirmed.length) t.confirmed = [...new Set([...(t.confirmed || []), ...x.confirmed])].slice(0, 5);
-      if (x.corrected && x.fields.title && x.fields.title !== t.title) {
-        fixes.push({ label: cur.label, before: t.title, after: x.fields.title, summary: x.fields.summary || t.summary, why: x.corrected });
+      if (x.drop) {
+        fixes.push({ label: cur.label, before: t.title, after: null, summary: 'הנושא הוסר — מה שנכתב בו לא נאמר בשידור.', why: x.corrected });
+        t.drop = true;
+      } else if (x.corrected && (x.fields.title !== t.title || x.fields.summary !== t.summary)) {
+        fixes.push({ label: cur.label, before: `${t.title} — ${t.summary}`, after: x.fields.title, summary: x.fields.summary || t.summary, why: x.corrected });
         t.title = x.fields.title; t.summary = x.fields.summary || t.summary; t.corrected = x.corrected;
       }
     });
+    cur.topics = cur.topics.filter(t => !t.drop);
     _saveDigests(list);
   }
   return fixes;

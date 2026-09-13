@@ -190,6 +190,7 @@ async function onChunk({ station, text, ts = Date.now() }) {
     try {
       const g = await require('./grounding').ground([{ id: 'h', fields: { headline } }], window,
         { label: 'headline', window: [ts - 3 * 3600000, ts + 60000] });
+      if (g[0] && g[0].drop) { logger.info(`📻 headline: dropped — not supported by the broadcast: "${headline.substring(0, 50)}"`); return null; }
       if (g[0]) { headline = g[0].fields.headline || headline; confirmed = g[0].confirmed || null; corrected = g[0].corrected || null; }
     } catch (_) {}
 

@@ -99,7 +99,9 @@ async function runHour(hourTs, fromDisk = false) {
       if (h.update && x.fields.update) h.update = x.fields.update.substring(0, 240);
       if (x.confirmed && x.confirmed.length) h.confirmed = x.confirmed;
       if (x.corrected) h.corrected = x.corrected;
+      if (x.drop) h.drop = true;
     }
+    b.headlines = b.headlines.filter(h => !h.drop);
   } catch (e) { logger.warn('bulletin grounding: ' + (e.message || '').substring(0, 60)); }
 
   const list = _load().filter(x => x.hourTs !== hourTs);

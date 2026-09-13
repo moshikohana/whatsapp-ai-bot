@@ -1198,13 +1198,14 @@ async function thinkWithClaude(userMessage, history = []) {
 // ─── Structured classification (JSON, no persona/tools) ──────────
 // A clean primitive for the listening layer: custom system, no bot persona,
 // no tools. Returns parsed JSON or null. Robust to code-fence wrapping.
-async function classifyJSON(userMessage, { system, maxTokens = 2000, model = 'claude-sonnet-4-6' } = {}) {
+async function classifyJSON(userMessage, { system, maxTokens = 2000, model = 'claude-sonnet-4-6', temperature } = {}) {
   try {
     const response = await callWithRetry(() => anthropic.messages.create({
       model,
       max_tokens: maxTokens,
       system: system || 'You are a precise analyst. Output ONLY valid JSON — no prose, no markdown code fences.',
       messages: [{ role: 'user', content: userMessage }],
+      ...(typeof temperature === 'number' ? { temperature } : {}),
     }), { label: 'classifyJSON', maxRetries: 2, baseDelayMs: 1500 });
     const text = (response.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
     const m = text.match(/\{[\s\S]*\}/);
