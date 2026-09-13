@@ -67,6 +67,7 @@ function addMany(items) {
       if (it.reporter) item.reporter = true;
       if (it.full) item.full = String(it.full).substring(0, 1500);
       if (it.link) item.link = String(it.link).substring(0, 200);
+      if (it.img) item.img = String(it.img).substring(0, 40);
     }
     list.push(item);
     if (!item.skip) fresh.push(item);
@@ -370,6 +371,8 @@ function latest(hours = 12, limit = 20) {
       count: st.members.length,
       radio: st.members.some(m => m.radio),
       last: st.last,
+      // The newest picture among its sources.
+      img: (st.members.slice().reverse().find(m => m.img) || {}).img || null,
     };
   }).sort((a, b) => b.last - a.last).slice(0, limit);
 }
@@ -471,7 +474,7 @@ function story(id) {
   const ids = new Set(s.memberIds || []);
   const members = _load().filter(p => ids.has(p.id)).sort((a, b) => a.ts - b.ts).map(p => ({
     id: p.id, source: p.source, ts: p.ts, text: p.text, via: p.via || 'app',
-    full: p.full || null, link: p.link || null, linkKind: p.linkKind || null, linkChecked: !!p.linkChecked, reporter: !!p.reporter,
+    full: p.full || null, link: p.link || null, linkKind: p.linkKind || null, linkChecked: !!p.linkChecked, reporter: !!p.reporter, img: p.img || null,
     radio: p.radio ? { station: p.radio.station || null, ts: p.radio.ts, headline: p.radio.headline || p.radio.excerpt || null, quote: p.radio.excerpt || p.radio.headline || null, leadMin: p.radio.leadMin } : null,
   }));
   return { ...s, members };
@@ -516,4 +519,18 @@ function setLink(id, link, kind) {
   _save(l);
 }
 
-module.exports = { setLink, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
+/** פוסטים מערוצים (לא אפליקציות) מהשעות האחרונות — לתמונות שחסרות. */
+function recentChannelItems(hours = 24) {
+  const since = Date.now() - hours * 3600000;
+  return _load().filter(p => p.via && p.via !== 'app' && p.ts >= since);
+}
+/** תמונה שנמצאה אחר כך; null — נבדק, אין. */
+function setImg(id, img) {
+  const l = _load(); const p = l.find(x => x.id === id);
+  if (!p) return;
+  if (img) p.img = img;
+  p.imgChecked = true;
+  _save(l);
+}
+
+module.exports = { setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

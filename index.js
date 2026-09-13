@@ -145,7 +145,14 @@ function _cacheGroupMsg(msg) {
   const cid = from;
   if (_blockedJids.has(cid)) return; // known blocked group — skip
   // 📡 News channels and update groups in his scan lists feed 'חדשות' too.
-  try { require('./src/news-feed').onWhatsApp({ cid, body: msg.body, ts: (msg.timestamp || 0) * 1000 }); } catch (_) {}
+  try {
+    require('./src/news-feed').onWhatsApp({
+      cid, body: msg.body, ts: (msg.timestamp || 0) * 1000,
+      media: msg.hasMedia && msg.type === 'image'
+        ? () => safeDownloadMedia(msg).then(m => (m && m.data ? Buffer.from(m.data, 'base64') : null)).catch(() => null)
+        : null,
+    });
+  } catch (_) {}
 
   // Lazy name resolution — first time we see a JID, check against blocklist
   if (!_jidNames.has(cid) && _BLOCKED_GROUP_PATTERNS.length > 0) {

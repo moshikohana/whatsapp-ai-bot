@@ -53,6 +53,46 @@ function _sources() {
 // ── Batch: posts wait here, Haiku sorts them a batch at a time ─────
 const _pending = [];
 const _seen = new Set();
+const _lastBySource = new Map();   // source → its previous post, for context
+
+// 🖼️ The picture that came with the post (13.9: "אם יש תמונה, תציג —
+// זה ישפר את החוויה לגמרי"). Downloaded only once the post is judged news.
+const MEDIA_DIR = path.join(__dirname, '..', 'data', 'news-media');
+async function _saveMedia(buf) {
+  if (!buf || buf.length < 2000) return null;
+  try {
+    const sharp = require('sharp');
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+    const name = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const img = sharp(buf).rotate();
+    fs.writeFileSync(path.join(MEDIA_DIR, name + '.jpg'), await img.clone().resize(1080, 1080, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer());
+    fs.writeFileSync(path.join(MEDIA_DIR, name + '-t.jpg'), await img.clone().resize(240, 240, { fit: 'cover' }).jpeg({ quality: 70 }).toBuffer());
+    // Two days of pictures is plenty; older ones go.
+    if (Math.random() < 0.05) {
+      for (const f of fs.readdirSync(MEDIA_DIR)) { const t = parseInt(f, 10); if (t && Date.now() - t > 3 * 86400000) { try { fs.unlinkSync(path.join(MEDIA_DIR, f)); } catch {} } }
+    }
+    return name;
+  } catch (e) { logger.warn('📡 feed media: ' + (e.message || '').substring(0, 50)); return null; }
+}
+// The picture of a Telegram post: a photo, a link preview's photo, an image
+// sent as a file — or a video's preview frame (Abu Ali posts video, 13.9).
+async function _tgPicture(c, m) {
+  const md = m && m.media;
+  if (!md) return null;
+  if (md.className === 'MessageMediaPhoto' || (md.className === 'MessageMediaWebPage' && md.webpage && md.webpage.photo)) return c.downloadMedia(m, {});
+  if (md.className === 'MessageMediaDocument' && md.document) {
+    if (String(md.document.mimeType || '').startsWith('image/')) return c.downloadMedia(m, {});
+    const thumbs = md.document.thumbs || [];
+    if (thumbs.length) return c.downloadMedia(m, { thumb: thumbs.length - 1 });
+  }
+  return null;
+}
+function mediaPath(name, thumb) {
+  const n = String(name || '');
+  if (!/^\d+-[a-z0-9]+$/.test(n)) return null;
+  const p = path.join(MEDIA_DIR, n + (thumb ? '-t.jpg' : '.jpg'));
+  return fs.existsSync(p) ? p : null;
+}
 
 function _push(item) {
   const k = `${item.via}|${item.source}|${item.text.replace(/\s+/g, ' ').substring(0, 80)}`;
@@ -62,18 +102,20 @@ function _push(item) {
 }
 
 /** מוואטסאפ: נקרא על כל הודעה בקבוצה או ערוץ. */
-function onWhatsApp({ cid, body, ts }) {
+function onWhatsApp({ cid, body, ts, media }) {
   const name = _sources().wa.get(cid);
   if (!name) return;
   const text = String(body || '').trim();
   if (text.length < MIN_LEN) return;
-  _push({ via: 'wa', source: name, text: text.substring(0, 1500), ts: ts || Date.now(), link: null });
+  _push({ via: 'wa', source: name, text: text.substring(0, 1500), ts: ts || Date.now(), link: null, media: media || null });
 }
 
 const SYSTEM = `אתה עורך חדשות. לפניך פוסטים מערוצי חדשות וקבוצות עדכונים בוואטסאפ ובטלגרם.
 לכל פוסט החלט: האם הוא ידיעה — דיווח על אירוע, אמירה של אדם, החלטה, נתון או עובדה חדשה?
 לא ידיעה: דעה או פרשנות בלבד, פרסומת, ברכה, הזמנה להצטרף, בדיחה, שאלה, שיחה, קישור בלי תוכן, סקר "מה דעתכם".
 לידיעה — כתוב כותרת של משפט אחד בעברית, נאמנה לפוסט, בלי להוסיף פרט שאין בו.
+⚠️ השם בסוגריים המרובעים הוא הערוץ ששלח את הפוסט — לא נושא הידיעה. אל תכניס אותו לכותרת כאילו הידיעה עליו ("רכב של אבו עלי אקספרס הותקף" — שגוי).
+⚠️ פוסט שהוא המשך של פוסט קודם ("כך נראה הרכב שהותקף", "תיעוד מהזירה") — הכותרת לפי ההקשר שבשורת "הקודם" אם יש; בלי הקשר — news:false.
 החזר JSON בלבד: {"items":[{"n":מספר הפוסט,"news":true|false,"headline":"כותרת או null"}]}`;
 
 let _busy = false;
@@ -82,15 +124,24 @@ async function _flush() {
   _busy = true;
   try {
     const batch = _pending.splice(0, 25);
-    const list = batch.map((p, i) => `${i + 1}. [${p.source}] ${p.text.replace(/\s+/g, ' ').substring(0, 500)}`).join('\n');
+    // Each post with the one its channel sent just before: "כך נראה הרכב
+    // שהותקף" means nothing alone (13.9 it became "Abu Ali's car was hit").
+    const list = batch.map((p, i) => {
+      const prev = _lastBySource.get(p.source);
+      const ctx = prev && p.ts - prev.ts < 45 * 60000 && prev.text !== p.text ? `\n   (הקודם בערוץ: ${prev.text.replace(/\s+/g, ' ').substring(0, 200)})` : '';
+      return `${i + 1}. [${p.source}] ${p.text.replace(/\s+/g, ' ').substring(0, 500)}${ctx}`;
+    }).join('\n');
+    for (const p of batch) _lastBySource.set(p.source, { ts: p.ts, text: p.text });
     const r = await require('./claude').classifyJSON(list, { system: SYSTEM, maxTokens: 2500, model: 'claude-haiku-4-5-20251001' });
     const out = [];
     for (const it of (r && Array.isArray(r.items) ? r.items : [])) {
       const p = batch[(+it.n || 0) - 1];
       if (!p || it.news !== true || !it.headline) continue;
+      let img = null;
+      if (p.media) { try { img = await _saveMedia(await Promise.race([p.media(), new Promise(r2 => setTimeout(() => r2(null), 20000))])); } catch (_) {} }
       out.push({
         source: p.source, via: p.via, title: String(it.headline).substring(0, 240), text: '',
-        full: p.text, ts: p.ts, link: p.link, reporter: isReporter(p.source),
+        full: p.text, ts: p.ts, link: p.link, reporter: isReporter(p.source), img,
       });
     }
     if (out.length) {
@@ -117,7 +168,12 @@ async function _hookTelegram() {
         const chId = m.peerId && m.peerId.channelId ? String(m.peerId.channelId) : null;
         const name = chId && _sources().tg.get(chId);
         if (!name) return;
-        _push({ via: 'tg', source: name, text: m.message.substring(0, 1500), ts: (m.date || 0) * 1000 || Date.now(), link: `https://t.me/c/${chId}/${m.id}` });
+        // A photo, or the picture of a link's preview.
+        const hasPic = !!m.media;
+        _push({
+          via: 'tg', source: name, text: m.message.substring(0, 1500), ts: (m.date || 0) * 1000 || Date.now(), link: `https://t.me/c/${chId}/${m.id}`,
+          media: hasPic ? () => _tgPicture(c, m) : null,
+        });
       } catch (_) {}
     }, new NewMessage({}));
     _tgClient = c;
@@ -215,4 +271,34 @@ function linkInText(text) {
   return urls.find(u => !join(u)) || urls.find(u => /t\.me\//.test(u)) || urls[0] || null;
 }
 
-module.exports = { start, onWhatsApp, isReporter, reporters, status, telegramTwin, linkInText };
+/**
+ * תמונות לידיעות שכבר נשמרו בלי תמונה — מכל פוסט שיש לו קישור לטלגרם
+ * (ערוץ, או אותו פוסט שנמצא לפוסט מוואטסאפ). פעם אחת לכל פריט.
+ */
+async function backfillMedia(hours = 24, force = false) {
+  const tg = require('./telegram');
+  if (!tg.isConfigured()) return { done: 0 };
+  const { Api } = require('telegram');
+  const c = await tg.getClient();
+  const na = require('./news-apps');
+  let done = 0, tried = 0;
+  for (const p of na.recentChannelItems(hours)) {
+    if (p.img || (p.imgChecked && !force) || !p.link) continue;
+    const m1 = String(p.link).match(/t\.me\/c\/(\d+)\/(\d+)/), m2 = String(p.link).match(/t\.me\/([A-Za-z0-9_]{4,})\/(\d+)/);
+    if (!m1 && !m2) continue;
+    tried++;
+    try {
+      const peer = m1 ? new Api.PeerChannel({ channelId: BigInt(m1[1]) }) : m2[1];
+      const msgs = await Promise.race([c.getMessages(peer, { ids: [parseInt((m1 || m2)[2], 10)] }), new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 10000))]);
+      const m = msgs && msgs[0];
+      const img = m ? await _saveMedia(await _tgPicture(c, m)) : null;
+      logger.info('🖼️ backfill ' + p.link + ': ' + (m ? (m.media ? m.media.className : 'no media') : 'not found') + (img ? ' → saved' : ''));
+      na.setImg(p.id, img);
+      if (img) done++;
+    } catch (e) { logger.warn('🖼️ backfill ' + p.link + ': ' + (e.message || '').substring(0, 80)); na.setImg(p.id, null); }
+  }
+  logger.info(`🖼️ feed backfill: ${done} pictures of ${tried} posts`);
+  return { done, tried };
+}
+
+module.exports = { start, onWhatsApp, isReporter, reporters, status, telegramTwin, linkInText, mediaPath, backfillMedia };

@@ -755,6 +755,15 @@ function attach(app, deps = {}) {
     try { res.json({ ok: true, ...(await require('./news-apps').recheckRadio(Number((req.body || {}).hours) || 24)) }); }
     catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
   });
+  app.post('/api/jarvis/news/media/backfill', guard, async (req, res) => {
+    try { res.json({ ok: true, ...(await require('./news-feed').backfillMedia(Number((req.body || {}).hours) || 24, !!(req.body || {}).force)) }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
+  });
+  app.get('/api/jarvis/news/img', guard, (req, res) => {
+    const p = require('./news-feed').mediaPath(String(req.query.name || ''), req.query.thumb === '1');
+    if (!p) return res.status(404).json({ error: 'אין תמונה' });
+    res.json({ ok: true, image: fs.readFileSync(p).toString('base64') });
+  });
   // 📻 What the radio said around a moment: the transcript, and the audio when kept.
   app.get('/api/jarvis/radio/clip', guard, (req, res) => {
     try {

@@ -21,7 +21,7 @@ const LOGS_DIR = path.join(__dirname, '..', 'logs');
 const KEEP_DAYS = 30;
 
 // Endpoints that are background plumbing, not something he did.
-const NOISE = /\/(pull|hello|faces\/tracked|faces\/checks|faces\/photos|faces\/references|decisions$|scan\/last|groups\/live|scan\/presets|broadcast$|reports|memory|actions|wa-thread|activity|changelog|check\/full|warroom$|lead-radar|news-push|news-compare|news\/stories|news\/story$|attention$|videos$|videos\/thumb|videos\/file)/;
+const NOISE = /\/(pull|hello|faces\/tracked|faces\/checks|faces\/photos|faces\/references|decisions$|scan\/last|groups\/live|scan\/presets|broadcast$|reports|memory|actions|wa-thread|activity|changelog|check\/full|warroom$|lead-radar|news-push|news-compare|news\/stories|news\/story$|attention$|videos$|videos\/thumb|videos\/file|news\/img|radio\/clip|radio\/audio)/;
 
 /** שם קריא לפעולה באפליקציה, לפי הנתיב והגוף. */
 function describe(method, route, body) {
