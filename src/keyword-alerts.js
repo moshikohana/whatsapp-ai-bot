@@ -60,7 +60,7 @@ function saveLog(log) {
  * @param {string} sender   - sender name ('אתה' for owner)
  * @param {string} preview  - first 120 chars of the message
  */
-function logAlert(keyword, group, sender, preview) {
+function logAlert(keyword, group, sender, preview, extra = {}) {
   try {
     // Skip blocked groups — don't pollute the alerts log
     if (isBlockedGroup(group)) return;
@@ -70,6 +70,10 @@ function logAlert(keyword, group, sender, preview) {
       group,
       sender,
       preview: preview.substring(0, 120),
+      // The whole message and its id — "הצג הכל" and "פתח בוואטסאפ" in the app.
+      full: extra.full ? String(extra.full).substring(0, 2000) : undefined,
+      msgId: extra.msgId || undefined,
+      chatId: extra.chatId || undefined,
       timestamp: Date.now(),
       date: new Date().toLocaleDateString('he-IL'),
       time: new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }),

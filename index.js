@@ -1644,6 +1644,15 @@ app.use(express.json({ limit: '1mb' }));            // JARVIS posts JSON bodies
 try {
   require('./src/jarvis-api').attach(app, {
     botName: () => botName,
+    // 📤 A group message, forwarded to his own chat — the way to reach it in WhatsApp.
+    forwardToOwner: async (msgId, note) => {
+      const orig = await client.getMessageById(msgId);
+      if (!orig) return false;
+      const oc = await client.getChatById(OWNER_ID);
+      await orig.forward(oc);
+      if (note) { try { await botSend(oc, note); } catch (_) {} }
+      return true;
+    },
     videoAudio: (id, withText, jobId) => _sendVideoAudio(id, withText, jobId),
     videoEta: (id, withText) => { const v = require('./src/videos').find(id); return _videoEta(v && v.duration, withText); },
     // Commands run through route() rather than a parallel implementation, so
@@ -4383,7 +4392,7 @@ client.on('message_create', async (msg) => {
             (_okc.where ? `🔎 המילה מופיעה ${_okc.where}:\n` : '') +
             `💬 "${boldKeyword(_preview, _matchOwner)}"`
           );
-          require('./src/keyword-alerts').logAlert(_matchOwner, _grpCht.name || msg.to, 'אתה', _preview);
+          require('./src/keyword-alerts').logAlert(_matchOwner, _grpCht.name || msg.to, 'אתה', _preview, { full: msg.body, msgId: msg.id && msg.id._serialized, chatId: msg.to });
         } catch (_oe) { /* silent */ }
       }
     }
@@ -6248,7 +6257,7 @@ client.on('message', async (msg) => {
             }
           }
           // Always log to keyword-alerts journal (whether war-room or solo alert)
-          require('./src/keyword-alerts').logAlert(_matchedKw, _groupNameForAlert, _sender, _preview);
+          require('./src/keyword-alerts').logAlert(_matchedKw, _groupNameForAlert, _sender, _preview, { full: msg.body, msgId: msg.id && msg.id._serialized, chatId: msg.from });
         } catch (_alertErr) { /* silent */ }
       }
     }

@@ -244,6 +244,8 @@ function _todayHits(limit = 120) {
         group: e.group || '',
         sender: e.sender || '',
         preview: e.preview || '',
+        full: e.full || null,
+        msgId: e.msgId || null,
         time: e.time || '',
         date: e.date || '',
         ts: e.timestamp || 0,
@@ -1257,6 +1259,14 @@ function attach(app, deps = {}) {
   });
 
   // ── מילות מפתח ─────────────────────────────────────────────────
+  app.post('/api/jarvis/keywords/show', guard, async (req, res) => {
+    const { msgId, group } = req.body || {};
+    if (!msgId || !deps.forwardToOwner) return res.status(400).json({ error: 'אין הודעה' });
+    try {
+      const ok = await deps.forwardToOwner(String(msgId), `👆 ההודעה המקורית${group ? ' מ"' + String(group).substring(0, 60) + '"' : ''}`);
+      res.status(ok ? 200 : 404).json(ok ? { ok: true, owner: String(process.env.OWNER_ID || '972524243250@c.us').split('@')[0] } : { error: 'ההודעה כבר לא נמצאת בוואטסאפ' });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
   app.get('/api/jarvis/keywords', guard, (_req, res) => {
     try {
       const ka = require('./keyword-alerts');
