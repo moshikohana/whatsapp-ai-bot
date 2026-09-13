@@ -139,7 +139,7 @@ async function _unanswered(since) {
               else if (S.LidUtils && S.LidUtils.getPhoneNumber) { const w = S.LidUtils.getPhoneNumber(c.id); pn = w ? (w.user || String(w._serialized || '').split('@')[0]) : null; }
             } catch (_) {}
             out.push(m
-              ? { id, name, pn, t: (m.t || c.t || 0) * 1000, unread: c.unreadCount || 0, fromMe: !!(m.id && m.id.fromMe), type: m.type, body: String(m.body || '').slice(0, 200) }
+              ? { id, name, pn, t: (m.t || c.t || 0) * 1000, unread: c.unreadCount || 0, fromMe: !!(m.id && m.id.fromMe), type: m.type, body: String(m.body || '').slice(0, 200), cap: String(m.caption || '').slice(0, 200) }
               : { id, name, pn, t, unread: c.unreadCount || 0, fromMe: !(c.unreadCount > 0), type: null, body: '' });
           } catch (_) {}
         }
@@ -155,7 +155,9 @@ async function _unanswered(since) {
       out.push({
         chatId: c.id, phone: c.pn || (c.id.endsWith('@c.us') ? c.id.split('@')[0] : null),
         name: c.name || 'איש קשר', unread: c.unread, time: _hm(c.t), ts: c.t,
-        last: kind ? `[${kind}]${c.body && c.type !== 'ptt' ? ' ' + c.body.substring(0, 150) : ''}` : c.body,
+        // A photo or video's body is its thumbnail in base64 ("9j/4AAQ…" on the home
+        // screen, 13.9) — its caption is the text.
+        last: kind ? `[${kind}]${c.cap ? ' ' + c.cap.substring(0, 150) : ''}` : c.body,
       });
     }
     logger.info(`📞 private chats active in window: ${(rows || []).length}, waiting for him: ${out.length}`);
