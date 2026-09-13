@@ -6883,6 +6883,67 @@ async function handleDocument(msg, caption, fileName, chatId) {
 
 // Recent group traffic for the מוקד digest — everything the bot cached since
 // the last digest, so the summary reflects what HAPPENED, not just keyword hits.
+/**
+ * 📄 פריט מהמוקד, במלואו: ההודעה המקורית (כל המלל), מאיזו קבוצה, מי ומתי,
+ * הקישורים שבה, והמקור החדשותי מהאפליקציות והערוצים על אותו סיפור. תמונה
+ * או סרטון — ההודעה עצמה מועברת אחריו. ("שיציג את המלל המלא וקישור להודעה
+ * או למקור החדשותי", 13.9)
+ */
+async function _showHubItem(chat, a, n) {
+  if (!a) { await botSend(chat, `🤔 אין פריט מספר ${n} במוקד.`); return; }
+  const na = require('./src/news-apps');
+  const when = ts => ts ? new Date(ts).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: 'numeric', month: 'numeric' }) + ' · ' +
+    new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' }) : '';
+  const topic = String(a.keyword || a.topic || '').trim();
+  let srcs = (a.msgIds || []).filter(s => s && s.msgId);
+  // An older digest kept no sources: the messages of the last hours on it.
+  // Words alone picked a wrong message ("בנט מתנגח" → a post on the left), so
+  // a few candidates go to the model, which says which are really about it.
+  const q = `${a.keyword || ''} ${a.topic || ''}`;
+  const _pick = async (cands, textOf) => {
+    if (!cands.length) return [];
+    const r = await require('./src/claude').classifyJSON(
+      `נושא: ${q}\n\nמועמדים:\n${cands.map((c, i) => `${i + 1}. ${String(textOf(c)).replace(/\s+/g, ' ').substring(0, 300)}`).join('\n')}`,
+      { system: 'אילו מהמועמדים עוסקים בדיוק בנושא הזה — אותו אירוע, אותם אנשים, אותה אמירה? אותה מפלגה או אותו תחום כללי — לא. אם אף אחד לא עוסק בדיוק בזה, החזר רשימה ריקה; עדיף בלי מקור מאשר מקור שגוי. החזר JSON בלבד: {"same":[מספרים]}',
+        maxTokens: 80, temperature: 0 });
+    return ((r && r.same) || []).map(k => cands[(+k || 0) - 1]).filter(Boolean);
+  };
+  const _dedupe = (arr, textOf) => arr.filter((x, i) => arr.findIndex(y => String(textOf(y)).replace(/\s+/g, ' ').substring(0, 100) === String(textOf(x)).replace(/\s+/g, ' ').substring(0, 100)) === i);
+  if (!srcs.length) {
+    const cands = _dedupe(_digestPool(Date.now() - 12 * 3600 * 1000).filter(m => m.id)
+      .map(m => ({ m, s: na.overlap(q, m.body) })).filter(x => x.s >= 1.5).sort((x, y) => y.s - x.s), x => x.m.body).slice(0, 8);
+    srcs = (await _pick(cands, x => `[${x.m.group}] ${x.m.body}`)).slice(0, 2).map(x => ({ msgId: x.m.id, chatId: x.m.cid, group: x.m.group }));
+  }
+  const parts = [`📄 *${a.n}. ${topic.substring(0, 90)}*`];
+  const toForward = [];
+  for (const s of srcs.slice(0, 2)) {
+    let orig = null;
+    try { orig = await client.getMessageById(s.msgId); } catch (_) {}
+    const cached = (_msgCache[s.chatId] || []).find(m => m.id === s.msgId) || {};
+    const body = String((orig && orig.body) || cached.body || '').trim();
+    const group = _jidNames.get(s.chatId) || s.group || 'קבוצה';
+    const sender = cached.sender || (orig && orig._data && orig._data.notifyName) || '';
+    const ts = ((orig && orig.timestamp) || cached.ts || 0) * 1000;
+    if (!body && !orig) continue;
+    const urls = [...new Set(body.match(/https?:\/\/\S+/g) || [])].slice(0, 3);
+    parts.push(`\n📍 *${group}*${sender ? ' · ' + sender : ''}${ts ? ' · ' + when(ts) : ''}\n${body.substring(0, 1800) || '(הודעה עם מדיה)'}` +
+      (urls.length ? `\n${urls.map(u => '🔗 ' + u).join('\n')}` : ''));
+    if (orig && orig.hasMedia) toForward.push(orig);
+  }
+  if (parts.length === 1) parts.push('\n🤷 לא מצאתי את ההודעה המקורית (ייתכן שנמחקה או שהיא ישנה מדי).');
+  // The news source: an app or channel item on the same story, with its link.
+  try {
+    const q = `${a.keyword || ''} ${a.topic || ''}`;
+    const cands = na.pushesBetween(Date.now() - 24 * 3600000, Date.now())
+      .map(p => ({ p, s: na.overlap(q, p.text) })).filter(x => x.s >= 1.5).sort((x, y) => y.s - x.s)
+      .filter((x, i, arr) => arr.findIndex(z => z.p.source === x.p.source) === i).slice(0, 8);
+    const rel = (await _pick(cands, x => `[${x.p.source}] ${x.p.text}`)).slice(0, 3);
+    if (rel.length) parts.push('\n📰 *במקורות החדשותיים:*\n' + rel.map(({ p }) => `• ${p.source} · ${when(p.ts)} — ${p.text.substring(0, 120)}${p.link ? '\n  🔗 ' + p.link : ''}`).join('\n'));
+  } catch (_) {}
+  await botSend(chat, parts.join('\n'));
+  for (const o of toForward) { try { await o.forward(chat); } catch (_) {} }
+}
+
 function _digestPool(sinceMs) {
   const cutoff = Math.floor((sinceMs || (Date.now() - 6 * 3600 * 1000)) / 1000);
   const out = [];
@@ -6890,7 +6951,7 @@ function _digestPool(sinceMs) {
     const name = _jidNames.get(cid) || cid;
     for (const m of msgs) {
       if (m && m.ts > cutoff && m.body && m.body.length > 25) {
-        out.push({ group: name, sender: m.sender || '', body: m.body, ts: m.ts });
+        out.push({ group: name, sender: m.sender || '', body: m.body, ts: m.ts, id: m.id || '', cid });
       }
     }
   }
@@ -7626,10 +7687,15 @@ async function route(chatId, text, chat) {
   {
     const _t = text.trim();
     const _verb = /(הצג|תגובה|הפצה|שקט|התעלם)/;
-    const _m1 = _t.match(/^([1-9])\s*(הצג|תגובה|הפצה|שקט|התעלם|מידע)\s*[?!.]?$/);
-    const _m2 = _t.match(/^(הצג|תגובה|הפצה|שקט|התעלם|מידע)\s*([1-9])?\s*[?!.]?$/);
+    // Several at once — "הצג 1 2 3", "הצג 1,2", "הצג הכל" (13.9: "הצג 1 2 3" went to the chat model).
+    const _NUMS = '([1-9](?:[\\s,ו-]+[1-9])*)';
+    const _m1 = _t.match(new RegExp('^' + _NUMS + '\\s*(הצג|תגובה|הפצה|שקט|התעלם|מידע)\\s*[?!.]?$'));
+    const _m2 = _t.match(new RegExp('^(הצג|תגובה|הפצה|שקט|התעלם|מידע)\\s*(?:' + _NUMS + '|(את הכל|הכל|כולם|את כולם))?\\s*[?!.]?$'));
     if (_m1 || _m2) {
-      const _num = _m1 ? _m1[1] : (_m2[2] || null);
+      const _numStr = _m1 ? _m1[1] : (_m2[2] || '');
+      const _numList = (_numStr.match(/[1-9]/g) || []);
+      const _all = !!(_m2 && _m2[3]);
+      const _num = _numList[0] || null;
       const _kind = _m1 ? _m1[2] : _m2[1];
       // Prefer the in-memory map, fall back to the persisted list.
       let _acts = pendingHubActions;
@@ -7638,6 +7704,13 @@ async function route(chatId, text, chat) {
         _acts = new Map(saved.map(a => [String(a.n), a]));
       }
       if (_acts.size) {
+        // 📄 הצג — each item: the whole message, where and when, and its source.
+        if (_kind === 'הצג' && (_numList.length > 1 || _all)) {
+          const nums = _all ? [..._acts.keys()] : _numList;
+          (async () => { for (const n of nums) { try { await _showHubItem(chat, _acts.get(n), n); } catch (e) { logger.warn('hub show: ' + (e.message || '').substring(0, 60)); } } })();
+          pendingHubActions = _acts;
+          return `📄 שולף ${nums.length} פריטים מהמוקד — ההודעה המלאה והמקור של כל אחד…`;
+        }
         let _act = null;
         if (_num) _act = _acts.get(_num);
         else if (_acts.size === 1) _act = [..._acts.values()][0];
@@ -7653,23 +7726,8 @@ async function route(chatId, text, chat) {
           return `🔕 מושתק ל-12 שעות — לא אטריד אותך על "${_topic.substring(0, 40)}".`;
         }
         if (_kind === 'הצג') {
-          const _srcs = _act.msgIds || [];
-          if (!_srcs.length) return `🤷 אין לי את ההודעה המקורית לפריט ${_act.n} (ייתכן שנמחקה).`;
-          (async () => {
-            let sent = 0;
-            for (const { msgId } of _srcs) {
-              try {
-                const orig = await client.getMessageById(msgId);
-                if (orig) { await orig.forward(chat); sent++; }
-              } catch (e) { logger.warn('forward source failed: ' + (e.message || '').substring(0, 60)); }
-            }
-            try {
-              await botSend(chat, sent
-                ? '👆 ההודעה המקורית למעלה — הקש עליה כדי לקפוץ לקבוצה.'
-                : '❌ לא הצלחתי לשלוף את ההודעה המקורית (ייתכן שנמחקה).');
-            } catch {}
-          })();
-          return `📄 שולף את ההודעה המקורית של פריט ${_act.n}...`;
+          (async () => { try { await _showHubItem(chat, _act, _act.n); } catch (e) { logger.warn('hub show: ' + (e.message || '').substring(0, 60)); } })();
+          return `📄 שולף את פריט ${_act.n} — ההודעה המלאה והמקור…`;
         }
         if (_kind === 'הפצה') {
           pendingDistribution.set(OWNER_ID, { raw: '', phase: 'collect', expiresAt: Date.now() + 20 * 60 * 1000 });

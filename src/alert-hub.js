@@ -147,18 +147,22 @@ async function _extractActionable(pool) {
   const relevant = pool.filter(m => REL_RE.test(m.body || ''));
   if (relevant.length < 3) return [];
 
+  // Numbered, so each topic can say which messages it came from — "הצג 1"
+  // had nothing to show for a topic the model had put together (13.9).
   let corpus = '';
+  const used = [];
   for (const m of relevant.slice(-120)) {
-    const line = `[${m.group}] ${(m.body || '').replace(/\s+/g, ' ').substring(0, 170)}\n`;
+    const line = `#${used.length + 1} [${m.group}] ${(m.body || '').replace(/\s+/g, ' ').substring(0, 170)}\n`;
     if (corpus.length + line.length > MAX_POOL_CHARS) break;
     corpus += line;
+    used.push(m);
   }
   if (!corpus.trim()) return [];
 
   try {
     const call = require('./claude').classifyJSON(corpus, {
       system: 'אתה יועץ תקשורת של ח"כ אריאל קלנר (הליכוד). קבל הודעות מקבוצות פוליטיות והחזר JSON בלבד: ' +
-        '{"items":[{"type":"opportunity|attack|rival","title":"כותרת קצרה","why":"למה זה נוגע לקלנר - משפט","action":"מה לעשות - משפט קצר","urgency":1-5}]}. ' +
+        '{"items":[{"type":"opportunity|attack|rival","title":"כותרת קצרה","why":"למה זה נוגע לקלנר - משפט","action":"מה לעשות - משפט קצר","urgency":1-5,"src":[מספרי ההודעות (#) שעליהן הפריט מבוסס, עד 3]}]}. ' +
         'עד 5 פריטים, רק מה שבאמת דורש את קלנר: הזדמנות להגיב/להוביל, ביקורת שצריך לענות עליה, או מסר של יריבים שצובר תאוצה. ' +
         'אל תכלול חדשות כלליות שלא נוגעות לו. אם אין כלום רלוונטי — החזר {"items":[]}. ' +
         'כתוב בעברית פשוטה ויומיומית, בלי מילים של יועצים (לא "נרטיב", "ריטורי", "סוגיה", "מסר מצטבר תאוצה"). ' +
@@ -171,6 +175,10 @@ async function _extractActionable(pool) {
       new Promise(res => setTimeout(() => res(null), EXTRACT_TIMEOUT_MS)),
     ]);
     const items = (j && Array.isArray(j.items)) ? j.items : [];
+    for (const it of items) {
+      it.srcMsgs = (Array.isArray(it.src) ? it.src : []).map(k => used[(+k || 0) - 1]).filter(m => m && m.id)
+        .slice(0, 3).map(m => ({ msgId: m.id, chatId: m.cid, group: m.group }));
+    }
     return items.filter(i => i && i.title)
       .sort((a, b) => (b.urgency || 0) - (a.urgency || 0)).slice(0, 5);
   } catch { return []; }
@@ -199,7 +207,7 @@ async function buildDigest(pool) {
 
   focus.forEach(f => {
     n++;
-    actions.push({ n, topic: _snip(`${f.title} — ${f.why || ''}`, 90), keyword: f.title, msgIds: [] });
+    actions.push({ n, topic: _snip(`${f.title} — ${f.why || ''}`, 90), keyword: f.title, msgIds: f.srcMsgs || [] });
     const tag = ICON[f.type] || '⚪ לתשומת לב';
     out += `\n\n*${n}. ${_snip(f.title, 70)}*\n${tag}${(f.urgency || 0) >= 4 ? ' · דחוף' : ''}`;
     if (f.why) out += `\nלמה זה חשוב: ${_snip(f.why, 120)}`;
@@ -216,13 +224,13 @@ async function buildDigest(pool) {
         n,
         topic: _snip(c.rep.preview || c.rep.keyword || '', 80),
         keyword: c.rep.keyword,
-        msgIds: c.items.map(it => ({ msgId: it.msgId, chatId: it.chatId })).filter(x => x.msgId).slice(0, 3),
+        msgIds: c.items.map(it => ({ msgId: it.msgId, chatId: it.chatId, group: it.group })).filter(x => x.msgId).slice(0, 3),
       });
       out += `\n\n*${n}. "${c.rep.keyword}"* — ${where}, ${hhmm(c.rep.ts)}\n${_snip(c.rep.preview, 120)}`;
     });
   }
 
-  out += `\n${'━'.repeat(14)}\n↩️ כתוב מספר ומה לעשות, למשל *1 תגובה*\n• *תגובה* — טיוטה מוכנה בשבילך\n• *הצג* — ההודעות המקוריות\n• *הפצה* — להעביר לקבוצות\n• *שקט* — לא להביא את הנושא הזה שוב`;
+  out += `\n${'━'.repeat(14)}\n↩️ כתוב מספר ומה לעשות, למשל *1 תגובה*\n• *תגובה* — טיוטה מוכנה בשבילך\n• *הצג* — ההודעה המלאה והמקור (אפשר כמה: *הצג 1 2 3*)\n• *הפצה* — להעביר לקבוצות\n• *שקט* — לא להביא את הנושא הזה שוב`;
 
   return { text: out.trim(), actions };
 }
