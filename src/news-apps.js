@@ -111,7 +111,9 @@ function addMany(items) {
   _save(list.filter(x => x.ts >= cutoff).sort((a, b) => b.ts - a.ts).slice(0, 5000));
   // Radio matching (a model call per push, up to three times) is for the
   // apps' race against the radio; channel posts only join stories.
-  for (const it of fresh) { _queue.push({ kind: 'twin', id: it.id }); if (_isApp(it)) _queue.push({ kind: 'push', id: it.id }); }
+  // A recap ("כותרות החג") repeats the day's news: it joins stories but is not
+  // in the race — matched to the radio, N12 "came 143 minutes after it" (13.9).
+  for (const it of fresh) { _queue.push({ kind: 'twin', id: it.id }); if (_isApp(it) && !it.part) _queue.push({ kind: 'push', id: it.id }); }
   _drain();
   return added;
 }
@@ -130,6 +132,7 @@ function tick() {
     split.push(..._splitInto(all0, r));
     if (r.roundup) changed = true;
   }
+  for (const p of all0) if (p.part && p.radio) { delete p.radio; changed = true; }
   if (changed) {
     _save(all0);
     logger.info(`📰 roundups split: ${split.length} stories`);
@@ -141,7 +144,7 @@ function tick() {
     if (!p.skip && !p.rejoin && p.story === p.id && now - p.ts > 15 * 60000 && now - p.ts < 3 * 3600000) _queue.push({ kind: 'rejoin', id: p.id });
   }
   for (const p of _load()) {
-    if (p.radio || p.skip || !_isApp(p)) continue;
+    if (p.radio || p.skip || p.part || !_isApp(p)) continue;
     const age = now - p.ts;
     const due = [20, 60, 120][(p.checks || 1) - 1];
     if (due && age >= due * 60000 && age < 135 * 60000) _queue.push({ kind: 'push', id: p.id });
@@ -441,7 +444,10 @@ function latest(hours = 12, limit = 20) {
     const apps = {}, texts = {}, vias = {};
     for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) { apps[m.source] = m.ts; texts[m.source] = m.text.substring(0, 160); vias[m.source] = m.via || 'app'; }
     const order = Object.entries(apps).sort((a, b) => a[1] - b[1]);
-    const appOrder = order.filter(([src]) => vias[src] === 'app');
+    // In the story only through a recap: a source, not a contender.
+    const recaps = [...new Set(st.members.filter(m => m.part).map(m => m.source))]
+      .filter(src => !st.members.some(m => m.source === src && !m.part));
+    const appOrder = order.filter(([src]) => vias[src] === 'app' && !recaps.includes(src));
     const reporters = [...new Set(st.members.filter(m => m.reporter).map(m => m.source))];
     // The headline: an app's wording when there is one (edited), else a reporter's.
     const titleSrc = (appOrder[0] || order.find(([src]) => reporters.includes(src)) || order[0] || [null])[0];
@@ -449,7 +455,7 @@ function latest(hours = 12, limit = 20) {
       id: st.members[0].id,
       memberIds: st.members.map(m => m.id),
       title: titleSrc ? texts[titleSrc] : st.members[0].text.substring(0, 160),
-      apps, texts, vias, reporters,
+      apps, texts, vias, reporters, recaps,
       first: appOrder.length > 1 ? appOrder[0][0] : null,
       firstAny: order.length > 1 ? order[0][0] : null,
       firstTs: order.length ? order[0][1] : st.members[0].ts,
@@ -500,7 +506,7 @@ function duel(hours = 24) {
     s.pushes++; s.lastTs = Math.max(s.lastTs, p.ts);
   }
   for (const st of latest(hours, 500)) {
-    const e = Object.entries(st.apps).filter(([src]) => (st.vias || {})[src] === 'app');
+    const e = Object.entries(st.apps).filter(([src]) => (st.vias || {})[src] === 'app' && !(st.recaps || []).includes(src));
     if (e.length < 2) continue;
     const t0 = Math.min(...e.map(x => x[1]));
     for (const [src, t] of e) {
@@ -519,7 +525,7 @@ function duel(hours = 24) {
 function stats(days = 7) {
   const since = Date.now() - days * 86400000;
   const out = {};
-  for (const p of _load().filter(x => x.ts >= since && !x.skip && _isApp(x))) {
+  for (const p of _load().filter(x => x.ts >= since && !x.skip && !x.part && _isApp(x))) {
     const s = out[p.source] || (out[p.source] = { source: p.source, pushes: 0, matched: 0, radioFirst: 0, appFirst: 0, leads: [] });
     s.pushes++;
     if (p.radio) {
