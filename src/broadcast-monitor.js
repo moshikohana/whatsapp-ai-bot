@@ -98,12 +98,15 @@ const ASR_DAY = 28800;
 const ASR_MODELS = ['whisper-large-v3-turbo', 'whisper-large-v3'];
 const ASR_RESERVE = { 'whisper-large-v3-turbo': 0, 'whisper-large-v3': 9000 };
 const ASR_FILE = path.join(__dirname, '..', 'data', 'broadcast', 'asr-usage.json');
-const _asrBlocked = {};          // model → until ts
+// model → until ts. Kept on disk: after a restart the app said "15 hours left"
+// while the main allowance was spent (13.9).
+const _asrBlocked = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, "..", "data", "broadcast", "asr-usage.json"), "utf8")).__blocked || {}; } catch (_) { return {}; } })();
 let _asrWarned = 0;
 function _asrUsage() {
   let u = {};
   try { u = JSON.parse(fs.readFileSync(ASR_FILE, 'utf8')); } catch (_) {}
   const since = Date.now() - 86400000;
+  delete u.__blocked;
   for (const m of Object.keys(u)) u[m] = (u[m] || []).filter(e => e[0] > since);
   return u;
 }
@@ -113,7 +116,7 @@ function _asrRecord(model, sec, exact = null) {
   // Groq said how much is used: replace the estimate with its number.
   if (exact != null) u[model] = [[Date.now(), exact]];
   else (u[model] = u[model] || []).push([Date.now(), Math.round(sec)]);
-  try { fs.mkdirSync(path.dirname(ASR_FILE), { recursive: true }); fs.writeFileSync(ASR_FILE, JSON.stringify(u)); } catch (_) {}
+  try { fs.mkdirSync(path.dirname(ASR_FILE), { recursive: true }); fs.writeFileSync(ASR_FILE, JSON.stringify({ ...u, __blocked: _asrBlocked })); } catch (_) {}
 }
 /** כמה נשאר היום לכל מודל — ללוג ולאפליקציה. */
 function asrStatus() {
@@ -148,6 +151,7 @@ async function transcribe(file, { priority = 'low' } = {}) {
           const w = msg.match(/try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/);
           const wait = w ? ((+w[1] || 0) * 3600 + (+w[2] || 0) * 60 + (+w[3] || 0)) * 1000 : 10 * 60000;
           _asrBlocked[model] = Date.now() + Math.max(wait, 60000);
+          _asrRecord(model, 0);   // saves the block with the usage
           if (Date.now() - _asrWarned > 20 * 60000) {
             _asrWarned = Date.now();
             logger.warn(`🎙️ Groq ${model}: daily audio allowance reached — ${ASR_MODELS[ASR_MODELS.indexOf(model) + 1] ? 'moving to ' + ASR_MODELS[ASR_MODELS.indexOf(model) + 1] : 'nothing left'} (${msg.substring(0, 90)})`);
