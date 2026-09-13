@@ -33,13 +33,39 @@ function _has(hay, w) {
   return forms.some(f => hay.includes(f)) || (stem.length >= 4 && hay.includes(stem.slice(0, -1)));
 }
 
-/** מילים בטקסט שאין להן שום זכר בתמלול. */
+// 🔊 How a word sounds, roughly: the consonants, with letters that sound alike
+// merged. The transcript hears "עלי טאהר" as "אלי תהר" and "נבטיה" as "ענה
+// בתיה"; the checker took the right spelling for a fact that was never said
+// and rewrote it into the slip (21:00, 13.9). "רפח" and "דוחה" still differ.
+const _SOUND = { 'ט': 'ת', 'כ': 'ק', 'ך': 'ק', 'ח': 'ק', 'ס': 'ש', 'ם': 'מ', 'ן': 'נ', 'ף': 'פ', 'ץ': 'צ' };
+const _skel = w => [...String(w).replace(/[^֐-׿]/g, '')].filter(ch => !'אהויע'.includes(ch)).map(ch => _SOUND[ch] || ch).join('');
+function _soundIndex(transcript) {
+  const words = _norm(transcript).split(' ').filter(Boolean);
+  const idx = new Set();
+  const add = s => { if (s.length >= 2) idx.add(s); };
+  for (let i = 0; i < words.length; i++) {
+    for (const w of _forms(words[i])) {
+      add(_skel(w));
+      if (words[i + 1]) add(_skel(w + words[i + 1]));
+    }
+  }
+  return idx;
+}
+/** נשמע כמו משהו בתמלול — אותה מילה בכתיב של שגיאת שמיעה. */
+function _soundsIn(idx, w) {
+  return _forms(w).some(f => { const s = _skel(f); return s.length >= 2 && idx.has(s); });
+}
+
+/** מילים בטקסט שאין להן שום זכר בתמלול — לא בכתיב ולא בצליל. */
 function missingWords(text, transcript) {
   const hay = ' ' + _norm(transcript) + ' ';
+  let idx = null;
   const out = [];
   for (const w of new Set(_norm(text).split(' '))) {
     if (w.length < 3 || STOP.has(w) || /^\d{1,2}$/.test(w)) continue;
-    if (!_has(hay, w)) out.push(w);
+    if (_has(hay, w)) continue;
+    if (/[֐-׿]/.test(w) && _soundsIn(idx || (idx = _soundIndex(transcript)), w)) continue;
+    out.push(w);
   }
   return out;
 }
@@ -61,7 +87,9 @@ function relatedNews(text, fromTs, toTs, n = 3) {
 
 const SYSTEM = 'אתה בודק עובדות בחדר חדשות. לפניך תמלול רדיו, פריטים שנכתבו עליו, ולכל פריט כותרות קשורות מאפליקציות חדשות וערוצים מאותן שעות. ' +
   'לכל פריט: האם כל עובדה בו — שמות, מקומות, מספרים, מי עשה מה — מופיעה בתמלול? ניסוח אחר או מילה נרדפת זה בסדר; שם, מקום, מספר או אירוע שלא נאמרו — לא. ' +
-  'אסור "לתקן" לפי מה שאתה יודע על העולם: אם בתמלול נאמר "דוחה" — הפריט אומר "דוחה". ' +
+  'אסור "לתקן" לפי מה שאתה יודע על העולם: אם בתמלול נאמר "דוחה" — הפריט אומר "דוחה" (דוחה ורפח — שני מקומות שונים). ' +
+  'אבל התמלול אוטומטי ומלא שגיאות שמיעה וכתיב: "אלי תהר" = עלי טאהר, "ענה בתיה" = נבטיה, "ג\'רנל" = ג\'ורנל. כשהפריט כותב נכון שם שנשמע בתמלול משובש — זה תקין. לעולם אל תחליף כתיב נכון בשגיאת התמלול. ' +
+  'כשמתקנים — משנים רק את המילים השגויות, וכל השאר נשאר כמו שהוא. ' +
   'הכותרות מהאפליקציות הן לאימות: הן עוזרות להבין מילה שהתמלול שיבש (שגיאת שמיעה) ולזהות סתירה. עובדה שמופיעה רק בכותרות ולא נאמרה ברדיו — לא מוסיפים. ' +
   'מילה שמסומנת "לא בתמלול וגם לא באף כותרת" ושהיא שם של אדם, מקום, ארגון, מדינה או מספר — חובה להוציא אותה: ok:false וכתוב את הפריט מחדש בלעדיה, לפי התמלול. ' +
   'entities: אילו מהמילים שלא נמצאו בתמלול הן שם של אדם, מקום, ארגון, מדינה או מספר (לא מילים רגילות). ' +

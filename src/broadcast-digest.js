@@ -525,7 +525,7 @@ async function recheckRecent() {
 
 function formatDigest(d) {
   if (!d) return '';
-  const lines = [`📻 *מה נאמר בשידור* · ${d.label}`];
+  const lines = [`📻 *מה נאמר בשידור* · ${new Date(d.from).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: 'numeric', month: 'numeric' })} · ${d.label}`];
   if (d.programs?.length) {
     const p = d.programs
       .filter(x => x.name)

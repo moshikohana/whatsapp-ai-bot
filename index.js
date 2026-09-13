@@ -4536,8 +4536,8 @@ client.on('message_create', async (msg) => {
         const clip = await bd.cutClip(target.station, target.ts, target.q);
         if (!clip) { await botSend(_hc, '🎧 קטע השמע כבר לא שמור — שמע נשמר 4 שעות, וקטעים חשובים 30 יום.'); return; }
         const { MessageMedia } = require('whatsapp-web.js');
-        const hhmm = new Date(clip.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
-        const name = `${clip.station} ${hhmm.replace(':', '-')}.mp3`;
+        const hhmm = new Date(clip.ts).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: 'numeric', month: 'numeric' }) + ' · ' + new Date(clip.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+        const name = `${clip.station} ${hhmm.replace(' · ', ' ').replace(':', '-').replace(/\//g, '.')}.mp3`;
         await _hc.sendMessage(new MessageMedia('audio/mpeg', fs.readFileSync(clip.file).toString('base64'), name), {
           sendMediaAsDocument: true,
           caption: `🎧 ${clip.station} · ${hhmm} · ${Math.round(clip.len)} שנ׳` + (clip.sentence ? `\n"${clip.sentence.substring(0, 300)}"` : '') + BOT_MARKER,
@@ -8644,7 +8644,8 @@ setInterval(async () => {
     // speaker and the verified quote, so it reaches him while it is still news
     // rather than an hour later inside a summary.
     for (const h of (hits.headlines || [])) {
-      const time = new Date(h.ts).toLocaleTimeString('he-IL', {
+      // With the date — a time alone was read as today when it was yesterday (13.9).
+      const time = new Date(h.ts).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: 'numeric', month: 'numeric' }) + ' · ' + new Date(h.ts).toLocaleTimeString('he-IL', {
         timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit',
       });
       const who = [h.speaker, h.role].filter(Boolean).join(', ');
@@ -8805,7 +8806,7 @@ setInterval(async () => {
     if (!(d.topics || []).length && !(d.quotes || []).length && !freshNews) return;
     try {
       require('./src/jarvis-api').pushAlert({
-        title: `📻 מה נאמר בשידור · ${d.label}`,
+        title: `📻 מה נאמר בשידור · ${new Date(d.from).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: 'numeric', month: 'numeric' })} · ${d.label}`,
         // "0 ציטוטים" (13.9) was an hour whose only news was the bulletin.
         summary: (d.topics || []).map(t => t.title).slice(0, 3).join(' · ')
           || (bulletin ? (bulletin.headlines || []).filter(h => h.status !== 'repeat').map(h => h.text).slice(0, 2).join(' · ') : '')
@@ -8832,7 +8833,7 @@ setInterval(async () => {
     for (const f of fixes) (byLabel[f.label] = byLabel[f.label] || []).push(f);
     for (const [label, list] of Object.entries(byLabel)) {
       require('./src/jarvis-api').pushAlert({
-        title: `✏️ תיקון לתקציר ${label}`,
+        title: `✏️ תיקון לתקציר ${new Date().toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: 'numeric', month: 'numeric' })} · ${label}`,
         summary: list.map(f => f.after || f.summary).join(' · ').substring(0, 180),
         body: list.map(f => f.after
           ? `בתקציר נכתב:\n"${f.before}"\nנכון לפי השידור:\n"${f.after}"\n🔎 ${f.why}`
