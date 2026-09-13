@@ -102,6 +102,7 @@ function addMany(items) {
       if (it.link) item.link = String(it.link).substring(0, 200);
     }
     if (it.img) item.img = String(it.img).substring(0, 40);
+    if (it.cat) item.cat = it.cat;
     list.push(item);
     const parts = _splitInto(list, item);
     if (parts.length) fresh.push(...parts);

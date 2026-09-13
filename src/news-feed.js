@@ -113,10 +113,12 @@ function onWhatsApp({ cid, body, ts, media }) {
 const SYSTEM = `אתה עורך חדשות. לפניך פוסטים מערוצי חדשות וקבוצות עדכונים בוואטסאפ ובטלגרם.
 לכל פוסט החלט: האם הוא ידיעה — דיווח על אירוע, אמירה של אדם, החלטה, נתון או עובדה חדשה?
 לא ידיעה: דעה או פרשנות בלבד, פרסומת, ברכה, הזמנה להצטרף, בדיחה, שאלה, שיחה, קישור בלי תוכן, סקר "מה דעתכם".
+✅ כן ידיעה, גם כשהפוסט כתוב בכעס או עם דעה: טענה או חשיפה שכלי תקשורת פרסם מידע שגוי, הכחשה של דיווח, פרסום שנמחק או תוקן, עימות סביב דיווח — בעיקר בענייני ביטחון, יהודה ושומרון ופנים ישראל. פוסט שמשלב דעה עם עובדה חדשה הוא ידיעה, והכותרת לפי העובדה (למשל: "אבו עלי: ערוץ 13 פרסם בטעות שמתנחלים הציתו שדות — בפועל כיבו שריפה; הציוץ נמחק").
+cat — קטגוריה: "ביטחון" (צבא, מלחמה, פיגועים, יו"ש, ביטחון פנים), "פנים ישראל" (חברה, משטרה, משפט, תקשורת בישראל), "פוליטיקה", "חוץ", "אחר".
 לידיעה — כתוב כותרת של משפט אחד בעברית, נאמנה לפוסט, בלי להוסיף פרט שאין בו.
 ⚠️ השם בסוגריים המרובעים הוא הערוץ ששלח את הפוסט — לא נושא הידיעה. אל תכניס אותו לכותרת כאילו הידיעה עליו ("רכב של אבו עלי אקספרס הותקף" — שגוי).
 ⚠️ פוסט שהוא המשך של פוסט קודם ("כך נראה הרכב שהותקף", "תיעוד מהזירה") — הכותרת לפי ההקשר שבשורת "הקודם" אם יש; בלי הקשר — news:false.
-החזר JSON בלבד: {"items":[{"n":מספר הפוסט,"news":true|false,"headline":"כותרת או null"}]}`;
+החזר JSON בלבד: {"items":[{"n":מספר הפוסט,"news":true|false,"headline":"כותרת או null","cat":"ביטחון|פנים ישראל|פוליטיקה|חוץ|אחר"}]}`;
 
 let _busy = false;
 async function _flush() {
@@ -141,13 +143,15 @@ async function _flush() {
       if (p.media) { try { img = await _saveMedia(await Promise.race([p.media(), new Promise(r2 => setTimeout(() => r2(null), 20000))])); } catch (_) {} }
       out.push({
         source: p.source, via: p.via, title: String(it.headline).substring(0, 240), text: '',
+        cat: ['ביטחון', 'פנים ישראל', 'פוליטיקה', 'חוץ', 'אחר'].includes(it.cat) ? it.cat : undefined,
         full: p.text, ts: p.ts, link: p.link, reporter: isReporter(p.source), img,
       });
     }
+    if (!r) logger.warn(`📡 feed: classification failed — ${batch.length} posts not judged`);
     if (out.length) {
       const added = require('./news-apps').addMany(out);
       logger.info(`📡 feed: ${batch.length} posts → ${out.length} news (${added} new) · ${out.filter(o => o.reporter).map(o => o.source).join(', ')}`);
-    }
+    } else if (r) logger.info(`📡 feed: ${batch.length} posts → no news · ${[...new Set(batch.map(p => p.source))].join(', ').substring(0, 80)}`);
   } catch (e) { logger.warn('📡 feed: ' + (e.message || '').substring(0, 70)); }
   finally { _busy = false; }
 }
@@ -201,9 +205,39 @@ async function _pollReporters() {
 }
 
 let _started = false;
+/**
+ * 🔁 הערוצים מהשעות האחרונות, עוד פעם — אחרי הפעלה. פוסט שנדחה בטעות (הסיפור
+ * של ערוץ 13 ב-13.9) או שנפל עם קבוצה שלא פוענחה מקבל הזדמנות שנייה. פוסט
+ * שכבר נכנס כידיעה לא נשלח שוב.
+ */
+function catchUp(hours = 4) {
+  try {
+    const src = require('./news-prior')._groupSource();
+    if (!src) return 0;
+    const cache = src.cache() || {};
+    const known = new Set(require('./news-apps').pushesBetween(Date.now() - (hours + 1) * 3600000, Date.now())
+      .map(p => String(p.full || '').replace(/\s+/g, ' ').substring(0, 80)).filter(Boolean));
+    let n = 0;
+    for (const [cid, msgs] of Object.entries(cache)) {
+      if (!_sources().wa.get(cid)) continue;
+      for (const m of msgs || []) {
+        const ts = (m.ts || 0) * 1000;
+        if (ts < Date.now() - hours * 3600000 || !m.body) continue;
+        if (known.has(String(m.body).trim().replace(/\s+/g, ' ').substring(0, 80))) continue;
+        const before = _pending.length;
+        onWhatsApp({ cid, body: m.body, ts });
+        n += _pending.length - before;
+      }
+    }
+    if (n) logger.info(`📡 feed: catch-up — ${n} channel posts from the last ${hours}h judged again`);
+    return n;
+  } catch (e) { logger.warn('📡 feed catch-up: ' + (e.message || '').substring(0, 60)); return 0; }
+}
+
 function start() {
   if (_started) return;
   _started = true;
+  setTimeout(catchUp, 3 * 60000);
   setInterval(_flush, 45000);
   setTimeout(_hookTelegram, 20000);
   setInterval(_hookTelegram, 5 * 60000);        // re-hook after a reconnect
@@ -301,4 +335,4 @@ async function backfillMedia(hours = 24, force = false) {
   return { done, tried };
 }
 
-module.exports = { saveMedia: _saveMedia, start, onWhatsApp, isReporter, reporters, status, telegramTwin, linkInText, mediaPath, backfillMedia };
+module.exports = { catchUp, saveMedia: _saveMedia, start, onWhatsApp, isReporter, reporters, status, telegramTwin, linkInText, mediaPath, backfillMedia };

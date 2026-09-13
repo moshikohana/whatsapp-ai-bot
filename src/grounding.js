@@ -161,7 +161,8 @@ async function ground(items, transcript, { label = '', window = null } = {}) {
     if (!x) return it;
     if (!x.changed) return x.confirmed.length ? { ...it, confirmed: x.confirmed } : it;
     if (!x.drop) logger.info(`🔎 grounded${label ? ' ' + label : ''}: "${String(Object.values(it.fields)[0]).substring(0, 50)}" → "${String(Object.values(x.fields)[0]).substring(0, 50)}" (${String(x.wrong || '').substring(0, 60)})`);
-    return { ...it, fields: x.fields, confirmed: x.confirmed, corrected: String(x.wrong || 'תוקן לפי התמלול').substring(0, 120), ...(x.drop ? { drop: true } : {}) };
+    // removed: the names from nowhere taken out — what makes a change worth telling him.
+    return { ...it, fields: x.fields, confirmed: x.confirmed, corrected: String(x.wrong || 'תוקן לפי התמלול').substring(0, 120), removed: x.bad || [], ...(x.drop ? { drop: true } : {}) };
   });
 }
 

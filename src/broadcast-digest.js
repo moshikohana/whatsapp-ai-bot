@@ -512,7 +512,8 @@ async function recheckRecent() {
         fixes.push({ label: cur.label, before: t.title, after: null, summary: 'הנושא הוסר — מה שנכתב בו לא נאמר בשידור.', why: x.corrected });
         t.drop = true;
       } else if (x.corrected && (x.fields.title !== t.title || x.fields.summary !== t.summary)) {
-        fixes.push({ label: cur.label, before: `${t.title} — ${t.summary}`, after: x.fields.title, summary: x.fields.summary || t.summary, why: x.corrected });
+        // Rewording is updated quietly; a fact taken out is told ("עומאן"/"אומן" went out as a correction, 13.9).
+        if ((x.removed || []).length) fixes.push({ label: cur.label, before: `${t.title} — ${t.summary}`, after: x.fields.title, summary: x.fields.summary || t.summary, why: x.corrected });
         t.title = x.fields.title; t.summary = x.fields.summary || t.summary; t.corrected = x.corrected;
       }
     });

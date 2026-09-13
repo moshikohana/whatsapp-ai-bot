@@ -8827,16 +8827,19 @@ setInterval(async () => {
 setInterval(async () => {
   try {
     const fixes = await require('./src/broadcast-digest').recheckRecent();
-    for (const f of fixes) {
+    // One correction per digest, however many of its topics were wrong.
+    const byLabel = {};
+    for (const f of fixes) (byLabel[f.label] = byLabel[f.label] || []).push(f);
+    for (const [label, list] of Object.entries(byLabel)) {
       require('./src/jarvis-api').pushAlert({
-        title: `✏️ תיקון לתקציר ${f.label}`,
-        summary: f.after || f.summary,
-        body: f.after
-          ? `בתקציר נכתב:\n"${f.before}"\n\nנכון לפי השידור:\n"${f.after}"\n${f.summary}\n\n🔎 ${f.why}`
-          : `בתקציר נכתב:\n"${f.before}"\n\n${f.summary}\n\n🔎 ${f.why}`,
+        title: `✏️ תיקון לתקציר ${label}`,
+        summary: list.map(f => f.after || f.summary).join(' · ').substring(0, 180),
+        body: list.map(f => f.after
+          ? `בתקציר נכתב:\n"${f.before}"\nנכון לפי השידור:\n"${f.after}"\n🔎 ${f.why}`
+          : `בתקציר נכתב:\n"${f.before}"\n${f.summary}\n🔎 ${f.why}`).join('\n\n———\n\n'),
         kind: 'correction', urgency: 'high',
       });
-      logger.info(`✏️ digest correction sent: ${f.label} — ${f.after.substring(0, 50)}`);
+      logger.info(`✏️ digest correction sent: ${label} — ${list.length} item(s)`);
     }
   } catch (e) { logger.warn('digest recheck loop: ' + (e.message || '').substring(0, 60)); }
 }, 5 * 60 * 1000);

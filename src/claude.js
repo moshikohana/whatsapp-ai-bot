@@ -1226,10 +1226,25 @@ async function classifyJSON(userMessage, { system, maxTokens = 2000, model = 'cl
  */
 function parseLooseJSON(raw) {
   const gersh = s => s.replace(/([֐-׿])"(?=[֐-׿])/g, '$1״');
+  // A quote inside a value — ב"הארץ" על — closes the string early. Inside a
+  // string, a " is its end only when , } ] or : follows; otherwise escaped.
+  const stray = s => {
+    let out = '', inStr = false;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (inStr && ch === '\\') { out += ch + (s[i + 1] || ''); i++; continue; }
+      if (ch !== '"') { out += ch; continue; }
+      if (!inStr) { inStr = true; out += ch; continue; }
+      let j = i + 1; while (j < s.length && /\s/.test(s[j])) j++;
+      if (j >= s.length || ',}]:'.includes(s[j])) { inStr = false; out += ch; } else out += '\\"';
+    }
+    return out;
+  };
   const tries = [
     s => s,
     gersh,
     s => gersh(s).replace(/[“”]/g, '"').replace(/,\s*([}\]])/g, '$1'),
+    s => stray(s.replace(/[“”]/g, '"')).replace(/,\s*([}\]])/g, '$1'),
   ];
   for (const t of tries) { try { return JSON.parse(t(raw)); } catch (_) {} }
   return undefined;
