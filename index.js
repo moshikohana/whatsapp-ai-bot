@@ -1857,11 +1857,13 @@ const MAX_WEEKLY_PHOTOS = 50; // keep max 50 photos
  * ו"בכלל לא בדק" נראו זהים לגמרי מבחוץ. זו הייתה השאלה שאי אפשר היה לענות
  * עליה כששלחו 40 תמונות בגן ולא קרה כלום.
  */
-function _logFaceCheck(buffer, groupName, outcome, detail, faces) {
+function _logFaceCheck(buffer, groupName, outcome, detail, faces, clean = null) {
   const ts = Date.now();
   try {
+    // The framed copy is for the list; the clean one is what gets confirmed
+    // into the album — the album had the green boxes in it (13.9, the film).
     require('./src/face-archive').recordCheck({
-      buffer, group: groupName, outcome, detail, faces, ts,
+      buffer, group: groupName, outcome, detail, faces, ts, clean: clean && clean !== buffer ? clean : null,
     }).catch(() => {});
   } catch (_) {}
   return ts;
@@ -4200,7 +4202,7 @@ client.on('message_create', async (msg) => {
                   // the one path he actually uses to test — קניות is his
                   // control group, so every photo he sent to check the feature
                   // was the one kind that never reached the log.
-                  _logFaceCheck(_ob, groupName, 'match', allNames, matches.length);
+                  _logFaceCheck(_ob, groupName, 'match', allNames, matches.length, imageBuffer);
                   for (const m of matches) {
                     _arch.record({
                       name: m.name, buffer: _ob, group: groupName,
@@ -6397,7 +6399,7 @@ client.on('message', async (msg) => {
         _queueFaceDoubts(allMatches.ambiguous, _cbuf, groupName, imageBuffer, allMatches.detections);
         _logFaceCheck(_cbuf, groupName, "candidate",
           whitelisted.map(m => `${m.name} ${m.confidence}% — נפסל בסינון`).join(", "),
-          (allMatches.detections || []).length);
+          (allMatches.detections || []).length, imageBuffer);
         _checkLogged = true;
         // 🟡 "Maybe": the right child for this group, under its floor but
         // not noise. On 10.9 שי was in the kindergarten photos at 22–32%
@@ -6450,7 +6452,7 @@ client.on('message', async (msg) => {
         _queueFaceDoubts(allMatches.ambiguous, _buf, groupName, imageBuffer, allMatches.detections);
         _logFaceCheck(_buf, groupName, "match",
           matches.map(m => `${m.name} ${m.confidence}%`).join(", "),
-          (matches.detections || []).length);
+          (matches.detections || []).length, imageBuffer);
       } catch (_) {}
 
       // Save for weekly album
@@ -6963,7 +6965,37 @@ function _canonicalizeCommand(text, quotedText = '') {
   return null;
 }
 
+// 🎞️ השבוע של מיה ושי: the film, sent to his chat — the preview picture first.
+async function _sendWeeklyVideo(chat) {
+  const wv = require('./src/weekly-video');
+  const job = require('./src/jobs').create('weekly', 'סרטון שבועי', 240);
+  const r = await wv.render({ onProgress: p => require('./src/jobs').update(job, { stage: 'מרנדר את הסרטון', pct: Math.round(p * 100) }) });
+  require('./src/jobs').done(job);
+  // Always to his WhatsApp — from the app, the chat is a stand-in that drops media.
+  const oc = await client.getChatById(OWNER_ID);
+  try { await oc.sendMessage(MessageMedia.fromFilePath(r.still), { caption: `🎞️ *השבוע של מיה ושי* — ${r.photos} תמונות, ${Math.round(r.seconds)} שניות\nהסרטון בהודעה הבאה 👇` + BOT_MARKER }); } catch (_) {}
+  await oc.sendMessage(MessageMedia.fromFilePath(r.video), { caption: '🎞️ השבוע של מיה ושי' + BOT_MARKER });
+  return r;
+}
+let _weeklySentFor = '';
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const il = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+    const key = il.toDateString();
+    if (il.getDay() !== 5 || il.getHours() !== 14 || _weeklySentFor === key) return;
+    _weeklySentFor = key;
+    logger.info('🎞️ weekly video: Friday, 14:00 — making it');
+    await _sendWeeklyVideo();
+  } catch (e) { logger.warn('🎞️ weekly video: ' + (e.message || '').substring(0, 80)); }
+}, 60000);
+
 async function route(chatId, text, chat) {
+  // 🎞️ "סרטון שבועי" / "השבוע של הבנות"
+  if (chatId === OWNER_ID && /^(סרטון שבועי|השבוע של (הבנות|מיה ושי)|סרטון השבוע)$/.test(String(text || '').trim())) {
+    _sendWeeklyVideo(chat).catch(async e => { try { await botSend(chat, '❌ הסרטון לא נבנה: ' + (e.message || '').substring(0, 100)); } catch (_) {} });
+    return '🎞️ מכין את *השבוע של מיה ושי* — עד 10 תמונות מהשבוע, עם מעברים ותאריכים. זה לוקח כ-4 דקות, ואז הוא יגיע אליך לוואטסאפ.';
+  }
   // 🎬 An answer to the open video question.
   if (chatId === OWNER_ID && _videoMenu) {
     const _v = await _tryVideoChoice(text);

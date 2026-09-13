@@ -248,7 +248,7 @@ async function _confirmedAlready(buffer) {
   return null;
 }
 
-async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts = Date.now() }) {
+async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts = Date.now(), clean = null }) {
   if (!buffer || !buffer.length) return null;
   // Sent again after he already said who is in it: nothing to check.
   let known = await _confirmedAlready(buffer);
@@ -272,13 +272,20 @@ async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts 
       full = file.replace(/\.jpg$/, '-full.jpg');
       fs.writeFileSync(path.join(CHECK_ROOT, full), await _fullOf(buffer));
     } catch { full = null; }
+    let cleanFile = null;
+    if (clean) {
+      try {
+        cleanFile = file.replace(/\.jpg$/, '-clean.jpg');
+        fs.writeFileSync(path.join(CHECK_ROOT, cleanFile), await _fullOf(clean));
+      } catch { cleanFile = null; }
+    }
 
     let list = _loadChecks();
     list.unshift({
       ts, file, full,
       group: String(group || '').substring(0, 80),
       outcome, detail: String(detail || '').substring(0, 120),
-      faces, sig: sigArr,
+      faces, sig: sigArr, clean: cleanFile || undefined,
     });
 
     // Trimmed by both age and count, and the files go with the entries — a
@@ -289,6 +296,7 @@ async function recordCheck({ buffer, group, outcome, detail = '', faces = 0, ts 
     for (const d of drop) {
       try { fs.unlinkSync(path.join(CHECK_ROOT, d.file)); } catch {}
       if (d.full) { try { fs.unlinkSync(path.join(CHECK_ROOT, d.full)); } catch {} }
+      if (d.clean) { try { fs.unlinkSync(path.join(CHECK_ROOT, d.clean)); } catch {} }
     }
     _saveChecks(keep);
     return { file };
@@ -332,7 +340,7 @@ function removeChecks({ ts = null, outcomes = null } = {}) {
   }
   let bytes = 0;
   for (const d of drop) {
-    for (const f of [d.file, d.full]) {
+    for (const f of [d.file, d.full, d.clean]) {
       if (!f) continue;
       const p = path.join(CHECK_ROOT, f);
       try { bytes += fs.statSync(p).size; fs.unlinkSync(p); } catch {}
@@ -349,6 +357,10 @@ function removeChecks({ ts = null, outcomes = null } = {}) {
 function checkFull(ts) {
   const c = _loadChecks().find(x => x.ts === ts);
   if (!c) return null;
+  // The clean photo first: what he confirms from the viewer goes to the album.
+  if (c.clean) {
+    try { return { image: fs.readFileSync(path.join(CHECK_ROOT, c.clean)).toString('base64'), full: true, clean: true }; } catch {}
+  }
   if (c.full) {
     try { return { image: fs.readFileSync(path.join(CHECK_ROOT, c.full)).toString('base64'), full: true }; } catch {}
   }
@@ -554,7 +566,7 @@ async function settleSame(buffer, { since = Date.now() - 72 * 3600000 } = {}) {
 function checkBuffer(ts) {
   const c = _loadChecks().find(x => x.ts === ts);
   if (!c) return null;
-  try { return fs.readFileSync(path.join(CHECK_ROOT, c.full || c.file)); } catch { return null; }
+  try { return fs.readFileSync(path.join(CHECK_ROOT, c.clean || c.full || c.file)); } catch { return null; }
 }
 
 /** חתימות לבדיקות שנרשמו לפני שנשמרה חתימה. */
