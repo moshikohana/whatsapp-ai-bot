@@ -44,7 +44,7 @@ async function _captureAll() {
     const f = await bm.captureChunk(st.url, CAPTURE_SEC);
     if (!f) { logger.warn('🗞️ bulletin: no audio from ' + st.name); return null; }
     try {
-      const text = await bm.transcribe(f);
+      const text = await bm.transcribe(f, { priority: "high" });   // the bulletin before routine samples
       logger.info('🗞️ bulletin: ' + st.name + ' → ' + (text || '').length + ' chars');
       if (!text) return null;
       // The bulletin is transcript like any other: searchable, and in the digest.

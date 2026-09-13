@@ -76,26 +76,84 @@ function captureChunk(url, seconds) {
   });
 }
 
-// ── Transcribe with Groq Whisper ─────────────────────────────────
-async function transcribe(file) {
+// ── Transcribe with Groq Whisper — within the daily allowance ────
+// Groq allows 28,800 seconds of audio a day per model. Sampling three stations
+// every four minutes is ~40,000 — by the evening the allowance was gone, and
+// the 19:00 and 20:00 bulletins came back empty with no word in the log (13.9).
+// Now: the turbo model first; a second model (its own allowance) when turbo is
+// spent — for the bulletins always, for routine samples only while enough of
+// it is left for bulletins and his voice notes (which use that model).
+const ASR_DAY = 28800;
+const ASR_MODELS = ['whisper-large-v3-turbo', 'whisper-large-v3'];
+const ASR_RESERVE = { 'whisper-large-v3-turbo': 0, 'whisper-large-v3': 9000 };
+const ASR_FILE = path.join(__dirname, '..', 'data', 'broadcast', 'asr-usage.json');
+const _asrBlocked = {};          // model → until ts
+let _asrWarned = 0;
+function _asrUsage() {
+  let u = {};
+  try { u = JSON.parse(fs.readFileSync(ASR_FILE, 'utf8')); } catch (_) {}
+  const since = Date.now() - 86400000;
+  for (const m of Object.keys(u)) u[m] = (u[m] || []).filter(e => e[0] > since);
+  return u;
+}
+function _asrUsed(u, model) { return (u[model] || []).reduce((s, e) => s + e[1], 0); }
+function _asrRecord(model, sec, exact = null) {
+  const u = _asrUsage();
+  // Groq said how much is used: replace the estimate with its number.
+  if (exact != null) u[model] = [[Date.now(), exact]];
+  else (u[model] = u[model] || []).push([Date.now(), Math.round(sec)]);
+  try { fs.mkdirSync(path.dirname(ASR_FILE), { recursive: true }); fs.writeFileSync(ASR_FILE, JSON.stringify(u)); } catch (_) {}
+}
+/** כמה נשאר היום לכל מודל — ללוג ולאפליקציה. */
+function asrStatus() {
+  const u = _asrUsage();
+  return ASR_MODELS.map(m => ({ model: m, used: _asrUsed(u, m), left: Math.max(0, ASR_DAY - _asrUsed(u, m)), blockedUntil: _asrBlocked[m] || null }));
+}
+
+async function transcribe(file, { priority = 'low' } = {}) {
   if (!process.env.GROQ_API_KEY) return '';
-  try {
-    const buf = fs.readFileSync(file);
-    const fd = new FormData();
-    fd.append('file', new Blob([buf], { type: 'audio/mpeg' }), 'chunk.mp3');
-    fd.append('model', 'whisper-large-v3-turbo');
-    fd.append('language', 'he');
-    const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + process.env.GROQ_API_KEY },
-      body: fd,
-    });
-    const j = await r.json();
-    return (j && j.text) ? j.text.trim() : '';
-  } catch (e) {
-    logger.warn?.('broadcast transcribe: ' + (e.message || '').substring(0, 70));
-    return '';
+  let buf;
+  try { buf = fs.readFileSync(file); } catch (_) { return ''; }
+  const sec = Math.max(1, buf.length / 6000);   // 48 kbps
+  const u = _asrUsage();
+  for (const model of ASR_MODELS) {
+    if ((_asrBlocked[model] || 0) > Date.now()) continue;
+    // Routine samples leave the second model's last hours to what matters.
+    if (priority !== 'high' && _asrUsed(u, model) + sec > ASR_DAY - (ASR_RESERVE[model] || 0)) continue;
+    try {
+      const fd = new FormData();
+      fd.append('file', new Blob([buf], { type: 'audio/mpeg' }), 'chunk.mp3');
+      fd.append('model', model);
+      fd.append('language', 'he');
+      const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + process.env.GROQ_API_KEY },
+        body: fd,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (j && j.error) {
+        const msg = String(j.error.message || '');
+        if (j.error.code === 'rate_limit_exceeded') {
+          const w = msg.match(/try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/);
+          const wait = w ? ((+w[1] || 0) * 3600 + (+w[2] || 0) * 60 + (+w[3] || 0)) * 1000 : 10 * 60000;
+          _asrBlocked[model] = Date.now() + Math.max(wait, 60000);
+          if (Date.now() - _asrWarned > 20 * 60000) {
+            _asrWarned = Date.now();
+            logger.warn(`🎙️ Groq ${model}: daily audio allowance reached — ${priority === 'high' ? 'trying the next model' : 'routine samples wait'} (${msg.substring(0, 90)})`);
+          }
+          continue;
+        }
+        logger.warn('broadcast transcribe: ' + msg.substring(0, 100));
+        return '';
+      }
+      _asrRecord(model, sec);
+      return (j && j.text) ? j.text.trim() : '';
+    } catch (e) {
+      logger.warn?.('broadcast transcribe: ' + (e.message || '').substring(0, 70));
+      return '';
+    }
   }
+  return '';
 }
 
 // Pull the sentence around a hit so the alert carries context, not a bare word.
@@ -210,6 +268,7 @@ function isEnabled() { return !!loadConfig().enabled; }
 function getRecent(n = 5) { return recent.slice(-n); }
 
 module.exports = {
+  asrStatus,
   STATIONS, checkOnce, formatHit, getStatus, listStations, toggleStation,
   addTerm, removeTerm, setEnabled, isEnabled, inActiveHours, loadConfig,
   saveConfig, getRecent, captureChunk, transcribe,

@@ -128,7 +128,11 @@ async function _classifyText(text, group, sender) {
 
 async function _classifyImage(buf, caption, group, sender) {
   const sharp = require('sharp');
-  const small = await sharp(buf).rotate().resize(1024, 1024, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
+  // A format sharp cannot read (HEIC, a sticker, a cut-off download) failed the
+  // whole check, several times an evening (13.9). The caption is still words.
+  let small;
+  try { small = await sharp(buf).rotate().resize(1024, 1024, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer(); }
+  catch (_) { return caption && caption.length >= 12 ? _classifyText(caption, group, sender) : null; }
   const Anthropic = require('@anthropic-ai/sdk');
   const a = new (Anthropic.default || Anthropic)({ apiKey: process.env.ANTHROPIC_API_KEY });
   const res = await a.messages.create({
@@ -141,7 +145,7 @@ async function _classifyImage(buf, caption, group, sender) {
   });
   const t = (res.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   const m = t.match(/\{[\s\S]*\}/);
-  return m ? JSON.parse(m[0]) : null;
+  return m ? (require('./claude').parseLooseJSON(m[0]) || null) : null;
 }
 
 /**
@@ -155,6 +159,8 @@ async function check({ msgId, chatId, group, sender, text, isImage, media, ts = 
     if (!direct && !isPersonal(chatId, group)) return null;
     if (msgId) { if (_seenMsg.has(msgId)) return null; _seenMsg.add(msgId); if (_seenMsg.size > 2000) _seenMsg.clear(); }
     let r = null, source = 'text';
+    // An image's body can be its base64 preview, not a caption.
+    if (text && /^[A-Za-z0-9+/=]{80,}$/.test(String(text).slice(0, 200))) text = '';
     if (isImage && media && media.buffer) {
       source = 'image';
       r = await _classifyImage(media.buffer, text, group, sender);
