@@ -4434,6 +4434,8 @@ client.on('message_create', async (msg) => {
     }
     if (_trimSelf.startsWith('🎬 הנה הסרטון!') || _trimSelf.includes('🧪 *בדיקת חיבור מ-Railway')) return;
     if (_trimSelf.startsWith('🎧 סרטון-')) return;
+    // The caption of a radio clip it sent ("🎧 גלי צה"ל · 13:03 · 45 שנ׳") — not a "🎧 <words>" search.
+    if (/^🎧 .+ · \d{1,2}:\d{2} · \d+ שנ׳/.test(_trimSelf)) return;
     // Image captions from face test / feedback (only BOT_MARKER — may be stripped on echo)
     if (/^🟢 \d+ מסומן|^🔴 אף אחד לא זוהה|^🔒 \d+ פנים טושטשו|^🟢 \*תיקון:\*|^📸 תמונה מקורית ללא עיבוד/.test(_trimSelf)) {
       return;
@@ -4494,6 +4496,58 @@ client.on('message_create', async (msg) => {
         }
         return;
       }
+    }
+
+    // ── 🎧 "שמע" — the moment on air itself, cut to ~45 seconds ────
+    // The app plays it with a transcript; WhatsApp had only the words. Reply
+    // "שמע" to a radio headline (or to any alert with a quote in it) and the
+    // audio comes back; "🎧 <מילים>" / "שמע ברדיו <מילים>" finds them on air
+    // in the last six hours.
+    const _hearAlone = /^(שמע|השמע|תשמיע|תשמיע לי|🎧)[.!?]?$/.test(rawBody.trim());
+    const _hearFind = rawBody.trim().match(/^(?:🎧|שמע ברדיו|תשמיע מהרדיו)\s+(.{2,80})$/);
+    if (_hearAlone || _hearFind) {
+      const bd = require('./src/broadcast-digest');
+      const hl = require('./src/broadcast-headlines');
+      const _hc = await client.getChatById(OWNER_ID);
+      let target = null;   // { station, ts, q }
+      if (_hearFind) {
+        const c = bd.findOnAir(_hearFind[1], 6);
+        if (c) target = { station: c.station, ts: c.ts, q: _hearFind[1] };
+      } else {
+        let quoted = '';
+        if (msg.hasQuotedMsg) { try { quoted = (await msg.getQuotedMessage())?.body || ''; } catch (_) {} }
+        const h = quoted ? hl.recent(40).find(x => quoted.includes(String(x.headline).substring(0, 30)))
+          : hl.recent(20).filter(x => Date.now() - x.ts < 3 * 3600000)[0];
+        if (h) target = { station: h.station, ts: h.ts, q: h.quote || h.headline };
+        else if (quoted) {
+          // Any alert: the words in quotes, or its bold line, found on air.
+          const q = (quoted.match(/["“]([^"”]{12,300})["”]/) || quoted.match(/\*([^*]{8,200})\*/) || [])[1] || quoted.substring(0, 200);
+          const st = ['גלי צה"ל', '103FM', 'כאן ב', 'גלגלצ'].find(s => quoted.includes(s)) || '';
+          const c = bd.findOnAir(q, 12, st);
+          if (c) target = { station: c.station, ts: c.ts, q };
+        }
+      }
+      if (!target) {
+        await botSend(_hc, _hearFind ? `🎧 לא מצאתי "${_hearFind[1]}" בשידור של 6 השעות האחרונות.` : '🎧 אין כותרת מהשידור מהשעות האחרונות. אפשר לכתוב 🎧 ואחריו כמה מילים ממה שנאמר.');
+        return;
+      }
+      try { await msg.react('🎧'); } catch (_) {}
+      try {
+        const clip = await bd.cutClip(target.station, target.ts, target.q);
+        if (!clip) { await botSend(_hc, '🎧 קטע השמע כבר לא שמור — שמע נשמר 4 שעות, וקטעים חשובים 30 יום.'); return; }
+        const { MessageMedia } = require('whatsapp-web.js');
+        const hhmm = new Date(clip.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+        const name = `${clip.station} ${hhmm.replace(':', '-')}.mp3`;
+        await _hc.sendMessage(new MessageMedia('audio/mpeg', fs.readFileSync(clip.file).toString('base64'), name), {
+          sendMediaAsDocument: true,
+          caption: `🎧 ${clip.station} · ${hhmm} · ${Math.round(clip.len)} שנ׳` + (clip.sentence ? `\n"${clip.sentence.substring(0, 300)}"` : '') + BOT_MARKER,
+        });
+        try { fs.unlinkSync(clip.file); } catch (_) {}
+      } catch (e) {
+        logger.warn('🎧 hear: ' + (e.message || '').substring(0, 80));
+        await botSend(_hc, '❌ לא הצלחתי לחתוך את הקטע — נסה שוב בעוד רגע.');
+      }
+      return;
     }
 
     // ── "הרחב" on a radio headline ───────────────────────────────
@@ -8598,7 +8652,7 @@ setInterval(async () => {
         `*${h.headline}*` +
         (who ? `\n🎙️ ${who}` : '') +
         (h.quote ? `\n\n"${h.quote}"` : '') +
-        `\n\n_נקלט באוויר — לפני שפורסם._\n↩️ ענה *הרחב* — מי אמר מה`;
+        `\n\n_נקלט באוויר — לפני שפורסם._\n↩️ ענה *הרחב* — מי אמר מה · *שמע* — הקטע עצמו`;
       try { await botSend(await client.getChatById(OWNER_ID), wa); } catch {}
       try {
         require('./src/jarvis-api').pushAlert({

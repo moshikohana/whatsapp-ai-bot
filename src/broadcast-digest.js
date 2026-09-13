@@ -131,6 +131,63 @@ function clipAround(station, ts, q = '') {
   return { chunk: out(list[i]), prev: out(list[i - 1]), next: out(list[i + 1]) };
 }
 
+// ── ✂️ Just the sentence: ~45 seconds cut from a 4-minute bulletin ──
+function _stemsOf(q) {
+  return String(q || '').replace(/[^\u0590-\u05FFa-zA-Z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3)
+    .map(w => (w.length >= 5 && 'בהוכלמש'.includes(w[0])) ? w.slice(1) : w);
+}
+/** המשפט בתמלול שהכי קרוב לחיפוש, ואיפה הוא (חלק מהאורך). */
+function bestSentenceAt(text, q) {
+  const stems = _stemsOf(q);
+  if (!stems.length) return null;
+  let best = null, at = 0;
+  const re = /[^.?!]+[.?!]?/g; let m;
+  while ((m = re.exec(text))) {
+    const s = stems.reduce((n, w) => n + (m[0].includes(w) ? 1 : 0), 0);
+    if (!best || s > best.score) best = { sentence: m[0].trim(), score: s, frac: m.index / Math.max(1, text.length) };
+    at++;
+  }
+  return best && best.score >= Math.min(2, stems.length) ? best : null;
+}
+/** 🔎 איפה בשידור של השעות האחרונות נאמר משהו — הקטע עם הכי הרבה מהמילים. */
+function findOnAir(q, hours = 6, station = '') {
+  const stems = _stemsOf(q);
+  if (!stems.length) return null;
+  const stn = s => String(s || '').replace(/["'״׳\s]/g, '').toLowerCase();
+  let best = null;
+  for (const c of chunksBetween(Date.now() - hours * 3600000, Date.now())) {
+    if (!c.audio || !audioPath(c.audio)) continue;
+    const s = stems.reduce((n, w) => n + (c.text.includes(w) ? 1 : 0), 0) + (station && stn(c.station) === stn(station) ? 0.5 : 0);
+    if (!best || s > best.s || (s === best.s && c.ts > best.c.ts)) best = { s, c };
+  }
+  return best && best.s >= Math.min(2, stems.length) ? best.c : null;
+}
+function _duration(file) {
+  return new Promise(res => require('child_process').execFile('ffprobe',
+    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { timeout: 15000 },
+    (e, out) => res(e ? 0 : parseFloat(out) || 0)));
+}
+/**
+ * ✂️ קטע קצר סביב המשפט — לשליחה בוואטסאפ. מהדורה היא 4 דקות; מי שרוצה את
+ * הכותרת לא צריך את כולה. דגימה קצרה (דקה) נשלחת כמו שהיא.
+ */
+async function cutClip(station, ts, q, seconds = 45) {
+  const c = clipAround(station, ts, q);
+  const ch = c && c.chunk;
+  if (!ch || !ch.audioName) return null;
+  const src = audioPath(ch.audioName);
+  const b = bestSentenceAt(ch.text, q);
+  const dur = await _duration(src) || 60;
+  let start = b ? Math.max(0, b.frac * dur - 4) : 0;
+  if (dur <= seconds + 10) start = 0;
+  const len = Math.min(dur <= seconds + 10 ? dur : seconds, dur - start);
+  const out = path.join(require('os').tmpdir(), `boti-clip-${Date.now()}.mp3`);
+  await new Promise((res, rej) => require('child_process').execFile('ffmpeg',
+    ['-y', '-loglevel', 'error', '-ss', start.toFixed(1), '-t', len.toFixed(1), '-i', src, '-c', 'copy', out],
+    { timeout: 30000 }, e => (e ? rej(e) : res())));
+  return { file: out, station: ch.station, ts: ch.ts, start, len, sentence: b ? b.sentence : '', audioName: ch.audioName };
+}
+
 function recordChunk({ station, text, ts = Date.now(), audio = null }) {
   const clean = String(text || '').trim();
   if (!clean) return false;
@@ -439,6 +496,6 @@ function formatDigest(d) {
 }
 
 module.exports = {
-  keepAudio, audioPath, clipAround, clipRefs, pinAudio, pinAround, pinImportant, keptUntil,
+  keepAudio, audioPath, clipAround, clipRefs, pinAudio, pinAround, pinImportant, keptUntil, cutClip, findOnAir, bestSentenceAt,
   recordChunk, chunksBetween, analyseHour, recentDigests, recentChunks, prune, formatDigest, setBulletin,
 };
