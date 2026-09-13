@@ -35,9 +35,12 @@ function _save(m) {
 }
 
 /** Which of the numbered candidates report the same event. One call per arena. */
-async function _confirm(storyText, cands) {
+async function _confirm(storyText, cands, t0 = Date.now()) {
   if (!cands.length) return [];
-  const list = cands.map((c, i) => `${i + 1}. ${String(c.text).replace(/\s+/g, ' ').substring(0, 400)}`).join('\n');
+  // How long before the story each candidate was — "sirens in Saudi Arabia"
+  // matched sirens 22 hours earlier: the same words, another night (13.9).
+  const ago = ts => { const h = (t0 - ts) / 3600000; return h < 1 ? `${Math.max(1, Math.round(h * 60))} דק׳ לפני` : `${Math.round(h)} שעות לפני`; };
+  const list = cands.map((c, i) => `${i + 1}. (${c.ts ? ago(c.ts) : '?'}) ${String(c.text).replace(/\s+/g, ' ').substring(0, 400)}`).join('\n');
   const r = await require('./claude').classifyJSON(`ידיעה:\n"${storyText.substring(0, 500)}"\n\nמועמדים:\n${list}`, {
     // "Leaders around the world sent new-year greetings" was matched to Ben
     // Gvir's own new-year message: same occasion, not the same story. The
@@ -45,6 +48,7 @@ async function _confirm(storyText, cands) {
     system: 'אתה עורך חדשות. אילו מהמועמדים מדווחים על אותו אירוע ספציפי שבידיעה — אותם אנשים או גופים, אותו מעשה או אותה אמירה, אותו מקום — ' +
       'גם אם בניסוח אחר, בקיצור, או כחלק מסיכום? ' +
       'לא: אותו נושא כללי ("איראן", "הבחירות"), אותו מועד או חג (ברכות לשנה החדשה של אנשים שונים), או אדם אחר שעשה משהו דומה. ' +
+      'אירוע שחוזר על עצמו — אזעקות, שיגורים, תקיפות, ירי, פיגוע, הפגנה — מלפני יותר מ-3 שעות הוא כמעט תמיד אירוע אחר, אלא אם הפרטים זהים ממש (אותו מקום מדויק, אותם נפגעים, אותם שמות). ' +
       'כשיש ספק — לא. החזר JSON בלבד: {"same": [מספרי המועמדים המתאימים]}',
     // Sonnet, not Haiku: Haiku kept matching on the occasion alone. A few
     // calls per headline, once.
@@ -73,7 +77,7 @@ async function _radio(text, t0) {
   const seen = new Set();
   chunks = chunks.filter(c => c && c.text && !seen.has(c.ts + (c.station || '')) && seen.add(c.ts + (c.station || '')));
   try { const { isAd } = require('./broadcast-headlines'); chunks = chunks.filter(c => !isAd(c.text)); } catch (_) {}
-  const hits = await _confirm(text, _top(chunks.map(c => ({ ts: c.ts, station: c.station, text: c.text })), text, 4));
+  const hits = await _confirm(text, _top(chunks.map(c => ({ ts: c.ts, station: c.station, text: c.text })), text, 4), t0);
   if (!hits.length) return null;
   const f = hits.sort((a, b) => a.ts - b.ts)[0];
   return { ts: f.ts, station: f.station || null, count: hits.length, excerpt: f.text.substring(0, 220) };
@@ -91,7 +95,7 @@ async function _groupsPrior(text, t0) {
       all.push({ cid, ts, text: m.body.substring(0, 1200) });
     }
   }
-  const hits = await _confirm(text, _top(all, text, 8));
+  const hits = await _confirm(text, _top(all, text, 8), t0);
   if (!hits.length) return null;
   hits.sort((a, b) => a.ts - b.ts);
   const f = hits[0];
@@ -116,13 +120,17 @@ async function _appsPrior(text, t0, story) {
   const na = require('./news-apps');
   const members = new Set(story.memberIds || []);
   const pushes = na.pushesBetween(t0 - BACK_APPS_MS, t0 - 60000).filter(p => !members.has(p.id));
-  const hits = await _confirm(text, _top(pushes.map(p => ({ ts: p.ts, source: p.source, text: p.text })), text, 5));
+  const hits = await _confirm(text, _top(pushes.map(p => ({ ts: p.ts, source: p.source, text: p.text })), text, 5), t0);
   if (!hits.length) return null;
   const f = hits.sort((a, b) => a.ts - b.ts)[0];
   return { ts: f.ts, source: f.source, count: hits.length, excerpt: f.text.substring(0, 220) };
 }
 
 const _running = new Set();
+// 2: the judge sees how long before each candidate was. A "known" from the
+// first judge, hours back, is asked again — once.
+const PRIOR_V = 2;
+const _stale = r => r && (r.v || 1) < PRIOR_V && r.status === 'known' && r.firstTs && (r.checkedAt - r.firstTs) > 3 * 3600000;
 
 /** בודק ידיעה אחת ושומר. story: פריט מ-latest()/hot(). */
 async function check(story) {
@@ -140,6 +148,7 @@ async function check(story) {
     const earlier = [radio && { src: 'radio', ts: radio.ts }, groups && { src: 'groups', ts: groups.ts }, apps && { src: 'apps', ts: apps.ts }]
       .filter(Boolean).filter(x => x.ts < t0 - SAME_MOMENT_MS).sort((a, b) => a.ts - b.ts);
     const res = {
+      v: PRIOR_V,
       checkedAt: Date.now(),
       status: earlier.length ? 'known' : 'new',
       firstSrc: earlier[0]?.src || null, firstTs: earlier[0]?.ts || null,
@@ -156,8 +165,8 @@ let _queue = [], _busy = false;
 function attach(stories) {
   const m = _load();
   for (const s of stories) {
-    if (m[s.id]) s.prior = m[s.id];
-    else if (s.id && !_queue.some(q => q.id === s.id) && !_running.has(s.id)) _queue.push(s);
+    if (m[s.id] && !_stale(m[s.id])) s.prior = m[s.id];
+    else if (s.id && !_queue.some(q => q.id === s.id) && !_running.has(s.id)) { if (m[s.id]) s.prior = m[s.id]; _queue.push(s); }
   }
   _drain();
   return stories;

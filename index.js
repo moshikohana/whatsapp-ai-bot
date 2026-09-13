@@ -8822,6 +8822,23 @@ setInterval(async () => {
   }
 }, 60 * 1000);
 
+// ✏️ A digest checked again once the apps' headlines are in — a correction
+// reaches him the way the digest did ("קושנר: מבצע רפח" for "דוחה", 13.9).
+setInterval(async () => {
+  try {
+    const fixes = await require('./src/broadcast-digest').recheckRecent();
+    for (const f of fixes) {
+      require('./src/jarvis-api').pushAlert({
+        title: `✏️ תיקון לתקציר ${f.label}`,
+        summary: f.after,
+        body: `בתקציר נכתב:\n"${f.before}"\n\nנכון לפי השידור:\n"${f.after}"\n${f.summary}\n\n🔎 ${f.why}`,
+        kind: 'correction', urgency: 'high',
+      });
+      logger.info(`✏️ digest correction sent: ${f.label} — ${f.after.substring(0, 50)}`);
+    }
+  } catch (e) { logger.warn('digest recheck loop: ' + (e.message || '').substring(0, 60)); }
+}, 5 * 60 * 1000);
+
 // מוקד — deliver the batched alert digest when one is due (the hub itself
 // holds delivery during quiet hours / Shabbat and rate-limits to DIGEST_MINUTES).
 setInterval(async () => {

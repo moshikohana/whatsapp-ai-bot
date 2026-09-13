@@ -1046,6 +1046,8 @@ function attach(app, deps = {}) {
         })(),
         // The headlines, which are what the monitor is actually for.
         headlines: require('./broadcast-headlines').recent(20),
+        // 🎙️ How much transcription is left today, and who is resting (music).
+        asr: { models: bm.asrStatus(), quiet: bm.quietStations() },
       });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });

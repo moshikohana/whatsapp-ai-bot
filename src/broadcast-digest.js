@@ -367,6 +367,20 @@ async function analyseHour({ fromTs, toTs } = {}) {
     ts: Date.now(),
   };
 
+  // 🔎 The topics, checked: every name and place in the transcript, and against
+  // the apps' headlines of those hours. The quote said "בדוחה" and the topic
+  // above it "מבצע רפח" (13.9) — the quotes were verified, the topics were not.
+  try {
+    const g = await require('./grounding').ground(
+      digest.topics.map((t, i) => ({ id: String(i), fields: { title: t.title || '', summary: t.summary || '' } })),
+      haystack, { label: `digest ${digest.label}`, window: [from - 3 * 3600000, to + 15 * 60000] });
+    digest.topics = digest.topics.map((t, i) => {
+      const x = g[i] || {};
+      return { ...t, title: (x.fields || {}).title || t.title, summary: (x.fields || {}).summary || t.summary,
+        ...(x.confirmed && x.confirmed.length ? { confirmed: x.confirmed } : {}), ...(x.corrected ? { corrected: x.corrected } : {}) };
+    });
+  } catch (e) { logger.warn('digest grounding: ' + (e.message || '').substring(0, 60)); }
+
   const list = _loadDigests().filter(d => d.id !== digest.id);
   list.push(digest);
   list.sort((a, b) => b.from - a.from);
@@ -467,6 +481,40 @@ function pinImportant(d) {
   return n;
 }
 
+/**
+ * ✏️ בדיקה שנייה לתקציר, 15–90 דקות אחרי שנשלח — כשכבר הגיעו כותרות מהאפליקציות
+ * על אותם סיפורים. מה שמתברר כשגוי מתוקן, ומוחזר כדי שיישלח לו תיקון.
+ */
+async function recheckRecent() {
+  const now = Date.now();
+  const due = _loadDigests().filter(d => !d.rechecked && (d.topics || []).length && now - (d.ts || 0) > 15 * 60000 && now - (d.ts || 0) < 90 * 60000);
+  const fixes = [];
+  for (const d of due) {
+    const hay = chunksBetween(d.from, d.to).map(c => c.text).join(' ');
+    let g = null;
+    try {
+      g = await require('./grounding').ground(
+        d.topics.map((t, i) => ({ id: String(i), fields: { title: t.title || '', summary: t.summary || '' } })),
+        hay, { label: `recheck ${d.label}`, window: [d.from - 3 * 3600000, now] });
+    } catch (e) { logger.warn('digest recheck: ' + (e.message || '').substring(0, 60)); }
+    const list = _loadDigests();
+    const cur = list.find(x => x.id === d.id);
+    if (!cur) continue;
+    cur.rechecked = now;
+    (g || []).forEach((x, i) => {
+      const t = cur.topics[i];
+      if (!t) return;
+      if (x.confirmed && x.confirmed.length) t.confirmed = [...new Set([...(t.confirmed || []), ...x.confirmed])].slice(0, 5);
+      if (x.corrected && x.fields.title && x.fields.title !== t.title) {
+        fixes.push({ label: cur.label, before: t.title, after: x.fields.title, summary: x.fields.summary || t.summary, why: x.corrected });
+        t.title = x.fields.title; t.summary = x.fields.summary || t.summary; t.corrected = x.corrected;
+      }
+    });
+    _saveDigests(list);
+  }
+  return fixes;
+}
+
 function formatDigest(d) {
   if (!d) return '';
   const lines = [`📻 *מה נאמר בשידור* · ${d.label}`];
@@ -478,7 +526,8 @@ function formatDigest(d) {
   }
   if (d.topics?.length) {
     lines.push('', '*נושאים:*');
-    for (const t of d.topics) lines.push(`${'🔥'.repeat(Math.min(3, Math.max(1, Math.ceil((t.heat || 1) / 2))))} *${t.title}* — ${t.summary}`);
+    for (const t of d.topics) lines.push(`${'🔥'.repeat(Math.min(3, Math.max(1, Math.ceil((t.heat || 1) / 2))))} *${t.title}* — ${t.summary}` +
+      ((t.confirmed || []).length ? ` _(✅ גם ב: ${t.confirmed.join(', ')})_` : ''));
   }
   if (d.quotes?.length) {
     lines.push('', '*ציטוטים:*');
@@ -496,6 +545,7 @@ function formatDigest(d) {
 }
 
 module.exports = {
+  recheckRecent,
   keepAudio, audioPath, clipAround, clipRefs, pinAudio, pinAround, pinImportant, keptUntil, cutClip, findOnAir, bestSentenceAt,
   recordChunk, chunksBetween, analyseHour, recentDigests, recentChunks, prune, formatDigest, setBulletin,
 };

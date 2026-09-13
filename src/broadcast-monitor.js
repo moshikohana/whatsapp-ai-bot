@@ -39,6 +39,17 @@ const DEFAULTS = {
   terms: ['קלנר', 'אריאל קלנר'],
 };
 
+// 🎵 A station playing only music is not sampled for a while: a sample is
+// 55 seconds of the daily transcription allowance, and a song has no headline.
+// Two music samples in a row → 15 minutes' rest, then one look again.
+const QUIET_MIN = 15;
+const _quiet = {};   // station id → { n, until }
+/** תחנות שמנגנות עכשיו מוזיקה ולא נדגמות — לאפליקציה. */
+function quietStations() {
+  const now = Date.now();
+  return STATIONS.filter(s => (_quiet[s.id] || {}).until > now).map(s => ({ station: s.name, until: _quiet[s.id].until }));
+}
+
 let cfg = null;
 let recent = [];         // { station, ts, text } — rolling transcript memory
 let alerted = {};        // dedupHash → ts, so one mention isn't reported twice
@@ -139,7 +150,7 @@ async function transcribe(file, { priority = 'low' } = {}) {
           _asrBlocked[model] = Date.now() + Math.max(wait, 60000);
           if (Date.now() - _asrWarned > 20 * 60000) {
             _asrWarned = Date.now();
-            logger.warn(`🎙️ Groq ${model}: daily audio allowance reached — ${priority === 'high' ? 'trying the next model' : 'routine samples wait'} (${msg.substring(0, 90)})`);
+            logger.warn(`🎙️ Groq ${model}: daily audio allowance reached — ${ASR_MODELS[ASR_MODELS.indexOf(model) + 1] ? 'moving to ' + ASR_MODELS[ASR_MODELS.indexOf(model) + 1] : 'nothing left'} (${msg.substring(0, 90)})`);
           }
           continue;
         }
@@ -153,8 +164,24 @@ async function transcribe(file, { priority = 'low' } = {}) {
       return '';
     }
   }
+  // Every model spent, and this was a bulletin: he hears of it, once in a while —
+  // not by finding an empty digest.
+  if (priority === 'high' && Date.now() - _asrAlerted > 6 * 3600000) {
+    _asrAlerted = Date.now();
+    const back = Math.min(...ASR_MODELS.map(m => _asrBlocked[m] || Date.now()));
+    const at = new Date(back).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+    try {
+      require('./jarvis-api').pushAlert({
+        title: '⚠️ מכסת התמלול היומית נגמרה',
+        summary: `מהדורת החדשות לא תומללה. התמלול יחזור בהדרגה מ-${at}`,
+        body: `שירות התמלול (Groq) מאפשר כמות שמע מוגבלת ביום, והיא נגמרה בשני המודלים. מהדורות ודגימות מהרדיו לא יתומללו עד שהמכסה תתחדש — בהדרגה, החל מ-${at}. הודעות קוליות שלך עלולות להיכשל גם הן.`,
+        kind: 'quota', urgency: 'normal', supersedes: 'quota',
+      });
+    } catch (_) {}
+  }
   return '';
 }
+let _asrAlerted = 0;
 
 // Pull the sentence around a hit so the alert carries context, not a bare word.
 function _sentenceAround(text, term) {
@@ -177,6 +204,7 @@ async function checkOnce() {
   if (!terms.length) return hits;
 
   for (const st of STATIONS.filter(s => (c.stations || []).includes(s.id))) {
+    if ((_quiet[st.id] || {}).until > Date.now()) continue;
     const file = await captureChunk(st.url, c.chunkSec);
     if (!file) { logger.warn?.(`broadcast: capture failed for ${st.name}`); continue; }
     const text = await transcribe(file);
@@ -199,8 +227,17 @@ async function checkOnce() {
     // Ohana interview was in the transcript at 08:15 and only reached him as
     // half a sentence in the 09:00 summary — after WhatsApp had it.
     try {
-      const h = await require('./broadcast-headlines').onChunk({ station: st.name, text });
+      const hlm = require('./broadcast-headlines');
+      const h = await hlm.onChunk({ station: st.name, text, ts: _ts });
       if (h) headlines.push(h);
+      const k = hlm.lastKind(st.name);
+      if (k && k.ts === _ts) {
+        const q = _quiet[st.id] || (_quiet[st.id] = { n: 0, until: 0 });
+        if (k.kind === 'music') {
+          q.n++;
+          if (q.n >= 2) { q.until = Date.now() + QUIET_MIN * 60000; logger.info(`🎵 ${st.name}: music — not sampled for ${QUIET_MIN} min`); }
+        } else if (k.kind === 'news' || k.kind === 'talk') q.n = 0;
+      }
     } catch (_) {}
 
     for (const term of terms) {
@@ -268,7 +305,7 @@ function isEnabled() { return !!loadConfig().enabled; }
 function getRecent(n = 5) { return recent.slice(-n); }
 
 module.exports = {
-  asrStatus,
+  asrStatus, quietStations,
   STATIONS, checkOnce, formatHit, getStatus, listStations, toggleStation,
   addTerm, removeTerm, setEnabled, isEnabled, inActiveHours, loadConfig,
   saveConfig, getRecent, captureChunk, transcribe,

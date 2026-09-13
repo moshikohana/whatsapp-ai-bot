@@ -86,6 +86,22 @@ async function runHour(hourTs, fromDisk = false) {
       update: h.status === 'update' && h.update ? String(h.update).substring(0, 240) : null,
     })),
   };
+  // 🔎 New and updated headlines, checked against what was heard and the apps.
+  try {
+    const hl = b.headlines.map((h, i) => ({ h, i })).filter(x => x.h.status !== 'repeat');
+    const g = await require('./grounding').ground(
+      hl.map(x => ({ id: String(x.i), fields: { text: x.h.text, update: x.h.update || '' } })),
+      heard.map(h => h.text).join('\n'), { label: `bulletin ${b.label}`, window: [hourTs - 3 * 3600000, hourTs + 15 * 60000] });
+    for (const x of g) {
+      const h = b.headlines[+x.id];
+      if (!h) continue;
+      h.text = (x.fields.text || h.text).substring(0, 240);
+      if (h.update && x.fields.update) h.update = x.fields.update.substring(0, 240);
+      if (x.confirmed && x.confirmed.length) h.confirmed = x.confirmed;
+      if (x.corrected) h.corrected = x.corrected;
+    }
+  } catch (e) { logger.warn('bulletin grounding: ' + (e.message || '').substring(0, 60)); }
+
   const list = _load().filter(x => x.hourTs !== hourTs);
   list.unshift(b);
   _save(list);
@@ -108,7 +124,8 @@ function formatForDigest(b) {
   const lines = ['', `🗞️ *מהדורת ${b.label} — מה חדש:*`];
   for (const h of fresh) {
     const st = h.stations && h.stations.length ? ` _(${h.stations.join(', ')})_` : '';
-    lines.push(h.status === 'update' ? `• 🔄 ${h.text} — *חדש:* ${h.update}${st}` : `• ${h.text}${st}`);
+    const ok = (h.confirmed || []).length ? ` ✅` : '';
+    lines.push(h.status === 'update' ? `• 🔄 ${h.text} — *חדש:* ${h.update}${st}${ok}` : `• ${h.text}${st}${ok}`);
   }
   const rep = (b.headlines || []).length - fresh.length;
   if (rep > 0) lines.push(`_ועוד ${rep} כותרות שחזרו מהשעות הקודמות — לא חזרתי עליהן._`);

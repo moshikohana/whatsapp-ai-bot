@@ -81,8 +81,15 @@ const SYSTEM = `אתה עורך מבזקים בחדר חדשות פוליטי ב
 - headline: אם הדובר לא מזוהה, נסח בלי שם — "קריאה לוינטר לפרוש" ולא "אוחנה: וינטר צריך לפרוש".
 - score: 5 = מבזק (אמירה חריפה/חדשה על דמות או מהלך מרכזי), 4 = כותרת טובה, 3 ומטה = לא לפרסם.
 
+בנוסף, kind — מה יש בקטע האחרון (הפסקה האחרונה בתמלול): "news" = מהדורה או מבזק, "talk" = דיבור, ראיון, פאנל או מנחה, "music" = שיר או מוזיקה (גם מילים של שיר), "ads" = פרסומות וקדימונים.
+
 החזר JSON בלבד:
-{"headline":"כותרת של עד 12 מילים או null","speaker":null,"role":null,"quote":"ציטוט מדויק או null","score":1}`;
+{"headline":"כותרת של עד 12 מילים או null","speaker":null,"role":null,"quote":"ציטוט מדויק או null","score":1,"kind":"news|talk|music|ads"}`;
+
+// 🎵 What each station was playing at its last sample — the monitor pauses a
+// station that is only playing music (see broadcast-monitor).
+const _kind = {};
+function lastKind(station) { return _kind[station] || null; }
 
 /**
  * נקרא על כל דגימה חדשה. לא חוסם את לולאת הדגימה — רץ ברקע ובולע שגיאות.
@@ -91,8 +98,9 @@ async function onChunk({ station, text, ts = Date.now() }) {
   const clean = String(text || '').trim();
   const recentArr = (_prev[station] || []).filter(p => ts - p.ts < 14 * 60 * 1000 && !isAd(p.text));
   _prev[station] = [...recentArr, { ts, text: clean }].slice(-3);
-  if (!clean || clean.length < 60) return null;
-  if (isAd(clean)) return null;
+  // 55 seconds of speech is 500+ characters; a few words is a song or silence.
+  if (!clean || clean.length < 60) { _kind[station] = { ts, kind: 'music' }; return null; }
+  if (isAd(clean)) { _kind[station] = { ts, kind: 'ads' }; return null; }
   if (_busy) return null;            // one at a time; the next chunk carries the context
   _busy = true;
   try {
@@ -110,7 +118,8 @@ async function onChunk({ station, text, ts = Date.now() }) {
     );
     // One line per check. Without it a quiet hour and a broken detector look
     // the same in the log.
-    logger.info(`📻 headline check [${station}] → ${r && r.headline ? `★${r.score || 0} ${String(r.headline).substring(0, 50)}` : 'nothing'}`);
+    if (r && ['news', 'talk', 'music', 'ads'].includes(r.kind)) _kind[station] = { ts, kind: r.kind };
+    logger.info(`📻 headline check [${station}] → ${r && r.headline ? `★${r.score || 0} ${String(r.headline).substring(0, 50)}` : 'nothing'}${r && r.kind ? ` · ${r.kind}` : ''}`);
     if (!r || !r.headline || (r.score || 0) < MIN_SCORE) return null;
 
     // Verified against the transcript, exactly as the hourly digest does. A
@@ -176,8 +185,18 @@ async function onChunk({ station, text, ts = Date.now() }) {
       return null;
     }
 
+    // 🔎 Checked against the transcript and the apps before it reaches him.
+    let confirmed = null, corrected = null;
+    try {
+      const g = await require('./grounding').ground([{ id: 'h', fields: { headline } }], window,
+        { label: 'headline', window: [ts - 3 * 3600000, ts + 60000] });
+      if (g[0]) { headline = g[0].fields.headline || headline; confirmed = g[0].confirmed || null; corrected = g[0].corrected || null; }
+    } catch (_) {}
+
     const item = {
       id: `${ts}-${station}`.replace(/[^\w-]/g, ''),
+      ...(confirmed && confirmed.length ? { confirmed } : {}),
+      ...(corrected ? { corrected } : {}),
       ts, station,
       headline: headline.substring(0, 140),
       speaker,
@@ -301,4 +320,4 @@ function formatExpansion(h, x) {
   return parts.join('\n');
 }
 
-module.exports = { onChunk, recent, contextAround, isAd, expand, formatExpansion };
+module.exports = { lastKind, onChunk, recent, contextAround, isAd, expand, formatExpansion };
