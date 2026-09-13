@@ -835,10 +835,23 @@ function attach(app, deps = {}) {
       res.json({ ok: true, stories: list.map(s => ({ ...s, hot: hotIds.has(s.id) })) });
     } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
   });
-  app.get('/api/jarvis/news/story', guard, (req, res) => {
+  app.get('/api/jarvis/news/story', guard, async (req, res) => {
     try {
-      const s = require('./news-apps').story(String(req.query.id || ''));
+      const na = require('./news-apps');
+      let s = na.story(String(req.query.id || ''));
       if (!s) return res.status(404).json({ error: 'הידיעה לא נמצאה' });
+      // Every source with a link: a WhatsApp post has none of its own — its
+      // own links first, then the same post in Telegram. Looked up once.
+      const nf = require('./news-feed');
+      const missing = (s.members || []).filter(m => m.via === 'wa' && !m.link && (!m.linkChecked || req.query.relink));
+      if (missing.length) {
+        await Promise.all(missing.slice(0, 4).map(async m => {
+          const own = nf.linkInText(m.full || m.text);
+          const tw = own && !/t\.me\/|whatsapp\.com/.test(own) ? null : await nf.telegramTwin(m.full || m.text, m.ts, m.source);
+          na.setLink(m.id, tw || own, tw ? 'tg-post' : own ? 'in-post' : null);
+        }));
+        s = na.story(String(req.query.id || '')) || s;
+      }
       // Checked now if it never was: opening a story is asking about it.
       require('./news-prior').attach([s]); require('./news-verify').attach([s]);
       res.json({ ok: true, story: s });

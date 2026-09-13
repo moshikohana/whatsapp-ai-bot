@@ -160,7 +160,9 @@ async function _extractActionable(pool) {
       system: 'אתה יועץ תקשורת של ח"כ אריאל קלנר (הליכוד). קבל הודעות מקבוצות פוליטיות והחזר JSON בלבד: ' +
         '{"items":[{"type":"opportunity|attack|rival","title":"כותרת קצרה","why":"למה זה נוגע לקלנר - משפט","action":"מה לעשות - משפט קצר","urgency":1-5}]}. ' +
         'עד 5 פריטים, רק מה שבאמת דורש את קלנר: הזדמנות להגיב/להוביל, ביקורת שצריך לענות עליה, או מסר של יריבים שצובר תאוצה. ' +
-        'אל תכלול חדשות כלליות שלא נוגעות לו. אם אין כלום רלוונטי — החזר {"items":[]}. בעברית.',
+        'אל תכלול חדשות כלליות שלא נוגעות לו. אם אין כלום רלוונטי — החזר {"items":[]}. ' +
+        'כתוב בעברית פשוטה ויומיומית, בלי מילים של יועצים (לא "נרטיב", "ריטורי", "סוגיה", "מסר מצטבר תאוצה"). ' +
+        'title: מה קרה, עד 8 מילים. why: למה זה נוגע לו, משפט קצר. action: צעד אחד ברור, למשל "לצייץ תגובה" או "להגיב בוועדה".',
       maxTokens: 800,
     });
     // Hard timeout — a stalled LLM call used to hang the whole digest silently.
@@ -187,9 +189,11 @@ async function buildDigest(pool) {
     catch { return ''; }
   };
   const sinceTxt = lastDigestAt ? `מאז ${hhmm(lastDigestAt)}` : 'מהתקופה האחרונה';
-  let out = `🎯 *מוקד — מה דורש אותך* · ${hhmm(Date.now())}\n_${sinceTxt}_\n${'━'.repeat(18)}`;
+  const total = focus.length + Math.min(clusters.length, Math.max(0, MAX_DIGEST_ITEMS - focus.length));
+  let out = `🎯 *מוקד* · ${hhmm(Date.now())}\n${total === 1 ? 'דבר אחד' : total + ' דברים'} שכדאי לדעת, ${sinceTxt}\n${'━'.repeat(14)}`;
 
-  const ICON = { opportunity: '🟢 הזדמנות', attack: '🔴 ביקורת', rival: '🟠 יריבים' };
+  // In words, not a code to learn: what kind of thing it is.
+  const ICON = { opportunity: '🟢 הזדמנות להגיב', attack: '🔴 ביקורת שכדאי לענות עליה', rival: '🟠 מסר של יריבים' };
   const actions = [];
   let n = 0;
 
@@ -197,13 +201,14 @@ async function buildDigest(pool) {
     n++;
     actions.push({ n, topic: _snip(`${f.title} — ${f.why || ''}`, 90), keyword: f.title, msgIds: [] });
     const tag = ICON[f.type] || '⚪ לתשומת לב';
-    out += `\n\n*${n}.* ${tag}${(f.urgency || 0) >= 4 ? ' ‼️' : ''}\n*${_snip(f.title, 70)}*\n${_snip(f.why || '', 120)}`;
-    if (f.action) out += `\n💡 _${_snip(f.action, 100)}_`;
+    out += `\n\n*${n}. ${_snip(f.title, 70)}*\n${tag}${(f.urgency || 0) >= 4 ? ' · דחוף' : ''}`;
+    if (f.why) out += `\nלמה זה חשוב: ${_snip(f.why, 120)}`;
+    if (f.action) out += `\nמה אפשר לעשות: ${_snip(f.action, 100)}`;
   });
 
   const shown = clusters.slice(0, MAX_DIGEST_ITEMS - n);
   if (shown.length) {
-    out += `\n${'━'.repeat(18)}\n🔑 *סומן במילות מפתח*`;
+    out += `\n\n🔑 *הוזכרו מילות המעקב שלך*`;
     shown.forEach(c => {
       n++;
       const where = c.groups.length > 1 ? `${c.groups.length} קבוצות` : _snip(c.groups[0] || c.rep.group || '', 22);
@@ -213,11 +218,11 @@ async function buildDigest(pool) {
         keyword: c.rep.keyword,
         msgIds: c.items.map(it => ({ msgId: it.msgId, chatId: it.chatId })).filter(x => x.msgId).slice(0, 3),
       });
-      out += `\n\n*${n}.* ${c.rep.keyword} · 📍 ${where} · 🕐 ${hhmm(c.rep.ts)}\n${_snip(c.rep.preview, 120)}`;
+      out += `\n\n*${n}. "${c.rep.keyword}"* — ${where}, ${hhmm(c.rep.ts)}\n${_snip(c.rep.preview, 120)}`;
     });
   }
 
-  out += `\n${'━'.repeat(18)}\n*פעולות:* ענה במספר +\n✍️ *תגובה* · 📤 *הפצה* · 📄 *הצג* · 🔕 *שקט*\n_לדוגמה:_ *1 תגובה*\n\n_(לתמונה הרחבה של החדשות — שלח *סריקה*)_`;
+  out += `\n${'━'.repeat(14)}\n↩️ כתוב מספר ומה לעשות, למשל *1 תגובה*\n• *תגובה* — טיוטה מוכנה בשבילך\n• *הצג* — ההודעות המקוריות\n• *הפצה* — להעביר לקבוצות\n• *שקט* — לא להביא את הנושא הזה שוב`;
 
   return { text: out.trim(), actions };
 }

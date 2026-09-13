@@ -471,7 +471,7 @@ function story(id) {
   const ids = new Set(s.memberIds || []);
   const members = _load().filter(p => ids.has(p.id)).sort((a, b) => a.ts - b.ts).map(p => ({
     id: p.id, source: p.source, ts: p.ts, text: p.text, via: p.via || 'app',
-    full: p.full || null, link: p.link || null, reporter: !!p.reporter,
+    full: p.full || null, link: p.link || null, linkKind: p.linkKind || null, linkChecked: !!p.linkChecked, reporter: !!p.reporter,
     radio: p.radio ? { station: p.radio.station || null, ts: p.radio.ts, headline: p.radio.headline || p.radio.excerpt || null, quote: p.radio.excerpt || p.radio.headline || null, leadMin: p.radio.leadMin } : null,
   }));
   return { ...s, members };
@@ -507,4 +507,13 @@ async function recheckRadio(hours = 24) {
   return { kept, dropped };
 }
 
-module.exports = { recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
+/** קישור שנמצא אחר כך (טלגרם, מתוך הפוסט) — נשמר על הפריט. */
+function setLink(id, link, kind) {
+  const l = _load(); const p = l.find(x => x.id === id);
+  if (!p) return;
+  if (link) { p.link = link; p.linkKind = kind || null; }
+  p.linkChecked = true;
+  _save(l);
+}
+
+module.exports = { setLink, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

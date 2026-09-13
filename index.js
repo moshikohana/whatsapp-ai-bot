@@ -7738,7 +7738,7 @@ async function route(chatId, text, chat) {
   const history = getHistory(chatId);
   let reply;
   try {
-    reply = await smartChat(text, history);
+    reply = await smartChat(chatId === OWNER_ID ? _withRecentSends(text, history) : text, history);
   } catch (e) {
     // Record the real error so "למה" can name it, instead of him seeing a
     // generic failure and having to come ask what broke.
@@ -7939,6 +7939,38 @@ function handleReminder(chatId, text) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
+// What the bot sent him on its own in the last hours — a ready response, a
+// radio headline, a digest. None of it was in the conversation, so "you wrote
+// me a tweet about the Venice film" got "I don't have that" (12.9, 22:05).
+// Handed to the model as context with his message; his words alone are saved.
+function _withRecentSends(text, history) {
+  try {
+    const since = Date.now() - 4 * 3600000;
+    const inHistory = new Set((history || []).filter(m => m.role === 'assistant').map(m => String(m.content).slice(0, 80)));
+    const day = d => new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+    const out = [];
+    for (const d of [...new Set([day(since), day(Date.now())])]) {
+      let raw = '';
+      try { raw = fs.readFileSync(path.join(__dirname, 'logs', `chat-${d}.log`), 'utf8'); } catch { continue; }
+      for (const l of raw.split('\n')) {
+        if (!l) continue;
+        let o; try { o = JSON.parse(l); } catch { continue; }
+        const t = Date.parse(o.ts);
+        if (o.dir !== 'out' || !(t >= since) || !o.text || o.text.length < 40) continue;
+        if (inHistory.has(String(o.text).slice(0, 80))) continue;
+        out.push({ t, text: o.text });
+      }
+    }
+    // The ones that carry something to ask about, newest last.
+    const keep = out.filter(o => /תגובה מוכנה|טיוטה|ציוץ|כותרת מהשידור|מוקד|מבזק|מהדורת|מגמה חמה|דורש/.test(o.text)).slice(-5);
+    if (!keep.length) return text;
+    const clock = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+    return '[הקשר — הודעות שבוטי שלח למושיקו ביוזמתו בשעות האחרונות. אם הוא שואל על משהו "שכתבת לי" או על מילה מתוכן — זה המקור:\n' +
+      keep.map(o => `— ${clock(o.t)}: ${o.text.replace(/\s+/g, ' ').slice(0, 700)}`).join('\n') +
+      ']\n\nההודעה שלו:\n' + text;
+  } catch { return text; }
+}
+
 function getHistory(id) {
   if (!conversations.has(id)) conversations.set(id, []);
   return conversations.get(id);
