@@ -811,6 +811,17 @@ function attach(app, deps = {}) {
       res.json({ ok: true, ...r });
     } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
   });
+  // ✂️ ~45 seconds around the sentence — to download or share from the app.
+  app.get('/api/jarvis/radio/cut', guard, async (req, res) => {
+    try {
+      const ts = parseInt(req.query.ts, 10);
+      if (!ts) return res.status(400).json({ error: 'צריך זמן' });
+      const clip = await require('./broadcast-digest').cutClip(String(req.query.station || ''), ts, String(req.query.q || ''));
+      if (!clip) return res.status(404).json({ error: 'קטע השמע כבר לא שמור' });
+      res.type('audio/mpeg');
+      res.sendFile(clip.file, () => { try { fs.unlinkSync(clip.file); } catch (_) {} });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
+  });
   app.post('/api/jarvis/radio/keep', guard, (req, res) => {
     const bd = require('./broadcast-digest');
     const name = String((req.body || {}).name || '');
