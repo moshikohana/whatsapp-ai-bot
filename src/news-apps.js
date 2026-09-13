@@ -407,6 +407,8 @@ function stories(hours = 24, limit = 15) {
     const times = [...Object.entries(apps).map(([k, t]) => [k, t]), ...(r ? [['רדיו', r.ts]] : [])];
     const first = times.sort((a, b) => a[1] - b[1])[0];
     return {
+      // Tappable in the app: the story sheet opens by any member's id.
+      id: st.members[0].id,
       title: st.members[0].text.substring(0, 140),
       apps,
       radio: r ? { ts: r.ts, station: r.station } : null,
