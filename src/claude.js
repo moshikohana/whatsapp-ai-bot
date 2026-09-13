@@ -1209,11 +1209,29 @@ async function classifyJSON(userMessage, { system, maxTokens = 2000, model = 'cl
     const text = (response.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
     const m = text.match(/\{[\s\S]*\}/);
     if (!m) return null;
-    return JSON.parse(m[0]);
+    const out = parseLooseJSON(m[0]);
+    if (out === undefined) logger.warn?.(`classifyJSON unparseable: ${m[0].replace(/\s+/g, ' ').substring(0, 140)}`);
+    return out === undefined ? null : out;
   } catch (err) {
     logger.warn?.(`classifyJSON failed: ${(err.message || '').substring(0, 80)}`);
     return null;
   }
+}
+
+/**
+ * JSON מהמודל, גם כשהוא כתב עברית כמו שכותבים: צה"ל, רה"מ, ש"ח עם מירכאות
+ * רגילות באמצע ערך — מה ששבר את הפענוח כמה פעמים בשעה, והבדיקה נפלה בשקט
+ * (13.9). מנסים כמו שהוא, אחר כך עם גרשיים עבריים, ובלי פסיק מיותר בסוף.
+ */
+function parseLooseJSON(raw) {
+  const gersh = s => s.replace(/([֐-׿])"(?=[֐-׿])/g, '$1״');
+  const tries = [
+    s => s,
+    gersh,
+    s => gersh(s).replace(/[“”]/g, '"').replace(/,\s*([}\]])/g, '$1'),
+  ];
+  for (const t of tries) { try { return JSON.parse(t(raw)); } catch (_) {} }
+  return undefined;
 }
 
 // ─── Plain text completion (custom system, no persona/tools) ─────
@@ -1233,4 +1251,4 @@ async function completeText(userMessage, { system, maxTokens = 1500, model = 'cl
   }
 }
 
-module.exports = { smartChat, thinkWithClaude, classifyJSON, completeText, registerToolHandlers, getUsageSummary, onCreditError };
+module.exports = { parseLooseJSON, smartChat, thinkWithClaude, classifyJSON, completeText, registerToolHandlers, getUsageSummary, onCreditError };
