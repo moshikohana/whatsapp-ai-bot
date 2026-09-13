@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  AbsoluteFill, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, continueRender, delayRender,
+  AbsoluteFill, Audio, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig, continueRender, delayRender,
 } from 'remotion';
 import { TransitionSeries, linearTiming } from '@remotion/transitions';
 import { fade } from '@remotion/transitions/fade';
@@ -156,7 +156,7 @@ const PhotoCard = ({ p, i, total }) => {
 };
 
 // ── Outro ────────────────────────────────────────────────────────────
-const Outro = ({ counts, sign }) => {
+const Outro = ({ counts, sign, credit }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const a = spring({ frame, fps, config: { damping: 13 } });
@@ -175,6 +175,7 @@ const Outro = ({ counts, sign }) => {
         ))}
       </div>
       <div style={{ fontFamily: BODY, fontSize: 30, color: 'rgba(255,231,214,.7)', marginTop: 60, opacity: b }}>נאסף באהבה · בוטי</div>
+      {credit ? <div style={{ fontFamily: BODY, fontSize: 20, color: 'rgba(255,231,214,.45)', marginTop: 14, opacity: b, direction: 'ltr' }}>{credit}</div> : null}
     </AbsoluteFill>
   );
 };
@@ -188,11 +189,21 @@ const TRANSITIONS = [
   () => slide({ direction: 'from-bottom' }),
 ];
 
-export const WeekOfGirls = ({ photos = [], range = '', names = ['מיה', 'שי'], counts = [], sign = 'שבת שלום' }) => {
+// "הסרטון מאוד יפה, לא שמעתי שמע" (13.9) — a track under it, faded at both ends.
+const Music = ({ file }) => {
+  const { durationInFrames } = useVideoConfig();
+  return (
+    <Audio src={staticFile('music/' + file)}
+      volume={f => interpolate(f, [0, 18, durationInFrames - 45, durationInFrames - 1], [0, 0.75, 0.75, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })} />
+  );
+};
+
+export const WeekOfGirls = ({ photos = [], range = '', names = ['מיה', 'שי'], counts = [], sign = 'שבת שלום', music = null, credit = '' }) => {
   const timing = linearTiming({ durationInFrames: TRANS });
   return (
     <AbsoluteFill>
       <Backdrop />
+      {music ? <Music file={music} /> : null}
       <TransitionSeries>
         <TransitionSeries.Sequence durationInFrames={INTRO}><Intro range={range} names={names} /></TransitionSeries.Sequence>
         {photos.map((p, i) => (
@@ -202,7 +213,7 @@ export const WeekOfGirls = ({ photos = [], range = '', names = ['מיה', 'שי'
           </React.Fragment>
         ))}
         <TransitionSeries.Transition presentation={fade()} timing={timing} />
-        <TransitionSeries.Sequence durationInFrames={OUTRO}><Outro counts={counts} sign={sign} /></TransitionSeries.Sequence>
+        <TransitionSeries.Sequence durationInFrames={OUTRO}><Outro counts={counts} sign={sign} credit={credit} /></TransitionSeries.Sequence>
       </TransitionSeries>
     </AbsoluteFill>
   );

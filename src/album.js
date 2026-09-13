@@ -48,10 +48,11 @@ function _diff(a, b) {
  * @param source  alert | confirm | answer | backfill
  * @returns { added, dup, file }
  */
-async function add({ name, buffer, group = '', confidence = null, ts = Date.now(), source = 'alert' }) {
+async function add({ name, buffer, group = '', confidence = null, ts = Date.now(), source = 'alert', force = false }) {
   if (!name || !buffer || !buffer.length) return { added: false };
   // Never a child in a group she cannot be in — מיה in שי's kindergarten.
-  try { if (group && !require('./face-recognition').isAllowed(name, group)) return { added: false, notAllowed: true }; } catch (_) {}
+  // Unless he said so himself (✏️ מי בתמונה).
+  try { if (!force && group && !require('./face-recognition').isAllowed(name, group)) return { added: false, notAllowed: true }; } catch (_) {}
   try {
     const sharp = require('sharp');
     const idx = _load();
@@ -135,6 +136,53 @@ function remove(name, ts) {
   return true;
 }
 
+/**
+ * באילו אלבומים התמונה הזו נמצאת (לפי חתימה, באותם ימים) — כדי שהעריכה
+ * תראה "מיה ✓ · שי ✓" ולא רק את האלבום שממנו פתחו.
+ */
+function whoIn(name, ts) {
+  const idx = _load();
+  const own = idx[_safe(name)] && idx[_safe(name)].photos.find(x => x.ts === ts);
+  if (!own) return [];
+  const out = [];
+  for (const v of Object.values(idx)) {
+    const hit = (v.photos || []).find(x => x === own || (x.sig && own.sig && Math.abs(x.ts - own.ts) < 3 * 86400000 && _diff(x.sig, own.sig) < DUP_DIFF));
+    if (hit) out.push(v.name);
+  }
+  return out;
+}
+
+/**
+ * ✏️ מי בתמונה: הבוט זיהה את מיה, אבל גם שי שם (13.9). התמונה נכנסת לאלבום
+ * של כל מי שסומנה, ויוצאת ממי שלא. אם לא נשאר אף שם — היא לא נמחקת; צריך
+ * לפחות אחת (למחיקה יש "זו לא היא").
+ */
+async function setNames(name, ts, names) {
+  const idx = _load();
+  const own = idx[_safe(name)] && idx[_safe(name)].photos.find(x => x.ts === ts);
+  if (!own) return { ok: false, error: 'התמונה לא נמצאה' };
+  const want = [...new Set((names || []).map(n => String(n).trim()).filter(Boolean))];
+  if (!want.length) return { ok: false, error: 'צריך לפחות שם אחד' };
+  const file = path.join(ROOT, _safe(name), own.month, own.file);
+  let buf;
+  try { buf = fs.readFileSync(file); } catch { return { ok: false, error: 'הקובץ חסר' }; }
+  const now = whoIn(name, ts);
+  const added = [], removed = [];
+  for (const n of want) {
+    if (now.includes(n)) continue;
+    const r = await add({ name: n, buffer: buf, group: own.group || '', ts: own.ts, source: 'confirm', force: true });
+    if (r.added || r.dup) added.push(n);
+  }
+  for (const n of now) {
+    if (want.includes(n)) continue;
+    const i2 = _load(); const v = i2[_safe(n)];
+    const hit = v && v.photos.find(x => x.ts === own.ts || (x.sig && own.sig && Math.abs(x.ts - own.ts) < 3 * 86400000 && _diff(x.sig, own.sig) < DUP_DIFF));
+    if (hit && remove(n, hit.ts)) removed.push(n);
+  }
+  logger.info(`🎞️ album edit: ${name} ${ts} → ${want.join('+')} (added ${added.join(',') || '—'}, removed ${removed.join(',') || '—'})`);
+  return { ok: true, names: want, added, removed };
+}
+
 /** כרטיס החודש: "ספטמבר · שי · 23 תמונות, רובן מגן פיסטוק". */
 function monthCard(key) {
   const out = [];
@@ -151,4 +199,5 @@ function monthCard(key) {
   return `🎞️ *האלבום של ${_monthLabel(key)}*\n\n${out.join('\n\n')}\n\n_באפליקציה: פרצופים ← אלבום._`;
 }
 
-module.exports = { add, summary, month, photo, remove, monthCard, _monthKey };
+module.exports = {
+  whoIn, setNames, add, summary, month, photo, remove, monthCard, _monthKey };

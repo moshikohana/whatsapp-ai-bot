@@ -15,6 +15,23 @@ const logger = require('./logger');
 const ALBUM = path.join(__dirname, '..', 'data', 'album');
 const OUT = path.join(__dirname, '..', 'output', 'weekly');
 const MAX_PHOTOS = 10;
+const INDEX = path.join(OUT, 'index.json');
+// Kevin MacLeod (incompetech.com), CC BY 4.0 — credited at the end of the film.
+const TRACKS = {
+  'carefree.mp3': 'Carefree',
+  'life-of-riley.mp3': 'Life of Riley',
+  'pleasant-porridge.mp3': 'Pleasant Porridge',
+  'wholesome.mp3': 'Wholesome',
+};
+const DEFAULT_TRACK = 'carefree.mp3';
+
+function _loadIndex() { try { return JSON.parse(fs.readFileSync(INDEX, 'utf8')); } catch { return []; } }
+function _saveIndex(list) { try { fs.mkdirSync(OUT, { recursive: true }); fs.writeFileSync(INDEX, JSON.stringify(list.slice(0, 30), null, 1)); } catch (_) {} }
+/** הסרטונים שנבנו, מהחדש לישן — לאפליקציה. */
+function list() { return _loadIndex().filter(v => fs.existsSync(path.join(OUT, v.file))); }
+/** נשלח לוואטסאפ — מתי. */
+function markSent(file) { const l = _loadIndex(); const v = l.find(x => x.file === path.basename(file)); if (v) { v.sentAt = Date.now(); _saveIndex(l); } }
+function filePath(name) { const n = path.basename(String(name || '')); if (!/^week-[\w-]+\.(mp4|jpg)$/.test(n)) return null; const p = path.join(OUT, n); return fs.existsSync(p) ? p : null; }
 
 const _diff = (x, y) => { let s = 0; for (let i = 0; i < x.length; i++) s += Math.abs(x[i] - y[i]); return s / x.length; };
 const _day = ts => new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
@@ -136,7 +153,7 @@ let _busy = false;
  * בונה את הסרטון. מחזיר { video, still, photos } — נתיבים לקבצים.
  * onProgress(0..1) — לדיווח התקדמות.
  */
-async function render({ days = 7, onProgress } = {}) {
+async function render({ days = 7, onProgress, music = DEFAULT_TRACK } = {}) {
   if (_busy) throw new Error('סרטון כבר בהכנה');
   _busy = true;
   try {
@@ -150,13 +167,18 @@ async function render({ days = 7, onProgress } = {}) {
     }
     const counts = ['מיה', 'שי'].map(n => ({ name: n, n: picked.filter(p => p.names.includes(n)).length })).filter(c => c.n > 0);
     const isFriday = new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Jerusalem', weekday: 'short' }) === 'Fri';
-    const props = { photos, range: _range(picked), names: counts.map(c => c.name), counts, sign: isFriday ? 'שבת שלום' : 'שבוע טוב' };
+    const track = TRACKS[music] ? music : DEFAULT_TRACK;
+    const props = {
+      photos, range: _range(picked), names: counts.map(c => c.name), counts, sign: isFriday ? 'שבת שלום' : 'שבוע טוב',
+      music: track, credit: `Music: "${TRACKS[track]}" Kevin MacLeod (incompetech.com) · CC BY 4.0`,
+    };
 
     const { selectComposition, renderMedia, renderStill } = require('@remotion/renderer');
     const serveUrl = await _getBundle();
     const composition = await selectComposition({ serveUrl, id: 'WeekOfGirls', inputProps: props });
     fs.mkdirSync(OUT, { recursive: true });
-    const stamp = new Date().toISOString().slice(0, 10);
+    // One file per film (a second one the same day does not overwrite the first).
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
     const video = path.join(OUT, `week-${stamp}.mp4`);
     const still = path.join(OUT, `week-${stamp}.jpg`);
     // One at a time: the server is small and the bot must keep answering.
@@ -168,8 +190,11 @@ async function render({ days = 7, onProgress } = {}) {
     // The preview: the first photo, mid-way — card, name and date in view.
     await renderStill({ composition, serveUrl, output: still, inputProps: props, frame: 75 + 30, imageFormat: 'jpeg', jpegQuality: 90 });
     logger.info(`🎞️ weekly video: ${picked.length} photos, ${(composition.durationInFrames / 30).toFixed(1)}s → ${video}`);
+    const idx = _loadIndex();
+    idx.unshift({ file: path.basename(video), still: path.basename(still), ts: Date.now(), photos: picked.length, seconds: composition.durationInFrames / 30, range: props.range, music: TRACKS[track], sentAt: null });
+    _saveIndex(idx);
     return { video, still, photos: picked.length, seconds: composition.durationInFrames / 30 };
   } finally { _busy = false; }
 }
 
-module.exports = { render, pickPhotos };
+module.exports = { render, pickPhotos, list, markSent, filePath, TRACKS };

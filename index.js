@@ -7008,6 +7008,7 @@ async function _deliverWeekly(r, job) {
       await cap(oc.sendMessage(MessageMedia.fromFilePath(r.video), { sendMediaAsDocument: true, caption: '🎞️ השבוע של מיה ושי' + BOT_MARKER }), 120000, 'file');
     }
     if (job) J.done(job, '✅ הסרטון נשלח לוואטסאפ');
+    try { require('./src/weekly-video').markSent(r.video); } catch (_) {}
     logger.info('🎞️ weekly video: sent to his chat');
   } catch (e) { if (job) J.fail(job, 'השליחה לוואטסאפ נכשלה'); logger.warn('🎞️ weekly send: ' + (e.message || '').substring(0, 100)); throw e; }
 }
@@ -7028,7 +7029,7 @@ async function route(chatId, text, chat) {
   // 🎞️ "שלח שוב את הסרטון" — the last film, without building it again.
   if (chatId === OWNER_ID && /^(שלח שוב (את )?(הסרטון|סרטון שבועי)|סרטון שבועי שוב)$/.test(String(text || '').trim())) {
     const dir = path.join(__dirname, 'output', 'weekly');
-    const last = (() => { try { return fs.readdirSync(dir).filter(f => /^week-.*\.mp4$/.test(f)).sort().pop(); } catch { return null; } })();
+    const last = (() => { try { return (require('./src/weekly-video').list()[0] || {}).file || fs.readdirSync(dir).filter(f => /^week-.*\.mp4$/.test(f)).sort().pop(); } catch { return null; } })();
     if (!last) return '🎞️ עוד אין סרטון — כתוב *סרטון שבועי*.';
     const r = { video: path.join(dir, last), still: path.join(dir, last.replace('.mp4', '.jpg')), photos: '', seconds: 0 };
     const J = require('./src/jobs'); const job = J.create('weekly', '🎞️ השבוע של מיה ושי', 30);

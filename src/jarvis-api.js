@@ -684,9 +684,16 @@ function attach(app, deps = {}) {
     catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
   });
   app.get('/api/jarvis/album/photo', guard, (req, res) => {
-    const img = require('./album').photo(String(req.query.name || ''), parseInt(req.query.ts, 10));
+    const al = require('./album');
+    const name = String(req.query.name || ''), ts = parseInt(req.query.ts, 10);
+    const img = al.photo(name, ts);
     if (!img) return res.status(404).json({ error: 'התמונה לא נמצאה' });
-    res.json({ ok: true, image: img });
+    res.json({ ok: true, image: img, names: al.whoIn(name, ts), people: Object.values(al.summary()).map(p => p.name) });
+  });
+  app.post('/api/jarvis/album/names', guard, async (req, res) => {
+    const { name, ts, names } = req.body || {};
+    const r = await require('./album').setNames(String(name || ''), parseInt(ts, 10), Array.isArray(names) ? names : []);
+    res.status(r.ok ? 200 : 400).json(r.ok ? r : { error: r.error });
   });
   app.post('/api/jarvis/album/remove', guard, (req, res) => {
     const { name, ts } = req.body || {};
@@ -758,6 +765,21 @@ function attach(app, deps = {}) {
   app.post('/api/jarvis/news/media/backfill', guard, async (req, res) => {
     try { res.json({ ok: true, ...(await require('./news-feed').backfillMedia(Number((req.body || {}).hours) || 24, !!(req.body || {}).force)) }); }
     catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
+  });
+  app.get('/api/jarvis/weekly', guard, (_req, res) => res.json({ ok: true, videos: require('./weekly-video').list() }));
+  app.get('/api/jarvis/weekly/file', guard, (req, res) => {
+    const p = require('./weekly-video').filePath(req.query.name);
+    if (!p) return res.status(404).json({ error: 'הסרטון לא נמצא' });
+    res.sendFile(p);
+  });
+  app.get('/api/jarvis/weekly/still', guard, (req, res) => {
+    const p = require('./weekly-video').filePath(req.query.name);
+    if (!p) return res.status(404).json({ error: 'אין תמונה' });
+    res.json({ ok: true, image: fs.readFileSync(p).toString('base64') });
+  });
+  app.post('/api/jarvis/weekly/make', guard, (_req, res) => {
+    if (!deps.runCommand) return res.status(503).json({ error: 'לא מחובר' });
+    deps.runCommand('סרטון שבועי').then(t => res.json({ ok: true, text: t })).catch(e => res.status(500).json({ error: (e.message || '').substring(0, 150) }));
   });
   app.get('/api/jarvis/jobs/active', guard, (_req, res) => res.json({ ok: true, jobs: require('./jobs').active() }));
   app.get('/api/jarvis/news/img', guard, (req, res) => {
