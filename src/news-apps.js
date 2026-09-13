@@ -301,7 +301,8 @@ async function _drain() {
         .map(x => ({ x, n: _overlap(x.text, p.text) })).filter(c => c.n >= 2).sort((a, b) => b.n - a.n).slice(0, 3);
       let story = null;
       for (const c of cands) {
-        if (c.n >= 4.5 || (c.x.source !== p.source && await _sameApps(c.x.text, p.text))) { story = c.x.story || c.x.id; break; }
+        // The same channel twice (an update, a second post) is asked about too, when close enough.
+        if (c.n >= 4.5 || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(c.x.text, p.text))) { story = c.x.story || c.x.id; break; }
       }
       const l2 = _load(); const pp = l2.find(x => x.id === p.id);
       if (pp) { pp.story = story || pp.id; _save(l2); }
@@ -321,7 +322,7 @@ async function _drain() {
       for (const c of cands) {
         if (asked.has(c.x.story) || asked.size >= 3) continue;
         asked.add(c.x.story);
-        if (c.n >= 4.5 || (c.x.source !== p.source && await _sameApps(c.x.text, p.text))) { target = c.x.story; break; }
+        if (c.n >= 4.5 || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(c.x.text, p.text))) { target = c.x.story; break; }
       }
       const l2 = _load();
       for (const x of l2) {
