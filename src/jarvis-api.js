@@ -824,9 +824,16 @@ function attach(app, deps = {}) {
   });
 
   // ── 📲 התראות מאפליקציות החדשות — מהטלפון, מול הרדיו ─────────────
-  app.post('/api/jarvis/news-push', guard, (req, res) => {
+  app.post('/api/jarvis/news-push', guard, async (req, res) => {
     try {
       const items = Array.isArray((req.body || {}).items) ? req.body.items.slice(0, 300) : [];
+      // The notification's own picture (ynet, N12… send one with most pushes).
+      for (const it of items) {
+        if (it && typeof it.img64 === 'string' && it.img64.length > 2000) {
+          try { it.img = await require('./news-feed').saveMedia(Buffer.from(it.img64, 'base64')); } catch (_) {}
+        }
+        if (it) delete it.img64;
+      }
       res.json({ ok: true, added: require('./news-apps').addMany(items) });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });

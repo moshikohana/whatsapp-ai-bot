@@ -39,7 +39,7 @@ function _saveH(list) { try { fs.writeFileSync(HEADLINES, JSON.stringify(list, n
 
 // The notification title is sometimes the app's own name ("ynet", "C14") and
 // sometimes a real headline; only a real one is part of the story.
-const _GENERIC = /^(ynet|c14|כאן|כאן 11|כאן חדשות|ערוץ 14|עכשיו 14|i24news)$/i;
+const _GENERIC = /^(ynet|n12|החדשות 12|mako|c14|כאן|כאן 11|כאן חדשות|ערוץ 14|עכשיו 14|i24news)$/i;
 // Podcasts, sport and culture channels inside the same apps are not news.
 const _SKIP = /(הסכתים|פודקאסט|פופ אפ|כדורגל|כדורסל|ליגת|מונדיאל|פרמייר|שער בכורה|בליגה|אליפות העולם|אליפות אירופה|אולימפי|יורוליג|NBA|טניס|ג'ודו|התעמלות אמנותית|פיפ"א|אירוויזיון|מתכון|מגזין חג|\| מגזין|פרויקט מיוחד|כאן גימל|כאן 88|כאן תרבות|הצטרפו לשידור החי|\| הצטרפו|כאן חדשות ברשת ב' —|למתחילים:)/;
 
@@ -60,15 +60,17 @@ function addMany(items) {
     const ts = +it.ts || Date.now();
     if (!source || text.length < 12 || ts < cutoff) continue;
     const key = `${source}|${_norm(text).substring(0, 80)}`;
-    if (list.some(x => x.key === key)) continue;
+    const dup = list.find(x => x.key === key);
+    // The same push again — now with its picture: keep the picture.
+    if (dup) { if (it.img && !dup.img) { dup.img = String(it.img).substring(0, 40); } continue; }
     const item = { id: `${ts}-${Math.random().toString(36).slice(2, 6)}`, source, text, ts, key, skip: _SKIP.test(text) || undefined };
     if (it.via && it.via !== 'app') {
       item.via = it.via;
       if (it.reporter) item.reporter = true;
       if (it.full) item.full = String(it.full).substring(0, 1500);
       if (it.link) item.link = String(it.link).substring(0, 200);
-      if (it.img) item.img = String(it.img).substring(0, 40);
     }
+    if (it.img) item.img = String(it.img).substring(0, 40);
     list.push(item);
     if (!item.skip) fresh.push(item);
     added++;

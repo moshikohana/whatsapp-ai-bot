@@ -301,4 +301,4 @@ async function backfillMedia(hours = 24, force = false) {
   return { done, tried };
 }
 
-module.exports = { start, onWhatsApp, isReporter, reporters, status, telegramTwin, linkInText, mediaPath, backfillMedia };
+module.exports = { saveMedia: _saveMedia, start, onWhatsApp, isReporter, reporters, status, telegramTwin, linkInText, mediaPath, backfillMedia };
