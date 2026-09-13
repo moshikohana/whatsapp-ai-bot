@@ -367,4 +367,28 @@ function settings(patch = null) {
   return { enabled: s.enabled, time: s.time, lastCallAt: s.lastCallAt || null };
 }
 
-module.exports = { init, prepare, ask, done, settings };
+/**
+ * 💬 מי כתב לו בפרטי ומחכה — ל"דורש התייחסות" בבית. מה שסימן "טופל" לא
+ * חוזר, עד שמגיעה מאותו אדם הודעה חדשה. נשמר לדקה, כי זו קריאה מהדף.
+ */
+const PEOPLE_DONE = require('path').join(__dirname, '..', 'data', 'attention-people-done.json');
+let _peopleCache = null, _peopleAt = 0;
+function _peopleDone() { try { return JSON.parse(require('fs').readFileSync(PEOPLE_DONE, 'utf8')); } catch { return {}; } }
+async function waitingPeople(hours = 24) {
+  if (!_peopleCache || Date.now() - _peopleAt > 60000) {
+    _peopleCache = await _unanswered(Date.now() - hours * 3600000);
+    _peopleAt = Date.now();
+  }
+  const done = _peopleDone();
+  return _peopleCache.filter(p => !(done[p.chatId] && done[p.chatId] >= p.ts));
+}
+function peopleDone(chatId, ts) {
+  const d = _peopleDone();
+  d[String(chatId)] = +ts || Date.now();
+  // Only the recent ones matter; the file stays small.
+  for (const [k, v] of Object.entries(d)) if (Date.now() - v > 7 * 86400000) delete d[k];
+  try { require('fs').writeFileSync(PEOPLE_DONE, JSON.stringify(d)); } catch (_) {}
+  return true;
+}
+
+module.exports = { waitingPeople, peopleDone, init, prepare, ask, done, settings };

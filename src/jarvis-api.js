@@ -827,6 +827,15 @@ function attach(app, deps = {}) {
     const ok = require('./attention').markDone(String((req.body || {}).id || ''));
     res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'הפריט לא נמצא' });
   });
+  app.get('/api/jarvis/attention/people', guard, async (_req, res) => {
+    try { res.json({ ok: true, people: await require('./call-brief').waitingPeople(24) }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.post('/api/jarvis/attention/people/done', guard, (req, res) => {
+    const { chatId, ts } = req.body || {};
+    if (!chatId) return res.status(400).json({ error: 'חסר צ׳אט' });
+    res.json({ ok: require('./call-brief').peopleDone(chatId, ts) });
+  });
   app.post('/api/jarvis/attention/clear', guard, (req, res) => {
     res.json({ ok: true, closed: require('./attention').clearAll() });
   });
