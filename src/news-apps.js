@@ -92,6 +92,11 @@ function addMany(items) {
 function tick() {
   const now = Date.now();
   for (const p of _load()) {
+    // 🔗 A story that is its own root, a quarter of an hour on: its twins
+    // have arrived by now. One more look, once.
+    if (!p.skip && !p.rejoin && p.story === p.id && now - p.ts > 15 * 60000 && now - p.ts < 3 * 3600000) _queue.push({ kind: 'rejoin', id: p.id });
+  }
+  for (const p of _load()) {
     if (p.radio || p.skip || !_isApp(p)) continue;
     const age = now - p.ts;
     const due = [20, 60, 120][(p.checks || 1) - 1];
@@ -243,7 +248,10 @@ async function _drain() {
       const all = _load();
       const p = all.find(x => x.id === job.id);
       if (!p || p.story) return;
-      const cands = all.filter(x => x.id !== p.id && !x.skip && x.ts <= p.ts && p.ts - x.ts < 3 * 3600000)
+      // Either side of it in time: a WhatsApp post stamped 17:42:43 was stored
+      // after Kan's push of 17:42:45, and "earlier only" kept each from seeing
+      // the other — the same Kushner story twice on the home screen (13.9).
+      const cands = all.filter(x => x.id !== p.id && !x.skip && Math.abs(p.ts - x.ts) < 3 * 3600000)
         .map(x => ({ x, n: _overlap(x.text, p.text) })).filter(c => c.n >= 2).sort((a, b) => b.n - a.n).slice(0, 3);
       let story = null;
       for (const c of cands) {
@@ -252,6 +260,30 @@ async function _drain() {
       const l2 = _load(); const pp = l2.find(x => x.id === p.id);
       if (pp) { pp.story = story || pp.id; _save(l2); }
       if (story) logger.info(`📲 ${p.source} = same story as earlier push: "${p.text.substring(0, 40)}"`);
+      return;
+    }
+    if (job.kind === 'rejoin') {
+      const all = _load();
+      const p = all.find(x => x.id === job.id);
+      if (!p || p.rejoin || p.story !== p.id) return;
+      const mine = all.filter(x => x.story === p.id);
+      const cands = all.filter(x => !x.skip && x.story && x.story !== p.id && Math.abs(p.ts - x.ts) < 3 * 3600000)
+        .map(x => ({ x, n: Math.max(...mine.map(m => _overlap(m.text, x.text))) }))
+        .filter(c => c.n >= 2).sort((a, b) => b.n - a.n);
+      let target = null;
+      const asked = new Set();
+      for (const c of cands) {
+        if (asked.has(c.x.story) || asked.size >= 3) continue;
+        asked.add(c.x.story);
+        if (c.n >= 4.5 || (c.x.source !== p.source && await _sameApps(c.x.text, p.text))) { target = c.x.story; break; }
+      }
+      const l2 = _load();
+      for (const x of l2) {
+        if (x.id === p.id) x.rejoin = 1;
+        if (target && x.story === p.id) x.story = target;
+      }
+      _save(l2);
+      if (target) logger.info(`🔗 story merged: "${p.text.substring(0, 40)}" (${mine.length}) → ${target}`);
       return;
     }
     if (job.kind === 'push') {
@@ -347,13 +379,16 @@ function latest(hours = 12, limit = 20) {
   // _SKIP again: items stored before a word was added to it.
   const pushes = _load().filter(x => !x.skip && !_SKIP.test(x.text) && x.ts >= since).sort((a, b) => a.ts - b.ts);
   const out = [];
+  // By the story it belongs to — which may be a push that came after it.
+  const byStory = new Map();
   for (const p of pushes) {
     // The story the model linked it to; words only for pushes it has not seen.
-    const s = p.story
-      ? (p.story === p.id ? null : out.find(st => st.members.some(m => m.id === p.story || m.story === p.story)))
+    let s = p.story
+      ? byStory.get(p.story)
       : out.find(st => Math.abs(st.last - p.ts) < 3 * 3600000 && st.members.some(m => _overlap(m.text, p.text) >= 3.5));
     if (s) { s.members.push(p); s.last = Math.max(s.last, p.ts); }
-    else out.push({ members: [p], last: p.ts });
+    else { s = { members: [p], last: p.ts }; out.push(s); }
+    if (p.story && !byStory.has(p.story)) byStory.set(p.story, s);
   }
   return out.map(st => {
     const apps = {}, texts = {}, vias = {};
@@ -471,6 +506,14 @@ function pushesBetween(from, to) {
  * ידיעה אחת במלואה — כל התראה שנשלחה עליה, מכל אפליקציה, עם הטקסט המלא,
  * ומתי נשמעה ברדיו. זה מה שנפתח כשלוחצים על כותרת.
  */
+/** 🔗 מיזוג עכשיו — לסיפורים בודדים מהשעות האחרונות (בלי לחכות לסבב). */
+async function rejoinNow(hours = 3) {
+  const now = Date.now();
+  for (const p of _load()) if (!p.skip && p.story === p.id && now - p.ts < hours * 3600000) { delete p.rejoin; _queue.push({ kind: 'rejoin', id: p.id }); }
+  const l = _load(); for (const p of l) if (p.story === p.id && now - p.ts < hours * 3600000) delete p.rejoin; _save(l);
+  _drain();
+}
+
 function story(id) {
   const s = latest(48, 2000).find(x => x.id === id || (x.memberIds || []).includes(id));
   if (!s) return null;
@@ -536,4 +579,5 @@ function setImg(id, img) {
   _save(l);
 }
 
-module.exports = { setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
+module.exports = {
+  rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
