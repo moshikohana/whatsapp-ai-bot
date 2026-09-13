@@ -6975,9 +6975,23 @@ function _canonicalizeCommand(text, quotedText = '') {
 }
 
 // 🎞️ השבוע של מיה ושי: the film, sent to his chat — the preview picture first.
+// A film in the making survives a restart: the request is written down, and
+// cleared only when it was sent. (13.9: a restart in the middle of one lost it.)
+const _WEEKLY_PENDING = path.join(__dirname, 'data', 'weekly-pending.json');
+setTimeout(() => {
+  try {
+    const p = JSON.parse(fs.readFileSync(_WEEKLY_PENDING, 'utf8'));
+    if (p && Date.now() - p.at < 40 * 60000) {
+      logger.info('🎞️ weekly video: interrupted by a restart — making it again');
+      _sendWeeklyVideo().catch(e => logger.warn('🎞️ weekly resume: ' + (e.message || '').substring(0, 80)));
+    } else fs.unlinkSync(_WEEKLY_PENDING);
+  } catch (_) {}
+}, 90000);
+
 async function _sendWeeklyVideo(chat) {
   const wv = require('./src/weekly-video');
   const J = require('./src/jobs');
+  try { fs.writeFileSync(_WEEKLY_PENDING, JSON.stringify({ at: Date.now() })); } catch (_) {}
   const job = J.create('weekly', '🎞️ השבוע של מיה ושי', 240);
   const t0 = Date.now();
   let r;
@@ -7017,6 +7031,7 @@ async function _deliverWeekly(r, job) {
       await cap(oc.sendMessage(MessageMedia.fromFilePath(r.video), { sendMediaAsDocument: true, caption: '🎞️ השבוע של מיה ושי' + BOT_MARKER }), 120000, 'file');
     }
     if (job) J.done(job, '✅ הסרטון נשלח לוואטסאפ');
+    try { fs.unlinkSync(_WEEKLY_PENDING); } catch (_) {}
     try { require('./src/weekly-video').markSent(r.video); } catch (_) {}
     logger.info('🎞️ weekly video: sent to his chat');
   } catch (e) { if (job) J.fail(job, 'השליחה לוואטסאפ נכשלה'); logger.warn('🎞️ weekly send: ' + (e.message || '').substring(0, 100)); throw e; }
