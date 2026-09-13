@@ -48,7 +48,7 @@ function memory() { if (!_mem) _mem = _load(MEM_FILE, { facts: [], updated: 0 })
 // Called from wherever the bot already decides something is worth the owner's
 // attention. Queued rather than sent, because the phone may be asleep; it
 // collects whatever accumulated the next time it polls.
-function pushAlert({ title, body, summary = '', kind = 'info', urgency = 'normal', link = null, supersedes = null }) {
+function pushAlert({ title, body, summary = '', kind = 'info', urgency = 'normal', link = null, supersedes = null, radio = null }) {
   let list = alerts();
 
   // A digest is a snapshot of "what needs you right now", not an event that
@@ -74,6 +74,14 @@ function pushAlert({ title, body, summary = '', kind = 'info', urgency = 'normal
     // its surrounding messages, stays for the app to render.
     summary: String(summary || '').substring(0, 200),
     kind, urgency, link,
+    // 🎧 Where on the air each thing was said — the app opens the audio and the
+    // exact transcript from these ("למה אין פה אפשרות להציג אודיו או תמלול", 13.9).
+    radio: Array.isArray(radio) && radio.length
+      ? radio.filter(r => r && r.ts).slice(0, 12).map(r => ({
+          label: String(r.label || r.station || 'שידור').substring(0, 60),
+          station: String(r.station || ''), ts: +r.ts, q: String(r.q || '').substring(0, 300),
+        }))
+      : undefined,
     delivered: false,
   };
   list.push(item);

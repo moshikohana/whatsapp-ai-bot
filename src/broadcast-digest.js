@@ -75,8 +75,12 @@ function audioPath(name) {
  * אין — האחרון שנשמע עד אז. יחד עם הקטע שלפניו ושאחריו.
  */
 function clipAround(station, ts, q = '') {
-  const list = chunksBetween(ts - 25 * 60000, ts + 12 * 60000)
-    .filter(c => !station || c.station === station).sort((a, b) => a.ts - b.ts);
+  // The model writes the station its own way (גלי צה״ל / גלי צה"ל); compared
+  // without quotes and spaces, and all stations when none matches.
+  const stn = s => String(s || '').replace(/["'״׳s]/g, '').toLowerCase();
+  const all = chunksBetween(ts - 25 * 60000, ts + 12 * 60000).sort((a, b) => a.ts - b.ts);
+  let list = station ? all.filter(c => stn(c.station) === stn(station)) : all;
+  if (!list.length) list = all;
   if (!list.length) return null;
   const words = String(q || '').replace(/[^\u0590-\u05FFa-zA-Z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
   const stems = words.map(w => (w.length >= 5 && 'בהוכלמש'.includes(w[0])) ? w.slice(1) : w);
@@ -326,6 +330,33 @@ function prune() {
 }
 
 /** הודעת וואטסאפ לתקציר שעתי. */
+/**
+ * 🎧 לכל ציטוט, כותרת במהדורה ונושא — איפה בשידור זה נאמר. האפליקציה פותחת
+ * מזה את קטע השמע והתמלול המדויק (clipAround מוצא את הקטע לפי המילים).
+ */
+function clipRefs(d) {
+  if (!d) return [];
+  const out = [];
+  const ilHour = ts => +new Date(ts).toLocaleString('en-US', { timeZone: 'Asia/Jerusalem', hour: '2-digit', hour12: false }) % 24;
+  const short = s => String(s || '').replace(/[*_"]/g, '').split(/\s+/).slice(0, 4).join(' ');
+  for (const q of d.quotes || []) {
+    const m = String(q.time || '').match(/(\d{1,2}):(\d{2})/);
+    let diff = 30;
+    if (m) { diff = ((+m[1] - ilHour(d.from) + 24) % 24) * 60 + +m[2]; if (diff > 90) diff = 30; }
+    out.push({ label: `${q.speaker || short(q.text)} · ${q.station || ''}`.replace(/ · $/, ''), station: q.station || '', ts: d.from + diff * 60000, q: q.text });
+  }
+  const b = d.bulletin;
+  if (b) {
+    for (const h of (b.headlines || []).filter(x => x.status !== 'repeat')) {
+      out.push({ label: `🗞️ ${short(h.text)}`, station: (h.stations || [])[0] || (b.stations || [])[0] || '', ts: b.hourTs + 4 * 60000, q: h.text });
+    }
+  }
+  for (const t of d.topics || []) {
+    out.push({ label: short(t.title), station: (t.stations || [])[0] || '', ts: d.from + 35 * 60000, q: `${t.title} ${t.summary || ''}` });
+  }
+  return out.slice(0, 12);
+}
+
 function formatDigest(d) {
   if (!d) return '';
   const lines = [`📻 *מה נאמר בשידור* · ${d.label}`];
@@ -355,6 +386,6 @@ function formatDigest(d) {
 }
 
 module.exports = {
-  keepAudio, audioPath, clipAround,
+  keepAudio, audioPath, clipAround, clipRefs,
   recordChunk, chunksBetween, analyseHour, recentDigests, recentChunks, prune, formatDigest, setBulletin,
 };

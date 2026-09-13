@@ -8578,6 +8578,7 @@ setInterval(async () => {
         require('./src/jarvis-api').pushAlert({
           title: `📻 ${h.station || 'שידור'} — הוזכר קלנר`,
           body: (h.sentence || h.text || '').substring(0, 400),
+          radio: [{ label: h.station || 'שידור', station: h.station || '', ts: h.ts || Date.now(), q: h.quote || h.term || '' }],
           kind: 'broadcast', urgency: 'high',
         });
       } catch {}
@@ -8605,6 +8606,7 @@ setInterval(async () => {
           body: [who && `🎙️ ${who}`, h.quote && `"${h.quote}"`, `📻 ${h.station} · ${time}`]
             .filter(Boolean).join('\n\n'),
           kind: 'broadcast-headline',
+          radio: [{ label: h.station, station: h.station, ts: h.ts || Date.now(), q: h.quote || h.headline }],
           urgency: h.score >= 5 ? 'high' : 'normal',
         });
       } catch {}
@@ -8622,6 +8624,7 @@ setInterval(async () => {
             title: `⚡ תגובה מוכנה · ${h.headline}`,
             summary: pkg.why,
             body: text.replace(/\*/g, ''),
+            radio: [{ label: h.station, station: h.station, ts: h.ts || Date.now(), q: h.quote || h.headline }],
             kind: 'ready-response', urgency: 'high',
           });
         } catch (e) { logger.warn('ready-response: ' + (e.message || '').substring(0, 60)); }
@@ -8744,9 +8747,12 @@ setInterval(async () => {
     try {
       require('./src/jarvis-api').pushAlert({
         title: `📻 מה נאמר בשידור · ${d.label}`,
+        // "0 ציטוטים" (13.9) was an hour whose only news was the bulletin.
         summary: (d.topics || []).map(t => t.title).slice(0, 3).join(' · ')
-          || `${d.quotes.length} ציטוטים`,
+          || (bulletin ? (bulletin.headlines || []).filter(h => h.status !== 'repeat').map(h => h.text).slice(0, 2).join(' · ') : '')
+          || ((d.quotes || []).length ? `${d.quotes.length} ציטוטים` : 'שעה שקטה'),
         body: bd.formatDigest(d),
+        radio: bd.clipRefs(d),
         kind: 'broadcast-digest', urgency: 'normal',
         // Only the newest hour matters; older undelivered ones are stale.
         supersedes: 'broadcast-digest',
