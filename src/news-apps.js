@@ -44,6 +44,36 @@ const _GENERIC = /^(ynet|n12|החדשות 12|mako|c14|כאן|כאן 11|כאן ח
 // כאן BOX: the Kan app's series and shows ("רגע לפני פרק הסיום"), not news (13.9).
 const _SKIP = /(כאן BOX|כאן בוקס|כאןBOX|הסכתים|פודקאסט|פופ אפ|כדורגל|כדורסל|ליגת|מונדיאל|פרמייר|שער בכורה|בליגה|אליפות העולם|אליפות אירופה|אולימפי|יורוליג|NBA|טניס|ג'ודו|התעמלות אמנותית|פיפ"א|אירוויזיון|מתכון|מגזין חג|\| מגזין|פרויקט מיוחד|כאן גימל|כאן 88|כאן תרבות|הצטרפו לשידור החי|\| הצטרפו|כאן חדשות ברשת ב' —|למתחילים:)/;
 
+// 📰 A roundup push — "חדשות החג | לוחם הימ"מ אותר…, מתקפת כטב"מים…" — is
+// several stories in one line. Kept whole it matched none of them, and the
+// Yamam fighter showed three times on the home screen (13.9, end of the holiday).
+const _ROUNDUP = /(?:^|[|—–-]\s*)(?:סיכום\s+)?(?:כותרות|חדשות|מבזקי|סיכום)\s+(?:ה?חג|השבת|הבוקר|הערב|היום|הלילה|השבוע|מוצאי (?:שבת|החג))\s*(?:[|—–:-]\s*|$)/;
+function _roundupParts(text) {
+  const t = String(text || '');
+  if (!_ROUNDUP.test(t)) return null;
+  const core = t.replace(_ROUNDUP, ' ').replace(/\|\s*הצטרפו.*$/, '').trim();
+  const raw = core.split(/\s*[,;|•]\s*/).map(s => s.trim()).filter(Boolean);
+  const parts = [];
+  for (const r of raw) { if (r.length < 12 && parts.length) parts[parts.length - 1] += ', ' + r; else parts.push(r); }
+  return parts.filter(p => p.length >= 12);
+}
+/** מפצל התראת סיכום לידיעות — כל אחת מצטרפת לסיפור שלה. */
+function _splitInto(list, item) {
+  const parts = _roundupParts(item.text);
+  if (!parts || !parts.length) return [];
+  item.skip = true; item.roundup = true;
+  const out = [];
+  parts.forEach((text, i) => {
+    const key = `${item.source}|${_norm(text).substring(0, 80)}`;
+    if (list.some(x => x.key === key)) return;
+    const p = { id: `${item.id}-p${i}`, source: item.source, text, ts: item.ts, key, part: item.id, skip: _SKIP.test(text) || undefined };
+    if (item.via) p.via = item.via;
+    if (item.img) p.img = item.img;
+    list.push(p); out.push(p);
+  });
+  return out.filter(p => !p.skip);
+}
+
 /**
  * התראות חדשות מהטלפון. חוזרות פעמיים לפעמים (עדכון של אותה התראה) — נשמר פעם אחת.
  * @returns כמה נוספו
@@ -73,7 +103,9 @@ function addMany(items) {
     }
     if (it.img) item.img = String(it.img).substring(0, 40);
     list.push(item);
-    if (!item.skip) fresh.push(item);
+    const parts = _splitInto(list, item);
+    if (parts.length) fresh.push(...parts);
+    else if (!item.skip) fresh.push(item);
     added++;
   }
   _save(list.filter(x => x.ts >= cutoff).sort((a, b) => b.ts - a.ts).slice(0, 5000));
@@ -91,6 +123,18 @@ function addMany(items) {
  */
 function tick() {
   const now = Date.now();
+  const all0 = _load();
+  const split = [];
+  let changed = false;
+  for (const r of all0.filter(x => !x.roundup && !x.part && now - x.ts < 12 * 3600000 && _ROUNDUP.test(x.text))) {
+    split.push(..._splitInto(all0, r));
+    if (r.roundup) changed = true;
+  }
+  if (changed) {
+    _save(all0);
+    logger.info(`📰 roundups split: ${split.length} stories`);
+    for (const p of split) _queue.push({ kind: 'twin', id: p.id });
+  }
   for (const p of _load()) {
     // 🔗 A story that is its own root, a quarter of an hour on: its twins
     // have arrived by now. One more look, once.
@@ -139,7 +183,9 @@ async function _sameApps(a, b) {
 התראה ב:
 "${b}"`, {
     system: 'שתי התראות מאפליקציות חדשות. האם הן מדווחות על אותה ידיעה — אותו אירוע או אותה אמירה, גם אם בניסוח אחר או עם פרטים נוספים? ' +
-      'לא מספיק אותו נושא כללי. החזר JSON בלבד: {"same": true|false}',
+      'ערוצים שונים מתארים אותו אירוע אחרת: "פלסטינים" מול "מחבלים", "נהרג" מול "אותר ללא רוח חיים", "הושעה" מול "נעצר" — זו אותה ידיעה. ' +
+      'גם עדכון על אותו אירוע (נמצא, נעצר, מת מפצעיו, פרט חדש) הוא אותה ידיעה. ' +
+      'לא מספיק אותו נושא כללי (שני אירועים שונים באותו אזור או באותה מדינה). החזר JSON בלבד: {"same": true|false}',
     maxTokens: 30, model: 'claude-haiku-4-5-20251001',
   });
   return !!(r && r.same === true);
@@ -251,7 +297,7 @@ async function _drain() {
       // Either side of it in time: a WhatsApp post stamped 17:42:43 was stored
       // after Kan's push of 17:42:45, and "earlier only" kept each from seeing
       // the other — the same Kushner story twice on the home screen (13.9).
-      const cands = all.filter(x => x.id !== p.id && !x.skip && Math.abs(p.ts - x.ts) < 3 * 3600000)
+      const cands = all.filter(x => x.id !== p.id && !x.skip && !(p.part && x.part === p.part) && Math.abs(p.ts - x.ts) < 3 * 3600000)
         .map(x => ({ x, n: _overlap(x.text, p.text) })).filter(c => c.n >= 2).sort((a, b) => b.n - a.n).slice(0, 3);
       let story = null;
       for (const c of cands) {

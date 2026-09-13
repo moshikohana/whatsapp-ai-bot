@@ -8695,6 +8695,8 @@ let _bcLast = 0;
 
 // ─── 📲 בדיקה חוזרת של התראות החדשות מול הרדיו — כל 10 דקות ─────────
 setInterval(() => { try { require('./src/news-apps').tick(); } catch (_) {} }, 10 * 60 * 1000);
+// And once soon after a start: roundups to split and lone stories to merge should not wait ten minutes.
+setTimeout(() => { try { require('./src/news-apps').tick(); } catch (_) {} }, 90 * 1000);
 
 // ─── 🎞️ כרטיס האלבום החודשי — ב-1 לחודש, 09:00 ──────────────────
 setInterval(async () => {
