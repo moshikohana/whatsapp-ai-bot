@@ -2171,7 +2171,10 @@ const _initFailFile = path.join(__dirname, 'data', 'init-fail.json');
 (function selfHealSession() {
   try {
     let st = {}; try { st = JSON.parse(fs.readFileSync(_initFailFile, 'utf8')); } catch {}
-    if ((st.count || 0) >= 6) {
+    // Not within half an hour of a good connection: right after a fresh QR the
+    // phone syncs for minutes and WA Web reloads mid-init — six quick failures
+    // then, and this deleted a session paired 30 seconds earlier (14.9, 14:43).
+    if ((st.count || 0) >= 6 && Date.now() - (st.readyAt || 0) > 30 * 60000) {
       // Follows WA_CLIENT_ID. This was hardcoded to session-ai-personal-bot,
       // so on any second instance it looked for a directory that does not
       // exist and healed nothing — the one instance that crash-looped was the
@@ -2342,14 +2345,20 @@ client.on('qr', async (qr) => {
 });
 
 client.on('loading_screen', (pct) => process.stdout.write(`\r⏳ טוען... ${pct}%`));
-client.on('authenticated', () => { console.log('\n🔐 אומת!'); botStatus = 'authenticated'; io.emit('status', 'authenticated'); });
+client.on('authenticated', () => {
+  console.log('\n🔐 אומת!'); botStatus = 'authenticated'; io.emit('status', 'authenticated');
+  // Paired or restored: the phone may still be syncing for minutes, and WA Web
+  // reloads meanwhile — not a corrupt session (see selfHealSession).
+  let st = {}; try { st = JSON.parse(fs.readFileSync(_initFailFile, 'utf8')); } catch {}
+  try { fs.writeFileSync(_initFailFile, JSON.stringify({ ...st, readyAt: Date.now() })); } catch {}
+});
 
 let _readyHandled = false;
 client.on('ready', () => {
   botStatus = 'connected';
   currentQR = null;
   _qrSince = null; _rescanAlertLast = 0;
-  try { fs.writeFileSync(_initFailFile, JSON.stringify({ count: 0 })); } catch {} // healthy — reset crash counter
+  try { fs.writeFileSync(_initFailFile, JSON.stringify({ count: 0, readyAt: Date.now() })); } catch {} // healthy — reset crash counter
   const info = client.info;
   logger.info(`✅ בוטי מחובר! | ${info.pushname} (+${info.wid.user})`);
   // 'ready' fires twice on this build (09:18:35 and :42, 14.9): the timers,
@@ -10447,7 +10456,9 @@ client.initialize().catch(async (err) => {
   // session after enough failures (reset to 0 on 'ready').
   try {
     let st = {}; try { st = JSON.parse(fs.readFileSync(_initFailFile, 'utf8')); } catch {}
-    fs.writeFileSync(_initFailFile, JSON.stringify({ count: (st.count || 0) + 1, lastError: (err.message || '').substring(0, 120), ts: Date.now() }));
+    fs.writeFileSync(_initFailFile, JSON.stringify({ ...st, count: (st.count || 0) + 1, lastError: (err.message || '').substring(0, 120), ts: Date.now() }));
+    // Just paired: give the phone's sync time before the next attempt.
+    if (Date.now() - (st.readyAt || 0) < 30 * 60000) await new Promise(r => setTimeout(r, 20000));
   } catch {}
   try { await notifyOwnerBotDown('init-crash', err.message?.substring(0, 200)); } catch {}
   process.exit(1);

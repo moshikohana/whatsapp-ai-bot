@@ -26,18 +26,19 @@ index 6a67629..b79dab5 100644
                      throw 'ready timeout';
                  }
              
-@@ -272,6 +274,10 @@ class Client extends EventEmitter {
+@@ -272,6 +274,11 @@ class Client extends EventEmitter {
                   */
              this.emit(Events.READY);
              this.authStrategy.afterAuthReady();
 +          } catch (e) {
++            if (/already exists/.test(String(e && e.message))) { console.error('whatsapp-web.js: onAppStateHasSyncedEvent repeated after ready - listeners already attached, ignored'); return; }
 +            console.error('whatsapp-web.js: onAppStateHasSyncedEvent crashed (client stuck forever otherwise) - ' + (e && e.stack ? e.stack : e));
 +            setTimeout(() => process.exit(1), 500);
 +          }
          });
          let lastPercent = null;
          await exposeFunctionIfAbsent(this.pupPage, 'onOfflineProgressUpdateEvent', async (percent) => {
-@@ -756,7 +762,7 @@ class Client extends EventEmitter {
+@@ -756,7 +763,7 @@ class Client extends EventEmitter {
              window.Store.Msg.on('change:body change:caption', (msg, newBody, prevBody) => { window.onEditMessageEvent(window.WWebJS.getMessageModel(msg), newBody, prevBody); });
              window.Store.AppState.on('change:state', (_AppState, state) => { window.onAppStateChangedEvent(state); });
              window.Store.Conn.on('change:battery', (state) => { window.onBatteryStateChangedEvent(state); });
@@ -46,7 +47,7 @@ index 6a67629..b79dab5 100644
              window.Store.Chat.on('remove', async (chat) => { window.onRemoveChatEvent(await window.WWebJS.getChatModel(chat)); });
              window.Store.Chat.on('change:archive', async (chat, currState, prevState) => { window.onArchiveChatEvent(await window.WWebJS.getChatModel(chat), currState, prevState); });
              window.Store.Msg.on('add', (msg) => { 
-@@ -773,54 +779,71 @@ class Client extends EventEmitter {
+@@ -773,54 +780,71 @@ class Client extends EventEmitter {
              window.Store.Chat.on('change:unreadCount', (chat) => {window.onChatUnreadCountEvent(chat);});
  
              if (window.compareWwebVersions(window.Debug.VERSION, '>=', '2.3000.1014111620')) {
