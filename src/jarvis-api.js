@@ -642,6 +642,23 @@ function attach(app, deps = {}) {
   });
 
   // ── חדר מלחמה — מצב החירום, מה מפעיל אותו, והסקירה האחרונה ──────
+  // 📋 The emergency brief, when he asks for it (not built automatically).
+  app.post('/api/jarvis/warroom/brief', guard, (req, res) => {
+    if (!deps.warRoomBrief) return res.status(400).json({ error: 'לא זמין' });
+    deps.warRoomBrief().catch(() => {});
+    res.json({ ok: true, started: true });
+  });
+  // ⚡ A response package for one on-air headline, when he asks for it.
+  app.post('/api/jarvis/broadcast/headline/package', guard, async (req, res) => {
+    try {
+      const id = String((req.body || {}).id || '');
+      const h = require('./broadcast-headlines').recent(80).find(x => x.id === id);
+      if (!h) return res.status(404).json({ error: 'הכותרת לא נמצאה' });
+      const pkg = await require('./lead-radar').onHeadline(h, { force: true });
+      if (!pkg) return res.status(500).json({ error: 'לא הצלחתי לנסח' });
+      res.json({ ok: true, package: pkg });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
   app.get('/api/jarvis/warroom', guard, (req, res) => {
     try {
       const cm = require('./crisis-mode');
@@ -655,6 +672,9 @@ function attach(app, deps = {}) {
       } catch (_) {}
       let last = null;
       try { last = JSON.parse(fs.readFileSync(path.join(DATA, 'warroom-last.json'), 'utf8')); } catch (_) {}
+      // A brief saved before the model's notes were stripped still carries them.
+      if (last && last.brief) last.brief = String(last.brief).replace(/<scratchpad>[\s\S]*?<\/scratchpad>\s*/gi, '').replace(/<\/?scratchpad>/gi, '').trim();
+      if (last && last.briefing && Date.now() - last.briefing > 5 * 60000) last.briefing = null;
       res.json({
         ok: true,
         active: active ? {

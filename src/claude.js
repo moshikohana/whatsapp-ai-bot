@@ -1098,6 +1098,9 @@ async function smartChat(userMessage, history = [], options = {}) {
   let reply;
   if (textBlocks.length > 0) {
     reply = textBlocks.map(b => b.text.trim()).filter(Boolean).join('\n\n');
+    // The prompt asks it to think in <scratchpad>; the thinking reached him in
+    // the war-room brief, twice (13.9, 14.9). Out, whatever the prompt said.
+    reply = reply.replace(/<scratchpad>[\s\S]*?<\/scratchpad>\s*/gi, '').replace(/<\/?scratchpad>/gi, '').replace(/^\s*-{3,}\s*\n/, '').trim();
   } else if (maxLoops <= 0) {
     reply = '⏳ הבקשה דרשה יותר כלים ממה שניתן לבצע בקריאה אחת. ניסיתי לסכם — אבל לא הצלחתי. אנא פצל את הבקשה (לדוגמה: "סכם 5 ערוצים בלבד") ונסה שוב.';
   } else {

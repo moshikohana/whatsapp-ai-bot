@@ -1664,6 +1664,7 @@ app.use(express.json({ limit: '1mb' }));            // JARVIS posts JSON bodies
 try {
   require('./src/jarvis-api').attach(app, {
     botName: () => botName,
+    warRoomBrief: () => runWarRoomBrief(),
     // 📤 A group message, forwarded to his own chat — the way to reach it in WhatsApp.
     forwardToOwner: async (msgId, note) => {
       const orig = await client.getMessageById(msgId);
@@ -2812,12 +2813,13 @@ async function triggerWarRoom(trigger) {
       '━━━━━━━━━━━━━━━━━━━━',
       alertSummary,
       '━━━━━━━━━━━━━━━━━━━━',
-      '_מכין סקירה מצרפית + טיוטת תגובה... (15-30 שניות)_',
+      '↩️ לסקירה מצרפית וטיוטת תגובה — ענה *סקירה*',
     ].join('\n');
     await botSend(oc, opener);
+    _lastWarTrigger = trigger;
     // The app too. Until now the emergency lived only in WhatsApp — the one
     // moment where he most needs it on the phone was the one it never reached.
-    _saveWarRoom({ ts: Date.now(), opener: opener.replace(/\*/g, ''), brief: null });
+    _saveWarRoom({ ts: Date.now(), opener: opener.replace(/\*/g, ''), brief: null, trigger: { count: trigger.count, spanMinutes: trigger.spanMinutes, keywords: trigger.keywords, groups: trigger.groups, alerts: trigger.alerts.slice(0, 5) } });
     try {
       require('./src/jarvis-api').pushAlert({
         title: `🚨 מצב חירום · ${trigger.count} התראות קריטיות`,
@@ -2827,7 +2829,29 @@ async function triggerWarRoom(trigger) {
       });
     } catch (_) {}
 
-    // Aggregate analysis prompt — let Claude do web_search + spokesperson
+  } catch (e) {
+    logger.error('triggerWarRoom error:', e.message?.substring(0, 100));
+  }
+}
+
+/**
+ * 📋 הסקירה המצרפית וטיוטת התגובה של מצב חירום — רק כשהוא מבקש: "סקירה"
+ * בוואטסאפ או הכפתור באפליקציה (14.9). עד אז — ההתראה בלבד.
+ */
+let _lastWarTrigger = null;
+let _warBriefRunning = false;
+async function runWarRoomBrief() {
+  if (_warBriefRunning) return 'running';
+  let last = null;
+  try { last = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'warroom-last.json'), 'utf8')); } catch (_) {}
+  const trigger = _lastWarTrigger || (last && last.trigger);
+  if (!trigger || !Array.isArray(trigger.alerts)) return 'none';
+  _warBriefRunning = true;
+  const opener = (last && last.opener) || '';
+  _saveWarRoom({ ...(last || {}), briefing: Date.now() });
+  try {
+    const oc = await client.getChatById(OWNER_ID);
+    const { smartChat: _sc } = require('./src/claude');
     const dominantKeywords = trigger.keywords.join(', ');
     const dominantGroups = trigger.groups.join(', ');
     const previews = trigger.alerts.slice(0, 5).map((a, i) =>
@@ -2876,7 +2900,7 @@ ${previews}
 
     const result = await _sc(warRoomPrompt, [], { webSearchMaxUses: 2, timeoutMs: 120000 });
     await botSend(oc, `📋 *מצב חירום — סקירה מצרפית*\n${'━'.repeat(20)}\n\n${result}`);
-    _saveWarRoom({ ts: Date.now(), opener: opener.replace(/\*/g, ''), brief: String(result || '').replace(/\*/g, '') });
+    _saveWarRoom({ ...(last || {}), ts: (last && last.ts) || Date.now(), opener: String(opener).replace(/\*/g, ''), brief: String(result || '').replace(/\*/g, ''), briefing: null });
     try {
       require('./src/jarvis-api').pushAlert({
         title: '📋 מצב חירום — סקירה מצרפית',
@@ -2885,8 +2909,12 @@ ${previews}
         kind: 'warroom', urgency: 'high',
       });
     } catch (_) {}
+    _warBriefRunning = false;
+    return 'done';
   } catch (e) {
-    logger.error('triggerWarRoom error:', e.message?.substring(0, 100));
+    _warBriefRunning = false;
+    logger.error('war-room brief error:', e.message?.substring(0, 100));
+    _saveWarRoom({ ...(last || {}), briefing: null });
     try {
       const oc = await client.getChatById(OWNER_ID);
       await botSend(oc, `⚠️ ניסיתי להפעיל מצב חירום אבל הסקירה המצרפית נכשלה: ${e.message?.substring(0, 80)}\n\nההתראות עדיין נרשמו ב-data/crisis-recent-alerts.json. תגיד "סיים חירום" כדי לחזור למצב רגיל.`);
@@ -4572,6 +4600,36 @@ client.on('message_create', async (msg) => {
         logger.warn('🎧 hear: ' + (e.message || '').substring(0, 80));
         await botSend(_hc, '❌ לא הצלחתי לחתוך את הקטע — נסה שוב בעוד רגע.');
       }
+      return;
+    }
+
+    // ── 📋 "סקירה" — the emergency brief and draft, on request ──
+    if (/^(סקירה|סקירה מצרפית|הכן סקירה)[.!?]?$/.test(rawBody.trim())) {
+      const _hc = await client.getChatById(OWNER_ID);
+      try { await msg.react('📋'); } catch (_) {}
+      runWarRoomBrief().then(r => {
+        if (r === 'none') botSend(_hc, 'אין מצב חירום אחרון לסכם.').catch(() => {});
+      }).catch(() => {});
+      await botSend(_hc, '📋 מכין סקירה מצרפית וטיוטת תגובה… (עד דקה)');
+      return;
+    }
+
+    // ── ⚡ "טיוטה" — the response package for a radio headline, on request ──
+    if (/^(טיוטה|טיוטת תגובה|תכין טיוטה)[.!?]?$/.test(rawBody.trim())) {
+      const hl = require('./src/broadcast-headlines');
+      let h = null;
+      if (msg.hasQuotedMsg) {
+        try { const q = (await msg.getQuotedMessage())?.body || ''; h = hl.recent(40).find(x => q.includes(String(x.headline).substring(0, 30))); } catch (_) {}
+      }
+      if (!h) h = hl.recent(20).filter(x => Date.now() - x.ts < 3 * 3600000)[0];
+      const _hc = await client.getChatById(OWNER_ID);
+      if (!h) { await botSend(_hc, 'אין כותרת מהשידור מהשעות האחרונות. ענה *טיוטה* על הודעת כותרת.'); return; }
+      try { await msg.react('⚡'); } catch (_) {}
+      try {
+        const lr = require('./src/lead-radar');
+        const pkg = await lr.onHeadline(h, { force: true });
+        await botSend(_hc, pkg ? lr.formatPackage(h, pkg) : '❌ לא הצלחתי לנסח טיוטה — נסה שוב בעוד רגע.');
+      } catch (e) { await botSend(_hc, '❌ הניסוח נכשל: ' + (e.message || '').substring(0, 60)); }
       return;
     }
 
@@ -8736,7 +8794,7 @@ setInterval(async () => {
         `*${h.headline}*` +
         (who ? `\n🎙️ ${who}` : '\n🎙️ _דובר לא מזוהה — ענה *הרחב* להקשר_') +
         (h.quote ? `\n\n"${h.quote}"` : '') +
-        `\n\n_נקלט באוויר — לפני שפורסם._\n↩️ ענה *הרחב* — מי אמר מה · *שמע* — הקטע עצמו`;
+        `\n\n_נקלט באוויר — לפני שפורסם._\n↩️ ענה *הרחב* — מי אמר מה · *שמע* — הקטע עצמו · *טיוטה* — תגובה מוכנה`;
       try { await botSend(await client.getChatById(OWNER_ID), wa); } catch {}
       try {
         require('./src/jarvis-api').pushAlert({
@@ -8757,17 +8815,9 @@ setInterval(async () => {
           const lr = require('./src/lead-radar');
           // 📲 Did ynet / C14 / Kan already push it? (and later: when they do)
           try { require('./src/news-apps').onHeadline(h); } catch (_) {}
-          const pkg = await lr.onHeadline(h);
-          if (!pkg) return;
-          const text = lr.formatPackage(h, pkg);
-          await botSend(await client.getChatById(OWNER_ID), text);
-          require('./src/jarvis-api').pushAlert({
-            title: `⚡ תגובה מוכנה · ${h.headline}`,
-            summary: pkg.why,
-            body: text.replace(/\*/g, ''),
-            radio: [{ label: h.station, station: h.station, ts: h.ts || Date.now(), q: h.quote || h.headline }],
-            kind: 'ready-response', urgency: 'high',
-          });
+          // ⚡ The response package is built only when he asks — "טיוטה" in
+          // WhatsApp or ⚡ in the app ("חכה שאבקש, חבל על הטוקנים", 14.9).
+          void lr;
         } catch (e) { logger.warn('ready-response: ' + (e.message || '').substring(0, 60)); }
       })();
     }

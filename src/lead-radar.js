@@ -139,17 +139,18 @@ function _journalists(headline) {
  * נקרא על כל כותרת חדשה. אם היא נוגעת בקלנר — בונה חבילת תגובה.
  * @returns החבילה, או null כשהכותרת לא רלוונטית
  */
-async function onHeadline(h) {
+async function onHeadline(h, { force = false } = {}) {
   const claude = require('./claude');
   // Nobody to answer: "דובר ימין: … משפחתו צריכה למות" had no speaker, and a
   // draft for Kellner was built on it anyway (14.9). Only when it names his world.
   const _his = /(קלנר|ליכוד|נתניהו|ראש הממשלה|הקואליציה|בן גביר|סמוטריץ|כ"ץ|כ״ץ|רגב|לוין|זוהר|בחירות)/;
-  if (!h.speaker && !_his.test(`${h.headline} ${h.quote || ''}`)) {
+  if (!force && !h.speaker && !_his.test(`${h.headline} ${h.quote || ''}`)) {
     logger.info(`⚡ ready-response: "${String(h.headline).substring(0, 40)}" — no speaker, not his world; skipped`);
     return null;
   }
   const brief = _kellnerBrief();
-  const rel = await claude.classifyJSON(
+  // Asked for by him: no relevance gate, just the package.
+  const rel = force ? { score: 5, why: 'לבקשתך', angle: '' } : await claude.classifyJSON(
     `כותרת: ${h.headline}\n${h.speaker ? `דובר: ${h.speaker}\n` : ''}${h.quote ? `ציטוט: "${h.quote}"\n` : ''}` +
     `תמלול סביב:\n${String(h.context || '').substring(0, 1500)}\n\n` +
     `ח"כ אריאל קלנר (ליכוד) — עמדות ותפקידים:\n${brief || '(אין פירוט)'}`,
