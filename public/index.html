@@ -987,10 +987,10 @@ async function qaCopyLogs() {
   } catch (e) { showToast('❌ ' + e.message, 'error'); }
 }
 async function qaRestartWA() {
-  if (!confirm('זה יתנתק מ-WhatsApp ויטען מחדש (~30 שניות).\nאתה בטוח?')) return;
+  if (!confirm('לאתחל את החיבור ל-WhatsApp? (~30 שניות, בלי QR)')) return;
   showToast('מאתחל חיבור WhatsApp...', 'info', 8000);
   try {
-    const r = await fetch('/restart-wa');
+    const r = await fetch('/restart-wa', { method: 'POST' });
     const j = await r.json();
     showToast(j.msg || '🔄 מאתחל...', 'info', 10000);
   } catch (e) { showToast('❌ ' + e.message, 'error'); }

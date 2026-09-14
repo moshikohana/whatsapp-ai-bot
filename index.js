@@ -1808,6 +1808,30 @@ try {
   });
 } catch (e) { console.warn('jarvis bridge: ' + e.message); }
 
+// 🔒 The operator dashboard and its buttons need the key. This host is a stable
+// public name (its certificate is in the public CT logs), and a GET to
+// /restart-wa — pulled out of the dashboard's script, no password — logged
+// WhatsApp out at 12:45 on 14.9 and forced a new QR. The same open door led to
+// /debug/join-group, /test-send, /run-group-scan and the diagnostics.
+// Open: the app's API (its own key), the logs (their own key), /health, the
+// Google callback, and a guest instance's front page (her QR).
+// A valid ?key= sets a cookie, so the dashboard's own fetches keep working.
+const _OP_OPEN = /^\/(health$|auth\/google\/callback|api\/jarvis(\/|$)|logs$|api\/logs$|guest-preview$|favicon)/;
+function _opAuthed(req) {
+  const keys = [process.env.LOGS_TOKEN, process.env.JARVIS_SECRET].filter(Boolean);
+  if (!keys.length) return false;
+  const cookie = (String(req.headers.cookie || '').match(/(?:^|;\s*)opk=([^;]+)/) || [])[1];
+  const got = [req.query.key, req.get('x-logs-key'), req.get('x-jarvis-key'), cookie && decodeURIComponent(cookie)];
+  return got.some(g => g && keys.includes(String(g)));
+}
+app.use((req, res, next) => {
+  if (_OP_OPEN.test(req.path)) return next();
+  if (profile.isGuest && (req.path === '/' || req.path === '/guest.html')) return next();
+  if (!_opAuthed(req)) return res.status(404).send('Not found');
+  if (req.query.key) res.setHeader('Set-Cookie', `opk=${encodeURIComponent(req.query.key)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000`);
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 let botStatus = 'disconnected';
@@ -2649,7 +2673,8 @@ async function notifyOwnerBotDown(kind, details) {
   try {
     const { sendEmail } = require('./src/gmail');
     const hostName = os.hostname();
-    const pub = getPublicUrl();
+    // The dashboard needs the key now (14.9); the link to his own inbox carries it.
+    const pub = String(getPublicUrl() || '').replace(/\/$/, '') + (process.env.LOGS_TOKEN ? `/?key=${process.env.LOGS_TOKEN}` : '');
     const whenIL = new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
     const subject = `🚨 בוטי נותק מוואטסאפ — ${kind}`;
     const body = [
@@ -8671,14 +8696,15 @@ app.get('/run-group-scan', async (_req, res) => {
 // If the WhatsApp connection is alive but not delivering events (broken session),
 // hit /restart-wa from the browser → bot logs out, deletes session, exits cleanly.
 // Railway restarts the container and shows a fresh QR code.
-app.get('/restart-wa', async (_req, res) => {
-  logger.info('🔄 Manual WA restart triggered via /restart-wa');
-  res.json({ ok: true, msg: 'מתנתק מ-WhatsApp ומאתחל מחדש — סרוק QR חדש בעוד ~30 שניות' });
+// POST only, and a restart keeps the session: a logout here cost a QR scan
+// every time (14.9). ?logout=1 for the rare case a fresh pairing is wanted.
+app.post('/restart-wa', async (req, res) => {
+  const logout = req.query.logout === '1';
+  logger.info(`🔄 Manual WA restart via /restart-wa${logout ? ' (with logout)' : ''} — from ${req.get('x-forwarded-for') || req.ip}`);
+  res.json({ ok: true, msg: logout ? 'מתנתק מ-WhatsApp — סרוק QR חדש בעוד ~30 שניות' : 'מאתחל את החיבור — חוזר בעוד ~30 שניות, בלי QR' });
   setTimeout(async () => {
-    try {
-      await client.logout(); // logs out + deletes local session files
-    } catch (_) {}
-    process.exit(0);        // Railway restarts, starts fresh with new QR
+    if (logout) { try { await client.logout(); } catch (_) {} }
+    process.exit(0);        // pm2 restarts it
   }, 1000);
 });
 
