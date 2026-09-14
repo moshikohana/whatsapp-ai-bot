@@ -171,9 +171,13 @@ function _cacheGroupMsg(msg) {
   try {
     require('./src/news-feed').onWhatsApp({
       cid, body: msg.body, ts: (msg.timestamp || 0) * 1000,
+      // A video brings its own small preview (the JPEG WhatsApp shows before
+      // it is opened) — the picture on the news item, with nothing downloaded.
       media: msg.hasMedia && msg.type === 'image'
         ? () => safeDownloadMedia(msg).then(m => (m && m.data ? Buffer.from(m.data, 'base64') : null)).catch(() => null)
-        : null,
+        : (msg.hasMedia && msg.type === 'video' && typeof msg._data?.body === 'string' && msg._data.body.startsWith('/9j/'))
+          ? () => Promise.resolve(Buffer.from(msg._data.body, 'base64'))
+          : null,
       video: msg.hasMedia && msg.type === 'video'
         ? { m: _msgIdOf(msg), d: msg.duration || msg._data?.duration || null, s: msg._data?.size || null }
         : null,

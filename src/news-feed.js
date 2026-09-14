@@ -58,8 +58,9 @@ const _lastBySource = new Map();   // source → its previous post, for context
 // 🖼️ The picture that came with the post (13.9: "אם יש תמונה, תציג —
 // זה ישפר את החוויה לגמרי"). Downloaded only once the post is judged news.
 const MEDIA_DIR = path.join(__dirname, '..', 'data', 'news-media');
-async function _saveMedia(buf) {
-  if (!buf || buf.length < 2000) return null;
+async function _saveMedia(buf, min = 2000) {
+  // A video's preview from WhatsApp is small (a few KB) — min is lower for it.
+  if (!buf || buf.length < min) return null;
   try {
     const sharp = require('sharp');
     fs.mkdirSync(MEDIA_DIR, { recursive: true });
@@ -162,7 +163,7 @@ async function _flush() {
       if (!p || it.news !== true || !it.headline) continue;
       it.headline = require('./news-apps').fixRole(it.headline, p.text);
       let img = null;
-      if (p.media) { try { img = await _saveMedia(await Promise.race([p.media(), new Promise(r2 => setTimeout(() => r2(null), 20000))])); } catch (_) {} }
+      if (p.media) { try { img = await _saveMedia(await Promise.race([p.media(), new Promise(r2 => setTimeout(() => r2(null), 20000))]), p.video ? 400 : 2000); } catch (_) {} }
       out.push({
         source: p.source, via: p.via, title: String(it.headline).substring(0, 240), text: '',
         cat: ['ביטחון', 'פנים ישראל', 'פוליטיקה', 'חוץ', 'אחר'].includes(it.cat) ? it.cat : undefined,

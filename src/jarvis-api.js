@@ -941,6 +941,19 @@ function attach(app, deps = {}) {
     try { for (const f of fs.readdirSync(VID_DIR)) { const p = path.join(VID_DIR, f); if (Date.now() - fs.statSync(p).mtimeMs > VID_TTL) fs.unlinkSync(p); } } catch (_) {}
   };
   setInterval(_vidPurge, 3600000).unref?.();
+  const _vidFrame = (id, file) => {
+    const out = file.replace(/\.mp4$/, '-f.jpg');
+    // A quarter in, not the first second — the opening is often a title card.
+    let at = 1;
+    try { const d = parseFloat(require('child_process').execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { timeout: 10000 }).toString()); if (d > 4) at = Math.round(d * 0.25); } catch (_) {}
+    require('child_process').execFile('ffmpeg', ['-y', '-loglevel', 'error', '-ss', String(at), '-i', file, '-frames:v', '1', '-q:v', '3', out], { timeout: 30000 }, async (e) => {
+      try {
+        if (e) return;
+        const img = await require('./news-feed').saveMedia(fs.readFileSync(out));
+        if (img) require('./news-apps').setImg(id, img);
+      } catch (_) {} finally { try { fs.unlinkSync(out); } catch (_) {} }
+    });
+  };
   app.get('/api/jarvis/news/video', guard, async (req, res) => {
     try {
       _vidPurge();
@@ -957,6 +970,8 @@ function attach(app, deps = {}) {
             if (!m || !m.data) throw new Error('הסרטון כבר לא זמין בוואטסאפ');
             fs.mkdirSync(VID_DIR, { recursive: true });
             fs.writeFileSync(file, Buffer.from(m.data, 'base64'));
+            // Once watched, a sharp frame from the video replaces WhatsApp's small preview.
+            _vidFrame(id, file);
           })().finally(() => setTimeout(() => _vidBusy.delete(id), 1000)));
         }
         await _vidBusy.get(id);
