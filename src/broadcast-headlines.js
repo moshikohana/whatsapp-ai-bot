@@ -144,7 +144,8 @@ async function onChunk({ station, text, ts = Date.now() }) {
     // An invented label in front of an unknown speaker — "דובר ימין: …" (14.9) — goes.
     if (!r.speaker) {
       const lab = headline.match(/^([^:]{2,30}):\s*/);
-      if (lab && (/(דובר|גורם|פרשן|מרואיין|אדם|מישהו|מגיש|מנחה|ימין|שמאל|בכיר|מקור)/.test(lab[1]) || !norm(window).includes(norm(lab[1])))) {
+      // Only a label that was never said: "דובר צה"ל:" heard on air stays.
+      if (lab && !norm(window).includes(norm(lab[1]))) {
         logger.info(`📻 headline: dropped invented label "${lab[1]}"`);
         headline = headline.slice(lab[0].length).trim();
       }
