@@ -102,12 +102,14 @@ function _push(item) {
 }
 
 /** מוואטסאפ: נקרא על כל הודעה בקבוצה או ערוץ. */
-function onWhatsApp({ cid, body, ts, media }) {
+function onWhatsApp({ cid, body, ts, media, video }) {
   const name = _sources().wa.get(cid);
   if (!name) return;
   const text = String(body || '').trim();
   if (text.length < MIN_LEN) return;
-  _push({ via: 'wa', source: name, text: text.substring(0, 1500), ts: ts || Date.now(), link: null, media: media || null });
+  // 🎬 A video is only noted (which message, how long, how big) — it is
+  // fetched from WhatsApp when he taps it in the app, not before.
+  _push({ via: 'wa', source: name, text: text.substring(0, 1500), ts: ts || Date.now(), link: null, media: media || null, video: video || null });
 }
 
 const SYSTEM = `אתה עורך חדשות. לפניך פוסטים מערוצי חדשות וקבוצות עדכונים בוואטסאפ ובטלגרם.
@@ -165,6 +167,7 @@ async function _flush() {
         source: p.source, via: p.via, title: String(it.headline).substring(0, 240), text: '',
         cat: ['ביטחון', 'פנים ישראל', 'פוליטיקה', 'חוץ', 'אחר'].includes(it.cat) ? it.cat : undefined,
         full: p.text, ts: p.ts, link: p.link, reporter: isReporter(p.source), img,
+        ...(p.video ? { video: p.video } : {}),
       });
     }
     if (!r) logger.warn(`📡 feed: classification failed — ${batch.length} posts not judged`);

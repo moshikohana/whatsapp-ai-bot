@@ -929,6 +929,44 @@ function attach(app, deps = {}) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }
   });
+  // 🎬 A video from a WhatsApp news post — fetched from WhatsApp only when he
+  // taps it, kept 12 hours, then deleted ("אל תשמור יותר מ-12 שעות… רק כשהוא
+  // לוחץ זה יוריד", 14.9). ?prepare=1 downloads and answers when it is ready;
+  // without it the file is streamed (Range, for the player's seeking).
+  const VID_DIR = path.join(DATA, 'wa-media');
+  const VID_TTL = 12 * 3600000;
+  const VID_MAX = 100 * 1024 * 1024;
+  const _vidBusy = new Map();
+  const _vidPurge = () => {
+    try { for (const f of fs.readdirSync(VID_DIR)) { const p = path.join(VID_DIR, f); if (Date.now() - fs.statSync(p).mtimeMs > VID_TTL) fs.unlinkSync(p); } } catch (_) {}
+  };
+  setInterval(_vidPurge, 3600000).unref?.();
+  app.get('/api/jarvis/news/video', guard, async (req, res) => {
+    try {
+      _vidPurge();
+      const id = String(req.query.id || '').replace(/[^\w-]/g, '').substring(0, 60);
+      const item = require('./news-apps').item(id);
+      if (!item || !item.video || !item.video.m) return res.status(404).json({ error: 'אין סרטון בהודעה הזו' });
+      if (item.video.s && item.video.s > VID_MAX) return res.status(413).json({ error: `הסרטון גדול מדי (${Math.round(item.video.s / 1048576)}MB)` });
+      const file = path.join(VID_DIR, id + '.mp4');
+      if (!fs.existsSync(file)) {
+        if (!deps.waMedia) return res.status(503).json({ error: 'וואטסאפ לא מחובר' });
+        if (!_vidBusy.has(id)) {
+          _vidBusy.set(id, (async () => {
+            const m = await deps.waMedia(item.video.m);
+            if (!m || !m.data) throw new Error('הסרטון כבר לא זמין בוואטסאפ');
+            fs.mkdirSync(VID_DIR, { recursive: true });
+            fs.writeFileSync(file, Buffer.from(m.data, 'base64'));
+          })().finally(() => setTimeout(() => _vidBusy.delete(id), 1000)));
+        }
+        await _vidBusy.get(id);
+      }
+      if (req.query.prepare) return res.json({ ok: true, ready: true, size: fs.statSync(file).size, until: fs.statSync(file).mtimeMs + VID_TTL });
+      res.type('video/mp4');
+      res.sendFile(file);
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+
   // 📊 ניתוח מקורות: who breaks stories first, how often others follow, denials.
   app.get('/api/jarvis/news/analytics', guard, (req, res) => {
     try {

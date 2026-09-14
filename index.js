@@ -174,6 +174,9 @@ function _cacheGroupMsg(msg) {
       media: msg.hasMedia && msg.type === 'image'
         ? () => safeDownloadMedia(msg).then(m => (m && m.data ? Buffer.from(m.data, 'base64') : null)).catch(() => null)
         : null,
+      video: msg.hasMedia && msg.type === 'video'
+        ? { m: _msgIdOf(msg), d: msg.duration || msg._data?.duration || null, s: msg._data?.size || null }
+        : null,
     });
   } catch (_) {}
 
@@ -1668,6 +1671,8 @@ try {
   require('./src/jarvis-api').attach(app, {
     botName: () => botName,
     warRoomBrief: () => runWarRoomBrief(),
+    // 🎬 A WhatsApp video by message id, downloaded now ({ data, mimetype } or null).
+    waMedia: async (msgId) => { const m = await client.getMessageById(msgId); return m && m.hasMedia ? safeDownloadMedia(m) : null; },
     // 📤 A group message, forwarded to his own chat — the way to reach it in WhatsApp.
     forwardToOwner: async (msgId, note) => {
       const orig = await client.getMessageById(msgId);
