@@ -88,6 +88,43 @@ async function _tgPicture(c, m) {
   }
   return null;
 }
+// 🎬 A Telegram video: noted (the post's link, length, size) — fetched when he taps it.
+function _tgVideo(m, link) {
+  const d = m && m.media && m.media.className === 'MessageMediaDocument' && m.media.document;
+  if (!d || !link || !String(d.mimeType || '').startsWith('video/')) return null;
+  const a = (d.attributes || []).find(x => x.className === 'DocumentAttributeVideo');
+  return { m: 'tg:' + link, d: a && a.duration != null ? Math.round(+a.duration) : null, s: d.size != null ? Number(d.size) : null };
+}
+async function _tgMessage(link) {
+  const tg = require('./telegram');
+  if (!tg.isConfigured()) throw new Error('טלגרם לא מחובר');
+  const { Api } = require('telegram');
+  const c = await tg.getClient();
+  const m1 = String(link).match(/t\.me\/c\/(\d+)\/(\d+)/), m2 = String(link).match(/t\.me\/([A-Za-z0-9_]{4,})\/(\d+)/);
+  if (!m1 && !m2) throw new Error('קישור טלגרם לא מוכר');
+  const peer = m1 ? new Api.PeerChannel({ channelId: BigInt(m1[1]) }) : m2[1];
+  const msgs = await Promise.race([c.getMessages(peer, { ids: [parseInt((m1 || m2)[2], 10)] }), new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 15000))]);
+  return { c, m: msgs && msgs[0] };
+}
+/** The video of a Telegram post, to a file. */
+async function tgVideoToFile(link, file) {
+  const { c, m } = await _tgMessage(link);
+  if (!m || !m.media) throw new Error('הסרטון לא נמצא בטלגרם');
+  const buf = await c.downloadMedia(m, {});
+  if (!buf || !buf.length) throw new Error('הסרטון לא ירד מטלגרם');
+  fs.writeFileSync(file, buf);
+}
+/** Recent Telegram items: which carry a video (for posts noted before videos were). */
+async function backfillTgVideos(hours = 12) {
+  const na = require('./news-apps');
+  let n = 0;
+  for (const p of na.recentChannelItems(hours)) {
+    if (p.via !== 'tg' || p.video || p.videoChecked || !p.link) continue;
+    try { const { m } = await _tgMessage(p.link); const v = _tgVideo(m, p.link); na.setVideo(p.id, v); if (v) n++; } catch (_) { na.setVideo(p.id, null); }
+  }
+  return n;
+}
+
 function mediaPath(name, thumb) {
   const n = String(name || '');
   if (!/^\d+-[a-z0-9]+$/.test(n)) return null;
@@ -201,6 +238,7 @@ async function _hookTelegram() {
         _push({
           via: 'tg', source: name, text: m.message.substring(0, 1500), ts: (m.date || 0) * 1000 || Date.now(), link: `https://t.me/c/${chId}/${m.id}`,
           media: hasPic ? () => _tgPicture(c, m) : null,
+          video: _tgVideo(m, `https://t.me/c/${chId}/${m.id}`),
         });
       } catch (_) {}
     }, new NewMessage({}));
@@ -359,4 +397,4 @@ async function backfillMedia(hours = 24, force = false) {
   return { done, tried };
 }
 
-module.exports = { catchUp, saveMedia: _saveMedia, start, onWhatsApp, isReporter, reporters, status, telegramTwin, linkInText, mediaPath, backfillMedia };
+module.exports = { tgVideoToFile, backfillTgVideos, catchUp, saveMedia: _saveMedia, start, onWhatsApp, isReporter, reporters, status, telegramTwin, linkInText, mediaPath, backfillMedia };

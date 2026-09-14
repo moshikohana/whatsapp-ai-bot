@@ -727,6 +727,15 @@ function setLink(id, link, kind) {
 }
 
 /** פוסטים מערוצים (לא אפליקציות) מהשעות האחרונות — לתמונות שחסרות. */
+/** 🎬 A video found later (Telegram backfill); null — checked, none. */
+function setVideo(id, v) {
+  const l = _load(); const p = l.find(x => x.id === id);
+  if (!p) return;
+  if (v && v.m) p.video = { m: String(v.m).substring(0, 160), d: +v.d || null, s: +v.s || null };
+  p.videoChecked = true;
+  _save(l);
+}
+
 /** One stored item by id, as stored. */
 function item(id) { return _load().find(x => x.id === id) || null; }
 
@@ -745,4 +754,4 @@ function setImg(id, img) {
 
 module.exports = {
   fixRole,
-  item, catOf: _catOf, publishedBefore, rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
+  item, setVideo, catOf: _catOf, publishedBefore, rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

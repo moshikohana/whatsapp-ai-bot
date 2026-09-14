@@ -1676,7 +1676,47 @@ try {
     botName: () => botName,
     warRoomBrief: () => runWarRoomBrief(),
     // 🎬 A WhatsApp video by message id, downloaded now ({ data, mimetype } or null).
-    waMedia: async (msgId) => { const m = await client.getMessageById(msgId); return m && m.hasMedia ? safeDownloadMedia(m) : null; },
+    // 🎬 A WhatsApp video to a file. WhatsApp Web downloads it itself (a
+    // channel's media has no key to decrypt with, 14.9), then the bytes are
+    // read out of the page in 4MB pieces — one 57MB piece failed.
+    waMediaToFile: async (msgId, file) => {
+      const key = 'v' + Date.now();
+      const info = await client.pupPage.evaluate(async (mid, key) => {
+        const Msg = window.Store.Msg;
+        let m = Msg.get(mid);
+        if (!m) { try { const r = await Msg.getMessagesById([mid]); m = r && r.messages && r.messages[0]; } catch (_) {} }
+        if (!m) { const idid = mid.split('_')[2]; m = Msg.getModelsArray().find(x => x.id && x.id.id === idid); }
+        if (!m) return { error: 'ההודעה לא נמצאה בוואטסאפ' };
+        for (let i = 0; i < 60 && !(m.mediaData && m.mediaData.mediaStage === 'RESOLVED' && m.mediaData.mediaBlob); i++) {
+          try { await m.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 }); } catch (_) {}
+          if (m.mediaData && m.mediaData.mediaStage === 'RESOLVED' && m.mediaData.mediaBlob) break;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        const ob = m.mediaData && m.mediaData.mediaBlob;
+        if (!ob) return { error: 'וואטסאפ לא הוריד את הסרטון (' + (m.mediaData && m.mediaData.mediaStage) + ')' };
+        const blob = typeof ob.forceToBlob === 'function' ? await ob.forceToBlob() : ob;
+        window.__boti = window.__boti || {};
+        window.__boti[key] = new Uint8Array(await blob.arrayBuffer());
+        return { size: window.__boti[key].length, mimetype: m.mimetype || blob.type || 'video/mp4' };
+      }, msgId, key);
+      if (!info || info.error) throw new Error((info && info.error) || 'download failed');
+      const CH = 4 * 1024 * 1024;
+      try {
+        fs.writeFileSync(file + '.part', Buffer.alloc(0));
+        for (let off = 0; off < info.size; off += CH) {
+          const b64 = await client.pupPage.evaluate(async (key, off, len) => {
+            const part = window.__boti[key].subarray(off, off + len);
+            return window.WWebJS.arrayBufferToBase64Async(part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength));
+          }, key, off, CH);
+          fs.appendFileSync(file + '.part', Buffer.from(b64, 'base64'));
+        }
+        fs.renameSync(file + '.part', file);
+      } finally {
+        try { await client.pupPage.evaluate(k => { if (window.__boti) delete window.__boti[k]; }, key); } catch (_) {}
+        try { fs.unlinkSync(file + '.part'); } catch (_) {}
+      }
+      return info;
+    },
     // 📤 A group message, forwarded to his own chat — the way to reach it in WhatsApp.
     forwardToOwner: async (msgId, note) => {
       const orig = await client.getMessageById(msgId);

@@ -963,14 +963,16 @@ function attach(app, deps = {}) {
       if (item.video.s && item.video.s > VID_MAX) return res.status(413).json({ error: `הסרטון גדול מדי (${Math.round(item.video.s / 1048576)}MB)` });
       const file = path.join(VID_DIR, id + '.mp4');
       if (!fs.existsSync(file)) {
-        if (!deps.waMedia) return res.status(503).json({ error: 'וואטסאפ לא מחובר' });
+        const isTg = String(item.video.m).startsWith('tg:');
+        if (!isTg && !deps.waMediaToFile) return res.status(503).json({ error: 'וואטסאפ לא מחובר' });
         if (!_vidBusy.has(id)) {
           _vidBusy.set(id, (async () => {
-            const m = await deps.waMedia(item.video.m);
-            if (!m || !m.data) throw new Error('הסרטון כבר לא זמין בוואטסאפ');
             fs.mkdirSync(VID_DIR, { recursive: true });
-            fs.writeFileSync(file, Buffer.from(m.data, 'base64'));
-            // Once watched, a sharp frame from the video replaces WhatsApp's small preview.
+            // Telegram through its own client; WhatsApp through the page.
+            if (isTg) await require('./news-feed').tgVideoToFile(item.video.m.slice(3), file);
+            else await deps.waMediaToFile(item.video.m, file);
+            if (!fs.existsSync(file) || fs.statSync(file).size < 1000) throw new Error('הסרטון לא ירד');
+            // Once watched, a sharp frame from the video replaces the small preview.
             _vidFrame(id, file);
           })().finally(() => setTimeout(() => _vidBusy.delete(id), 1000)));
         }
