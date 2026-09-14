@@ -44,6 +44,9 @@ function onGroupText({ text, group, ts }) {
   try {
     const body = String(text || '');
     if (body.length < 25) return;
+    // A roundup ("כותרות החג והשבת: 1. … 2. …") names every story of the day;
+    // it matched "שני מחבלים חוסלו" four hours later as the story arriving (13.9).
+    if ((body.match(/^\s*\d{1,2}[.)]\s/gm) || []).length >= 2 || /^(כותרות|סיכום|סיכומי|מבזק מרוכז)/.test(body.trim())) return;
     const now = ts || Date.now();
     const open = _load().filter(h => !h.groupsSeen && now - h.ts < WATCH_HOURS * 3600000 && now >= h.ts - 30 * 60000);
     if (!open.length) return;
@@ -77,7 +80,8 @@ async function _drain() {
     const r = await require('./claude').classifyJSON(
       `כותרת שנקלטה ברדיו:\n"${c.headline}"${c.quote ? `\nציטוט: "${c.quote}"` : ''}\n\nהודעה שפורסמה בקבוצת וואטסאפ:\n"${c.text}"`,
       {
-        system: 'אתה עורך חדשות. החלט אם ההודעה מדווחת על אותו סיפור בדיוק כמו הכותרת — אותו אירוע או אותה אמירה, לא רק אותו נושא כללי. החזר JSON בלבד: {"same": true|false}',
+        system: 'אתה עורך חדשות. החלט אם ההודעה מדווחת על אותו סיפור בדיוק כמו הכותרת — אותו אירוע או אותה אמירה, לא רק אותו נושא כללי. ' +
+          'הודעת סיכום של כמה ידיעות, או אירוע דומה ממקום או מיום אחר — false. החזר JSON בלבד: {"same": true|false}',
         maxTokens: 30, model: 'claude-haiku-4-5-20251001',
       }
     );
@@ -246,19 +250,39 @@ function formatPackage(h, p) {
     lines.push('', '📞 *עשויים לפנות* (לפי נושאים שפנו עליהם בעבר):');
     for (const j of p.journalists) lines.push(`• ${j.name} · ${j.outlet}`);
   }
-  // Only when it is true — by the time a package is read the story may be out.
+  // Only when it is true — by the time a package is read the story may be out,
+  // and it may have been out long before the radio.
   const cur = _load().find(x => x.id === h.id) || h;
-  lines.push('', cur.groupsSeen
-    ? `_הסיפור כבר הגיע לקבוצות (${cur.groupsSeen.group}) — ${cur.leadMin} דק' אחרי הרדיו._`
-    : '_הסיפור עוד לא הופיע בקבוצות — אתה לפני כולם._');
+  const early = earlierThanRadio(cur);
+  lines.push('', early
+    ? `_הסיפור פורסם כבר לפני הרדיו — ${early.source}, ${early.min} דק' קודם._`
+    : cur.groupsSeen
+      ? `_הסיפור כבר הגיע לקבוצות (${cur.groupsSeen.group}) — ${cur.leadMin} דק' אחרי הרדיו._`
+      : '_הסיפור עוד לא נראה בקבוצות ובאפליקציות._');
   return lines.join('\n');
+}
+
+/**
+ * Was the story out before the radio? The group watcher only looks forward
+ * from the headline, so "בקשת הליכוד לפסול את המשותפת" (14.9, 11:02) read
+ * "עוד לא הגיע לקבוצות — אתה לפני כולם" while three groups had it 2-4 hours
+ * earlier (found by the apps matcher, appsSeen).
+ * @returns {{ source: string, min: number } | null} the earliest, in minutes before
+ */
+function earlierThanRadio(h) {
+  let best = null;
+  for (const [source, a] of Object.entries((h && h.appsSeen) || {})) {
+    if (a && typeof a.leadMin === 'number' && a.leadMin <= -5 && (!best || a.leadMin < -best.min)) best = { source, min: -a.leadMin };
+  }
+  return best;
 }
 
 // ── סיכום ─────────────────────────────────────────────────────────
 function stats(days = 7) {
   const since = Date.now() - days * 86400000;
   const list = _load().filter(h => h.ts >= since);
-  const seen = list.filter(h => h.groupsSeen && typeof h.leadMin === 'number');
+  // A story already out before the radio is no lead, whatever came after.
+  const seen = list.filter(h => h.groupsSeen && typeof h.leadMin === 'number' && !earlierThanRadio(h));
   const ahead = seen.filter(h => h.leadMin > 0);
   const avg = ahead.length ? Math.round(ahead.reduce((s, h) => s + h.leadMin, 0) / ahead.length) : null;
   const best = ahead.slice().sort((a, b) => b.leadMin - a.leadMin)[0] || null;
@@ -294,4 +318,4 @@ function idle() {
   });
 }
 
-module.exports = { onGroupText, onHeadline, formatPackage, stats, formatWeekly, idle };
+module.exports = { onGroupText, onHeadline, formatPackage, stats, formatWeekly, idle, earlierThanRadio };

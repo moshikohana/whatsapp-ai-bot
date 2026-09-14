@@ -842,7 +842,8 @@ function attach(app, deps = {}) {
     try {
       const ts = parseInt(req.query.ts, 10);
       if (!ts) return res.status(400).json({ error: 'צריך זמן' });
-      const clip = await require('./broadcast-digest').cutClip(String(req.query.station || ''), ts, String(req.query.q || ''));
+      // also = the headline: the cut runs from the story's sentence through the quote.
+      const clip = await require('./broadcast-digest').cutClip(String(req.query.station || ''), ts, String(req.query.q || ''), 45, String(req.query.also || '').substring(0, 200));
       if (!clip) return res.status(404).json({ error: 'קטע השמע כבר לא שמור' });
       res.type('audio/mpeg');
       res.sendFile(clip.file, () => { try { fs.unlinkSync(clip.file); } catch (_) {} });
@@ -1071,7 +1072,11 @@ function attach(app, deps = {}) {
           return bd.recentChunks(40).filter(c => !hl.isAd(c.text)).slice(0, 20);
         })(),
         // The headlines, which are what the monitor is actually for.
-        headlines: require('./broadcast-headlines').recent(20),
+        // Out before the radio: shown as such ("הקבוצות היו לפני הרדיו"), not as a lead.
+        headlines: require('./broadcast-headlines').recent(20).map(h => {
+          const early = require('./lead-radar').earlierThanRadio(h);
+          return early ? { ...h, leadMin: -early.min, groupsSeen: { ...(h.groupsSeen || {}), group: early.source } } : h;
+        }),
         // 🎙️ How much transcription is left today, and who is resting (music).
         asr: { models: bm.asrStatus(), quiet: bm.quietStations() },
         // 📡 Per station: news / talk / music / ads at its last sample.

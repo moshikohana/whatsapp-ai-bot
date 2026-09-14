@@ -4559,6 +4559,11 @@ client.on('message_create', async (msg) => {
     // then its bold line), else the one sent last — and when two went out
     // within minutes, he is asked which ("הרחב 2"). It used to take the newest
     // *stored* headline, one that reached him only two minutes later (14.9).
+    // A bare "1" right after the question is the answer to it — it went to
+    // the chat model, which asked back "הרחב, שמע או טיוטה?" (14.9).
+    if (/^[1-4][.!?]?$/.test(rawBody.trim()) && _hlAsk && Date.now() - _hlAsk.ts < 10 * 60000) {
+      rawBody = `${_hlAsk.verb} ${rawBody.trim().replace(/[.!?]$/, '')}`;
+    }
     const _pickHeadline = async (verb) => {
       const hl = require('./src/broadcast-headlines');
       const num = rawBody.trim().match(/\s([1-4])[.!?]?$/);
@@ -4572,11 +4577,11 @@ client.on('message_create', async (msg) => {
       if (r.h) return r.h;
       const _hc = await client.getChatById(OWNER_ID);
       if (r.ask) {
-        _hlAsk = { ts: Date.now(), ids: r.ask.map(x => x.id) };
+        _hlAsk = { ts: Date.now(), ids: r.ask.map(x => x.id), verb };
         const t = ts => new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
         await botSend(_hc, `איזו כותרת? נשלחו ${r.ask.length} בדקות האחרונות:\n\n` +
           r.ask.map((x, i) => `*${i + 1}.* ${x.station} · ${t(x.ts)} — ${x.headline}`).join('\n') +
-          `\n\nענה *${verb} 1* / *${verb} 2* — או הגב על הודעת הכותרת עצמה.`);
+          `\n\nענה במספר (${r.ask.map((_, i) => i + 1).join(' / ')}) — או הגב *${verb}* על הודעת הכותרת עצמה.`);
       } else if (r.none === 'quoted') {
         await botSend(_hc, `לא זיהיתי כותרת מהשידור בהודעה שהגבת עליה. ענה *${verb}* על הודעת "🗞️ כותרת מהשידור".`);
       } else {
@@ -4605,7 +4610,7 @@ client.on('message_create', async (msg) => {
         if (msg.hasQuotedMsg) { try { qMsg = await msg.getQuotedMessage(); quoted = qMsg?.body || ''; } catch (_) {} }
         const h = quoted ? hl.forReply({ quotedId: _msgIdOf(qMsg), quotedBody: quoted }).h : await _pickHeadline('שמע');
         if (!quoted && !h) return;   // he was asked which, or told there is none
-        if (h) target = { station: h.station, ts: h.ts, q: h.quote || h.headline };
+        if (h) target = { station: h.station, ts: h.ts, q: h.quote || h.headline, also: h.quote ? h.headline : '', headline: h.headline };
         else if (quoted) {
           // Any alert: the words in quotes, or its bold line, found on air.
           const q = (quoted.match(/["“]([^"”]{12,300})["”]/) || quoted.match(/\*([^*]{8,200})\*/) || [])[1] || quoted.substring(0, 200);
@@ -4620,14 +4625,18 @@ client.on('message_create', async (msg) => {
       }
       try { await msg.react('🎧'); } catch (_) {}
       try {
-        const clip = await bd.cutClip(target.station, target.ts, target.q);
+        const clip = await bd.cutClip(target.station, target.ts, target.q, 45, target.also || '');
         if (!clip) { await botSend(_hc, '🎧 קטע השמע כבר לא שמור — שמע נשמר 4 שעות, וקטעים חשובים 30 יום.'); return; }
         const { MessageMedia } = require('whatsapp-web.js');
         const hhmm = new Date(clip.ts).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: 'numeric', month: 'numeric' }) + ' · ' + new Date(clip.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
         const name = `${clip.station} ${hhmm.replace(' · ', ' ').replace(':', '-').replace(/\//g, '.')}.mp3`;
         await _hc.sendMessage(new MessageMedia('audio/mpeg', fs.readFileSync(clip.file).toString('base64'), name), {
           sendMediaAsDocument: true,
-          caption: `🎧 ${clip.station} · ${hhmm} · ${Math.round(clip.len)} שנ׳` + (clip.sentence ? `\n"${clip.sentence.substring(0, 300)}"` : '') + BOT_MARKER,
+          // Which headline, then what is heard in it — the story and the quote.
+          caption: `🎧 ${clip.station} · ${hhmm} · ${Math.round(clip.len)} שנ׳` +
+            (target.headline ? `\n*${target.headline}*` : '') +
+            (clip.lead ? `\n\n${clip.lead.substring(0, 300)}` : '') +
+            (clip.sentence ? `\n"${clip.sentence.substring(0, 300)}"` : '') + BOT_MARKER,
         });
         try { fs.unlinkSync(clip.file); } catch (_) {}
       } catch (e) {
@@ -8813,7 +8822,8 @@ setInterval(async () => {
         `*${h.headline}*` +
         (who ? `\n🎙️ ${who}` : '\n🎙️ _דובר לא מזוהה — ענה *הרחב* להקשר_') +
         (h.quote ? `\n\n"${h.quote}"` : '') +
-        `\n\n_נקלט באוויר — לפני שפורסם._\n↩️ ענה *הרחב* — מי אמר מה · *שמע* — הקטע עצמו · *טיוטה* — תגובה מוכנה`;
+        // Not "לפני שפורסם": the Likud request (14.9) was in three groups hours earlier.
+        `\n\n↩️ ענה *הרחב* — מי אמר מה · *שמע* — הקטע עצמו · *טיוטה* — תגובה מוכנה`;
       // Marked as sent, with the message id — "הרחב" on this message finds it.
       try {
         const sent = await botSend(await client.getChatById(OWNER_ID), wa);

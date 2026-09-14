@@ -108,7 +108,7 @@ function audioPath(name) {
 function clipAround(station, ts, q = '') {
   // The model writes the station its own way (גלי צה״ל / גלי צה"ל); compared
   // without quotes and spaces, and all stations when none matches.
-  const stn = s => String(s || '').replace(/["'״׳s]/g, '').toLowerCase();
+  const stn = s => String(s || '').replace(/["'״׳\s]/g, '').toLowerCase();
   const all = chunksBetween(ts - 25 * 60000, ts + 12 * 60000).sort((a, b) => a.ts - b.ts);
   let list = station ? all.filter(c => stn(c.station) === stn(station)) : all;
   if (!list.length) list = all;
@@ -171,21 +171,32 @@ function _duration(file) {
  * ✂️ קטע קצר סביב המשפט — לשליחה בוואטסאפ. מהדורה היא 4 דקות; מי שרוצה את
  * הכותרת לא צריך את כולה. דגימה קצרה (דקה) נשלחת כמו שהיא.
  */
-async function cutClip(station, ts, q, seconds = 45) {
+async function cutClip(station, ts, q, seconds = 45, also = '') {
   const c = clipAround(station, ts, q);
   const ch = c && c.chunk;
   if (!ch || !ch.audioName) return null;
   const src = audioPath(ch.audioName);
   const b = bestSentenceAt(ch.text, q);
   const dur = await _duration(src) || 60;
-  let start = b ? Math.max(0, b.frac * dur - 4) : 0;
-  if (dur <= seconds + 10) start = 0;
-  const len = Math.min(dur <= seconds + 10 ? dur : seconds, dur - start);
+  // The whole item, not only the quote: the headline's own sentence ("הליכוד
+  // ביקש לפסול…") came before the quote (the Joint List's answer), and the
+  // clip began at the answer — 13 seconds without the story (14.9).
+  const L = Math.max(1, ch.text.length);
+  const spans = [b, also ? bestSentenceAt(ch.text, also) : null].filter(Boolean);
+  let start = 0, end = Math.min(dur, seconds);
+  if (spans.length) {
+    start = Math.max(0, Math.min(...spans.map(s => s.frac)) * dur - 4);
+    end = Math.min(dur, Math.max(...spans.map(s => s.frac + s.sentence.length / L)) * dur + 5);
+    if (end - start < 20) { start = Math.max(0, end - 20); end = Math.min(dur, start + 20); }
+    if (end - start > 120) start = end - 120;
+  }
+  const len = Math.max(1, end - start);
   const out = path.join(require('os').tmpdir(), `boti-clip-${Date.now()}.mp3`);
   await new Promise((res, rej) => require('child_process').execFile('ffmpeg',
     ['-y', '-loglevel', 'error', '-ss', start.toFixed(1), '-t', len.toFixed(1), '-i', src, '-c', 'copy', out],
     { timeout: 30000 }, e => (e ? rej(e) : res())));
-  return { file: out, station: ch.station, ts: ch.ts, start, len, sentence: b ? b.sentence : '', audioName: ch.audioName };
+  const lead = spans.length > 1 && spans[1].frac < spans[0].frac ? spans[1].sentence : '';
+  return { file: out, station: ch.station, ts: ch.ts, start, len, sentence: b ? b.sentence : '', lead, audioName: ch.audioName };
 }
 
 function recordChunk({ station, text, ts = Date.now(), audio = null }) {
