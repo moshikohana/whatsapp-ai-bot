@@ -1068,6 +1068,11 @@ function attach(app, deps = {}) {
         headlines: require('./broadcast-headlines').recent(20),
         // 🎙️ How much transcription is left today, and who is resting (music).
         asr: { models: bm.asrStatus(), quiet: bm.quietStations() },
+        // 📡 Per station: news / talk / music / ads at its last sample.
+        onAir: bm.STATIONS.filter(s => (c.stations || []).includes(s.id)).map(s => {
+          const k = require('./broadcast-headlines').lastKind(s.name);
+          return { station: s.name, kind: k ? k.kind : null, ts: k ? k.ts : null };
+        }),
       });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
