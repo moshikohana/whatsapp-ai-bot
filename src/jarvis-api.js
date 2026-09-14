@@ -1112,7 +1112,8 @@ function attach(app, deps = {}) {
       const hl = require('./broadcast-headlines');
       const station = req.query.station ? String(req.query.station) : null;
       const minutes = Math.min(Math.max(parseInt(req.query.minutes, 10) || 12, 4), 40);
-      const chunks = hl.contextAround(ts, station, minutes);
+      // Adverts are not shown (14.9) — only what was said.
+      const chunks = hl.contextAround(ts, station, minutes).filter(c => !c.ad);
       res.json({ ok: true, chunks });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });

@@ -213,27 +213,42 @@ async function checkOnce() {
     if (!file) { logger.warn?.(`broadcast: capture failed for ${st.name}`); continue; }
     const text = await transcribe(file);
     const _ts = Date.now();
-    let _audio = null;
-    if (text) { try { _audio = require('./broadcast-digest').keepAudio(file, st.id, _ts); } catch (_) {} }
-    try { fs.unlinkSync(file); } catch {}
-    if (!text) continue;
+    if (!text) { try { fs.unlinkSync(file); } catch {} continue; }
+    const hlm = require('./broadcast-headlines');
+    // 📢 An advert is not kept — neither its text nor its audio ("לא צריך
+    // פרסומות, חבל על הזיכרון", 14.9). Its kind is still noted for the app.
+    if (hlm.isAd(text)) {
+      try { fs.unlinkSync(file); } catch {}
+      try { await hlm.onChunk({ station: st.name, text, ts: _ts }); } catch (_) {}
+      continue;
+    }
 
     recent.push({ station: st.name, ts: _ts, text });
     if (recent.length > 60) recent = recent.slice(-60);
+
+    // Checked for a headline right away, not at the next hourly digest. The
+    // Ohana interview was in the transcript at 08:15 and only reached him as
+    // half a sentence in the 09:00 summary — after WhatsApp had it. The same
+    // check says what the sample is; a song or an advert is not stored.
+    let _kindNow = null;
+    try {
+      const h = await hlm.onChunk({ station: st.name, text, ts: _ts });
+      if (h) headlines.push(h);
+      const k0 = hlm.lastKind(st.name);
+      if (k0 && k0.ts === _ts) _kindNow = k0.kind;
+    } catch (_) {}
+    const _keep = _kindNow !== 'music' && _kindNow !== 'ads';
+    let _audio = null;
+    if (_keep) { try { _audio = require('./broadcast-digest').keepAudio(file, st.id, _ts); } catch (_) {} }
+    try { fs.unlinkSync(file); } catch {}
 
     // Kept on disk as well as in memory. `recent` is 60 chunks that vanish on
     // every restart, so until now the only transcript that survived was the
     // sentence around a keyword — the rest was transcribed, paid for, and
     // dropped. The hourly digest reads from the file, not from this array.
-    try { require('./broadcast-digest').recordChunk({ station: st.name, text, ts: _ts, audio: _audio }); } catch (_) {}
+    if (_keep) { try { require('./broadcast-digest').recordChunk({ station: st.name, text, ts: _ts, audio: _audio }); } catch (_) {} }
 
-    // Checked for a headline right away, not at the next hourly digest. The
-    // Ohana interview was in the transcript at 08:15 and only reached him as
-    // half a sentence in the 09:00 summary — after WhatsApp had it.
     try {
-      const hlm = require('./broadcast-headlines');
-      const h = await hlm.onChunk({ station: st.name, text, ts: _ts });
-      if (h) headlines.push(h);
       const k = hlm.lastKind(st.name);
       if (k && k.ts === _ts) {
         const q = _quiet[st.id] || (_quiet[st.id] = { n: 0, until: 0 });
