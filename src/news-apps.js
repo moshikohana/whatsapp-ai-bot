@@ -738,4 +738,4 @@ function setImg(id, img) {
 
 module.exports = {
   fixRole,
-  publishedBefore, rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
+  catOf: _catOf, publishedBefore, rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

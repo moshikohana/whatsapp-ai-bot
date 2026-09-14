@@ -73,7 +73,9 @@ function analyze(days = 7) {
     const first = entries[0];
     st.entries = entries;
     st.first = first;
+    // Items from the phone's apps carry no category; the same rules as the home screen then.
     st.cat = Object.entries(st.cats).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    if (!st.cat) { try { st.cat = require('./news-apps').catOf([], st.texts.map(t => t.text).join(' ')); } catch (_) {} }
     st.denied = st.texts.some(t => t.ts > first.ts && DENIAL.test(t.text));
     st.title = String(first.text || '').substring(0, 120);
     list.push(st);
