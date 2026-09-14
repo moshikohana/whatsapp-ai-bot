@@ -1831,6 +1831,10 @@ function _opAuthed(req) {
 }
 app.use((req, res, next) => {
   if (_OP_OPEN.test(req.path)) return next();
+  // 📲 The app download: an unguessable folder instead of ?key= — the phone's
+  // download manager fetched the file again without the query and stalled at
+  // 99% (14.9).
+  if (process.env.DL_TOKEN && req.path.startsWith(`/dl/${process.env.DL_TOKEN}/`)) return next();
   if (profile.isGuest && (req.path === '/' || req.path === '/guest.html')) return next();
   if (!_opAuthed(req)) return res.status(404).send('Not found');
   if (req.query.key) res.setHeader('Set-Cookie', `opk=${encodeURIComponent(req.query.key)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000`);
