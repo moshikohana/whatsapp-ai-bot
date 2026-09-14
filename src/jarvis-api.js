@@ -649,14 +649,20 @@ function attach(app, deps = {}) {
     res.json({ ok: true, started: true });
   });
   // ⚡ A response package for one on-air headline, when he asks for it.
+  const _pkgRunning = new Set();
   app.post('/api/jarvis/broadcast/headline/package', guard, async (req, res) => {
     try {
       const id = String((req.body || {}).id || '');
       const h = require('./broadcast-headlines').recent(80).find(x => x.id === id);
       if (!h) return res.status(404).json({ error: 'הכותרת לא נמצאה' });
-      const pkg = await require('./lead-radar').onHeadline(h, { force: true });
-      if (!pkg) return res.status(500).json({ error: 'לא הצלחתי לנסח' });
-      res.json({ ok: true, package: pkg });
+      // Written in the background — a draft and its proof-read take about a
+      // minute, longer than the app waits (it timed out, 14.9). The app polls.
+      if (h.package) return res.json({ ok: true, ready: true });
+      if (!_pkgRunning.has(id)) {
+        _pkgRunning.add(id);
+        require('./lead-radar').onHeadline(h, { force: true }).catch(() => {}).finally(() => _pkgRunning.delete(id));
+      }
+      res.json({ ok: true, started: true });
     } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
   });
   app.get('/api/jarvis/warroom', guard, (req, res) => {

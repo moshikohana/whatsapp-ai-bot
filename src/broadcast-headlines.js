@@ -175,6 +175,14 @@ async function onChunk({ station, text, ts = Date.now() }) {
     // treated as one story.
     const words = s => new Set(norm(s).split(' ').filter(w => w.length >= 3 && !STOP.has(w)));
     const mine = words(headline);
+    // "באוקטובר" and "ובאוקטובר" are one word: a leading ו/ב/ה/ל/מ/ש/כ is a prefix.
+    const same = (a, b) => a === b || (/^[והבלמשכ]/.test(a) && a.slice(1) === b) || (/^[והבלמשכ]/.test(b) && b.slice(1) === a);
+    // Six words in a row shared by two quotes — the same sentence heard twice.
+    const run = (a, b) => {
+      const A = norm(a).split(' '), B = ' ' + norm(b) + ' ';
+      for (let i = 0; i + 6 <= A.length; i++) if (B.includes(' ' + A.slice(i, i + 6).join(' ') + ' ')) return true;
+      return false;
+    };
     const dup = list.find(h => {
       if (ts - h.ts > DEDUPE_MS) return false;
       if (h.key === key) return true;
@@ -182,12 +190,14 @@ async function onChunk({ station, text, ts = Date.now() }) {
       // The same quote is the same story, however differently it was
       // headlined: 09:23 "נתניהו התעלם מהתראות" and 09:31 "נתניהו תעד התראות
       // וזלזל בהן" carried one identical quote and shared only one word.
+      // And 10:26 / 10:30 (14.9) — one interview, the second window still
+      // holding the first sample: "הייתה כאן הפקרה מודעת של חיי אדם" in both.
       if (quote && h.quote) {
         const a = norm(quote), b = norm(h.quote);
-        if (a === b || a.includes(b) || b.includes(a)) return true;
+        if (a === b || a.includes(b) || b.includes(a) || run(a, b)) return true;
       }
       let shared = 0;
-      for (const w of words(h.headline)) if (mine.has(w)) shared++;
+      for (const w of words(h.headline)) if ([...mine].some(m => same(m, w))) shared++;
       return shared >= 3 || (shared >= 2 && mine.size <= 4);
     });
     if (dup) {
@@ -243,6 +253,48 @@ function recent(n = 30) {
 }
 
 /**
+ * The headline went out to him — when, and as which WhatsApp message. "הרחב"
+ * picked the newest *stored* headline, and one stored at 10:30 reached him
+ * only at 10:32, after he had asked about another (14.9).
+ */
+function markSent(id, waId) {
+  const list = _load();
+  const h = list.find(x => x.id === id);
+  if (!h) return;
+  h.sentAt = Date.now();
+  if (waId) h.waIds = [...(h.waIds || []), waId].slice(-3);
+  _save(list);
+}
+
+/**
+ * Which headline a reply ("הרחב", "שמע", "טיוטה") is about.
+ *   quoted — the WhatsApp message he replied to: by its id, then by its bold
+ *            headline line; no match is an answer too — never "the newest".
+ *   none   — the one sent last, unless two went out within minutes of each
+ *            other: then he is asked which.
+ * @returns {{ h } | { ask: object[] } | { none: string }}
+ */
+function forReply({ quotedId = null, quotedBody = null } = {}) {
+  const list = _load().slice(0, 60);
+  if (quotedId || quotedBody) {
+    // By the message key alone — the chat part may come as @lid or @c.us.
+    const k = id => String(id || '').split('_')[2] || String(id || '');
+    let h = quotedId ? list.find(x => (x.waIds || []).some(w => k(w) === k(quotedId))) : null;
+    if (!h && quotedBody) {
+      const bold = (String(quotedBody).match(/\n\*([^*\n]{4,160})\*/) || [])[1];
+      if (bold) h = list.find(x => String(x.headline).trim() === bold.trim());
+      if (!h) h = list.find(x => String(quotedBody).includes(String(x.headline).substring(0, 40)));
+    }
+    return h ? { h } : { none: 'quoted' };
+  }
+  const sent = list.filter(x => x.sentAt && Date.now() - x.sentAt < 3 * 3600000)
+    .sort((a, b) => b.sentAt - a.sentAt);
+  if (!sent.length) return { none: 'recent' };
+  const close = sent.filter(x => sent[0].sentAt - x.sentAt < 6 * 60000).slice(0, 4);
+  return close.length > 1 ? { ask: close } : { h: sent[0] };
+}
+
+/**
  * התמלול סביב רגע מסוים — לכפתור "פתח הקשר".
  * מחזיר את הדגימות של אותה תחנה בחלון של כמה דקות לפני ואחרי.
  */
@@ -288,15 +340,18 @@ const EXPAND_SYSTEM = `אתה עורך חדשות. קיבלת כותרת שנק�
 התמלול הוא דגימות של 55 שניות כל 4 דקות — יש חורים, ומשפטים נחתכים.
 
 החזר JSON בלבד:
-{"story":"2-4 משפטים: מה קרה או מה נטען, בעברית עיתונאית",
- "who":[{"name":"שם כפי שנאמר בתמלול","role":"תפקיד אם נאמר, אחרת null","said":"מה אמר — פרפרזה קצרה"}],
+{"story":"2-4 משפטים בעברית עיתונאית: מה נאמר ומי אמר — 'המרואיינת, מירב, אמרה ש…', לא 'לטענת המדברים'",
+ "speakers":[{"name":"שם כפי שנאמר, או 'המנחה' / 'המרואיין' / 'המרואיינת' כשאין שם","role":"תפקיד אם נאמר, אחרת null","said":"מה אמר/ה בשידור — פרפרזה קצרה"}],
+ "mentioned":[{"name":"שם כפי שנאמר","about":"מה נאמר עליו או ציטוט שיוחס לו — כטענה של הדובר"}],
  "quotes":["ציטוט מדויק, מילה במילה מהתמלול, 8-30 מילים"],
- "background":"הקשר שעולה מהתמלול, או null",
- "unclear":"מה לא ברור בגלל החורים בדגימה, או null"}
+ "background":"הקשר קצר שעולה מהתמלול, או null",
+ "unclear":"משפט אחד: מה לא ברור בגלל החורים בדגימה, או null"}
 
-⛔ שם אדם רק אם הוא מופיע בתמלול. אסור להשלים ממה שאתה יודע מבחוץ.
+speakers = רק מי שמדבר בשידור עצמו. מי שמדברים עליו או מצטטים אותו — ב-mentioned, לא ב-speakers.
+⛔ שם אדם רק אם הוא מופיע בתמלול. אסור להשלים ממה שאתה יודע מבחוץ. כתוב את השם כפי שנשמע — לא "גורם בשם X".
 ⛔ ציטוט רק אם הוא מופיע בתמלול כלשונו. עדיף פחות ציטוטים מציטוט לא מדויק.
-⛔ מראיין ששואל שאלה אינו "אמר" את תוכן השאלה.`;
+⛔ מראיין ששואל שאלה אינו "אמר" את תוכן השאלה.
+⛔ התמלול אוטומטי ויש בו שיבושי שמיעה ("השיבה באוקטובר" = "השבעה באוקטובר") — ב-story וב-said כתוב עברית תקינה; ב-quotes השאר כלשונו.`;
 
 /**
  * "הרחב" — מי אמר מה, סביב כותרת.
@@ -312,7 +367,8 @@ async function expand(id) {
   if (!h) { const e = new Error('headline not found'); e.code = 'NOT_FOUND'; throw e; }
   // The interview may have gone on after the headline was sent; a cached
   // answer from the first minutes is refreshed once more has been recorded.
-  if (h.expansion && h.expansion.ts - h.ts > 20 * 60 * 1000) return h.expansion;
+  // (Answers from before speakers and the mentioned were apart are redone.)
+  if (h.expansion && h.expansion.speakers && h.expansion.ts - h.ts > 20 * 60 * 1000) return h.expansion;
 
   const chunks = contextAround(h.ts, h.station, 15).filter(c => !c.ad);
   const text = chunks.map(c => c.text).join('\n');
@@ -328,21 +384,31 @@ async function expand(id) {
   const norm = s => String(s || '').replace(/["'״׳.,!?:;\-–—]/g, ' ').replace(/\s+/g, ' ').trim();
   const hay = norm(text);
   const surname = n => norm(n).split(' ').filter(w => w.length >= 2).pop() || '';
+  // "המנחה", "המרואיינת" — a description, not a name; nothing to check.
+  const _desc = /^(ה?מנח(ה|ת)|ה?מרואיי?נ(ת)?|ה?מאזינ(ה)?|ה?כתב(ת)?|ה?פרשנ(ית)?)$/;
+  const named = n => n && (_desc.test(norm(n)) || (surname(n) && hay.includes(surname(n))));
+  // Older answers had a single "who" list; it is read as speakers.
+  const speakers = (Array.isArray(r.speakers) ? r.speakers : Array.isArray(r.who) ? r.who : [])
+    .filter(w => w && named(w.name)).slice(0, 5)
+    .map(w => ({ name: String(w.name).substring(0, 40), role: w.role ? String(w.role).substring(0, 60) : null, said: String(w.said || '').substring(0, 240) }));
+  const mentioned = (Array.isArray(r.mentioned) ? r.mentioned : [])
+    .filter(w => w && w.name && !_desc.test(norm(w.name)) && named(w.name)).slice(0, 4)
+    .map(w => ({ name: String(w.name).substring(0, 40), about: String(w.about || '').substring(0, 240) }));
   const x = {
     ts: Date.now(),
     story: String(r.story).substring(0, 700),
-    who: (Array.isArray(r.who) ? r.who : [])
-      .filter(w => w && w.name && surname(w.name) && hay.includes(surname(w.name)))
-      .slice(0, 6)
-      .map(w => ({ name: String(w.name).substring(0, 40), role: w.role ? String(w.role).substring(0, 60) : null, said: String(w.said || '').substring(0, 240) })),
+    speakers, mentioned,
+    // The app reads one list: speakers, then those mentioned, marked as such.
+    who: [...speakers, ...mentioned.map(m => ({ name: m.name, role: 'מוזכר בשידור', said: m.about }))],
     quotes: (Array.isArray(r.quotes) ? r.quotes : [])
       .filter(q => q && norm(q).length >= 12 && hay.includes(norm(q)))
-      .slice(0, 4),
-    background: r.background ? String(r.background).substring(0, 400) : null,
-    unclear: r.unclear ? String(r.unclear).substring(0, 300) : null,
+      .slice(0, 3),
+    background: r.background ? String(r.background).substring(0, 300) : null,
+    unclear: r.unclear ? String(r.unclear).substring(0, 200) : null,
     span: chunks.length ? { from: chunks[0].ts, to: chunks[chunks.length - 1].ts, samples: chunks.length } : null,
   };
-  const dropped = (r.who || []).length - x.who.length + (r.quotes || []).length - x.quotes.length;
+  const asked = (r.speakers || r.who || []).length + (r.mentioned || []).length + (r.quotes || []).length;
+  const dropped = asked - speakers.length - mentioned.length - x.quotes.length;
   if (dropped > 0) logger.info(`📻 expand: dropped ${dropped} unverified name/quote(s)`);
 
   h.expansion = x;
@@ -350,22 +416,42 @@ async function expand(id) {
   return x;
 }
 
-/** הפירוט כהודעת וואטסאפ. */
+/**
+ * הפירוט כהודעת וואטסאפ.
+ *
+ * It opens with *which* headline it expands — station, date and time — so a
+ * reply that landed on the wrong one is obvious at a glance; then who is on
+ * air, apart from who is only talked about ("גורם בשם דרמר" sat among the
+ * speakers, 14.9).
+ */
 function formatExpansion(h, x) {
-  const t = ts => new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
-  const parts = [`🔎 *${h.headline}*`, `_${h.station} · ${t(h.ts)}_`, '', x.story];
-  if (x.who.length) {
-    parts.push('', '*מי אמר מה:*');
-    for (const w of x.who) parts.push(`• *${w.name}*${w.role ? ` (${w.role})` : ''} — ${w.said}`);
+  const tz = { timeZone: 'Asia/Jerusalem' };
+  const t = ts => new Date(ts).toLocaleTimeString('he-IL', { ...tz, hour: '2-digit', minute: '2-digit' });
+  const d = ts => new Date(ts).toLocaleDateString('he-IL', { ...tz, day: 'numeric', month: 'numeric' });
+  const who = [h.speaker, h.role].filter(Boolean).join(', ');
+  const parts = [
+    `🔎 *הרחבה לכותרת:*`,
+    `*${h.headline}*`,
+    `📻 ${h.station} · ${d(h.ts)} · ${t(h.ts)}${who ? ` · 🎙️ ${who}` : ''}`,
+    '', `*מה נאמר:*`, x.story,
+  ];
+  const speakers = x.speakers || x.who || [];
+  if (speakers.length) {
+    parts.push('', '*🎙️ מדברים בשידור:*');
+    for (const w of speakers) parts.push(`• *${w.name}*${w.role ? ` (${w.role})` : ''} — ${w.said}`);
+  }
+  if ((x.mentioned || []).length) {
+    parts.push('', '*👤 מוזכרים (לא מדברים):*');
+    for (const m of x.mentioned) parts.push(`• *${m.name}* — ${m.about}`);
   }
   if (x.quotes.length) {
-    parts.push('', '*ציטוטים מהאוויר:*');
+    parts.push('', '*💬 מילה במילה מהאוויר:*');
     for (const q of x.quotes) parts.push(`"${q}"`);
   }
   if (x.background) parts.push('', `📌 ${x.background}`);
   if (x.unclear) parts.push('', `⚠️ ${x.unclear}`);
-  if (x.span) parts.push('', `_מבוסס על ${x.span.samples} דגימות, ${t(x.span.from)}–${t(x.span.to)}_`);
+  if (x.span) parts.push('', `_מתוך ${x.span.samples} דגימות של 55 שניות, ${t(x.span.from)}–${t(x.span.to)} · ענה *שמע* לקטע עצמו_`);
   return parts.join('\n');
 }
 
-module.exports = { findSpeaker, lastKind, onChunk, recent, contextAround, isAd, expand, formatExpansion };
+module.exports = { findSpeaker, lastKind, onChunk, recent, markSent, forReply, contextAround, isAd, expand, formatExpansion };

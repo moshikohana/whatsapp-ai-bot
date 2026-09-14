@@ -105,7 +105,7 @@ async function _drain() {
 const KELLNER_IDENTITY =
   'ח"כ אריאל קלנר — חבר כנסת מהליכוד, תומך מובהק של ראש הממשלה נתניהו ושל מחנה הימין. ' +
   'מתקפה על נתניהו, על הליכוד, על הקואליציה או על מחנה הימין — נוגעת אליו: הזדמנות להגן ולהשיב. ' +
-  'גם כל מה שנוגע בתחומיו: ביטחון ומלחמה, מערכת המשפט ובג"ץ, ועדת חקירה ל-7.10, התיישבות וריבונות, ' +
+  'גם כל מה שנוגע בתחומיו: ביטחון ומלחמה, מערכת המשפט ובג"ץ, ועדת חקירה *לאומית* ל-7.10 (הוא יוזם החוק; לא ממלכתית), התיישבות וריבונות, ' +
   'מימון זר לעמותות, UNRWA, נשק לאזרחים, סמים ואלכוהול, הגליל.';
 
 function _kellnerBrief() {
@@ -171,6 +171,7 @@ async function onHeadline(h, { force = false } = {}) {
     `עמדות ח"כ קלנר:\n${brief || '(אין פירוט)'}`,
     {
       system: 'אתה הדובר של ח"כ אריאל קלנר (ליכוד). סגנון: חד, ישיר, לאומי, בגוף ראשון, בלי קלישאות. אסור להמציא עובדות שלא בכותרת או בתמלול. ' +
+        'עמדה בשמו — רק כפי שהיא כתובה ב"עמדות ח"כ קלנר". אל תשלים עמדה מהידע הכללי שלך; אם אין לו עמדה כתובה בנושא — הטיוטה לא נוקטת עמדה בו. ' +
         'אם הציטוט קיצוני או פוגעני (למשל קריאה לפגוע באזרחים או במשפחות) — אל תאמץ אותו: הטיוטה מסתייגת ממנו, או שהתשובה היא שעדיף לא להגיב. ' +
         'עברית תקינה בלבד: "השבעה באוקטובר", לא שיבוש מהתמלול ("שיבת אוקטובר"). ' +
         'אל תניח שהדברים נאמרו על קלנר או אליו ("אתה…") אלא אם שמו נאמר בתמלול — בוויכוח ברדיו "אתה" הוא בדרך כלל פאנליסט אחר. ' +
@@ -181,14 +182,34 @@ async function onHeadline(h, { force = false } = {}) {
     }
   );
   if (!draft || !draft.draft) return null;
-  // ✍️ Proof-read: Hebrew and the transcript's slips ("שיבת אוקטובר", 14.9).
+  // ✍️ Proof-read: Hebrew and the transcript's slips ("שיבת אוקטובר", 14.9),
+  // and his positions — a draft demanded a "ועדת חקירה ממלכתית" in his name,
+  // the opposite of his own bill (14.9).
   try {
-    const fixed = await claude.classifyJSON(JSON.stringify({ draft: draft.draft, tweet: draft.tweet, questions: draft.questions }), {
-      system: 'הגה את הטקסט: תקן שגיאות עברית, שיבושי תמלול ומילים שלא קיימות (למשל "שיבת אוקטובר" → "השבעה באוקטובר"). אל תשנה תוכן, עמדה או אורך. החזר את אותו JSON בדיוק, מתוקן.',
-      maxTokens: 1400, temperature: 0,
+    const fixed = await claude.classifyJSON(
+      `עמדות ח"כ קלנר:
+${brief}
+
+הטקסט:
+${JSON.stringify({ draft: draft.draft, tweet: draft.tweet, questions: draft.questions })}`, {
+      system: 'הגה את הטקסט: תקן שגיאות עברית, שיבושי תמלול ומילים שלא קיימות (למשל "שיבת אוקטובר" → "השבעה באוקטובר"). ' +
+        'ובדוק עמדות: כל עמדה שהטקסט מייחס לקלנר חייבת להתאים ל"עמדות ח"כ קלנר". עמדה שסותרת אותן — תקן לעמדה הכתובה; עמדה שלא כתובה שם — השמט. ' +
+        'מלבד זה אל תשנה תוכן או אורך. החזר JSON בלבד: {"draft":"...","tweet":"...","questions":[...],"fixedPositions":"מה תוקן בעמדות, או null"}',
+      maxTokens: 1600, temperature: 0,
     });
     if (fixed && fixed.draft) { draft.draft = fixed.draft; if (fixed.tweet) draft.tweet = fixed.tweet; if (Array.isArray(fixed.questions)) draft.questions = fixed.questions; }
+    if (fixed && fixed.fixedPositions) logger.info(`⚡ ready-response: position fixed — ${String(fixed.fixedPositions).substring(0, 120)}`);
   } catch (_) {}
+  // 🔒 The one position that went wrong, checked by code as well: support for
+  // a "ממלכתית" commission is not his; a sentence rejecting one is fine.
+  const _wrong = /(?<!(לא|נגד|במקום|ולא|בלי)\s[^.]{0,25})ועד(ת|ה)\s+חקירה\s+ממלכתית/;
+  const _all = () => [draft.draft, draft.tweet, ...(draft.questions || []).map(x => `${x.q} ${x.a}`)].join(' ');
+  if (_wrong.test(_all())) {
+    logger.warn('⚡ ready-response: draft backs a state commission — rewritten');
+    const fx = s => String(s || '').replace(new RegExp(_wrong.source, 'g'), 'ועדת חקירה לאומית');
+    draft.draft = fx(draft.draft); draft.tweet = fx(draft.tweet);
+    draft.questions = (draft.questions || []).map(x => ({ q: x.q, a: fx(x.a) }));
+  }
 
   const pkg = {
     ts: Date.now(),

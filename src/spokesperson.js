@@ -19,6 +19,14 @@ function loadMemories() {
   return [];
 }
 
+// 🔒 Positions stated outright, first in every context. The memory said only
+// "בעד ועדת חקירה ל-7.10 שבה גם בג"ץ נבדק", and a draft in his name demanded
+// a "ועדת חקירה ממלכתית" — the opposite: he is the sponsor of the bill for a
+// *national* commission (14.9). A memory edit cannot drop these.
+const KELLNER_HARD_FACTS = [
+  '• ועדת חקירה ל-7.10: קלנר הוא יוזם הצעת החוק לוועדת חקירה *לאומית* — לא ממלכתית. ועדה ממלכתית ממונה בידי נשיא בית המשפט העליון, ולשיטתו גם בג"ץ צריך להיחקר. אסור לכתוב בשמו תמיכה ב"ועדת חקירה ממלכתית".',
+];
+
 // ─── Extract Kellner-specific context from all memories ──────────
 function getKellnerContext() {
   const memories = loadMemories();
@@ -31,6 +39,7 @@ function getKellnerContext() {
     other: [],
   };
 
+  context.positions.push(KELLNER_HARD_FACTS.join('\n'));
   for (const m of memories) {
     const text = m.text.toLowerCase();
 
@@ -142,6 +151,7 @@ function getBriefingSearchQueries(extraTopics = []) {
 }
 
 module.exports = {
+  KELLNER_HARD_FACTS,
   getKellnerContext,
   matchTopicToPositions,
   formatContextForClaude,

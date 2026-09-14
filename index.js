@@ -154,6 +154,9 @@ function _msgIdOf(msg) {
   return '';
 }
 
+// The radio headlines last offered as a numbered choice ("הרחב 2").
+let _hlAsk = null;
+
 function _cacheGroupMsg(msg) {
   // Cache messages from BOTH groups (@g.us) AND WhatsApp channels (@newsletter).
   // wwebjs Store.Chat.get(cid) returns undefined for newsletter cids, so
@@ -4551,12 +4554,43 @@ client.on('message_create', async (msg) => {
       }
     }
 
+    // ── Which radio headline a reply is about ─────────────────────
+    // "הרחב", "שמע", "טיוטה": the headline message he replied to (by its id,
+    // then its bold line), else the one sent last — and when two went out
+    // within minutes, he is asked which ("הרחב 2"). It used to take the newest
+    // *stored* headline, one that reached him only two minutes later (14.9).
+    const _pickHeadline = async (verb) => {
+      const hl = require('./src/broadcast-headlines');
+      const num = rawBody.trim().match(/\s([1-4])[.!?]?$/);
+      if (num && _hlAsk && Date.now() - _hlAsk.ts < 30 * 60000) {
+        const h = hl.recent(60).find(x => x.id === _hlAsk.ids[+num[1] - 1]);
+        if (h) return h;
+      }
+      let q = null;
+      if (msg.hasQuotedMsg) { try { q = await msg.getQuotedMessage(); } catch (_) {} }
+      const r = q ? hl.forReply({ quotedId: _msgIdOf(q), quotedBody: q.body || '' }) : hl.forReply({});
+      if (r.h) return r.h;
+      const _hc = await client.getChatById(OWNER_ID);
+      if (r.ask) {
+        _hlAsk = { ts: Date.now(), ids: r.ask.map(x => x.id) };
+        const t = ts => new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+        await botSend(_hc, `איזו כותרת? נשלחו ${r.ask.length} בדקות האחרונות:\n\n` +
+          r.ask.map((x, i) => `*${i + 1}.* ${x.station} · ${t(x.ts)} — ${x.headline}`).join('\n') +
+          `\n\nענה *${verb} 1* / *${verb} 2* — או הגב על הודעת הכותרת עצמה.`);
+      } else if (r.none === 'quoted') {
+        await botSend(_hc, `לא זיהיתי כותרת מהשידור בהודעה שהגבת עליה. ענה *${verb}* על הודעת "🗞️ כותרת מהשידור".`);
+      } else {
+        await botSend(_hc, 'אין כותרת מהשידור מהשעות האחרונות.');
+      }
+      return null;
+    };
+
     // ── 🎧 "שמע" — the moment on air itself, cut to ~45 seconds ────
     // The app plays it with a transcript; WhatsApp had only the words. Reply
     // "שמע" to a radio headline (or to any alert with a quote in it) and the
     // audio comes back; "🎧 <מילים>" / "שמע ברדיו <מילים>" finds them on air
     // in the last six hours.
-    const _hearAlone = /^(שמע|השמע|תשמיע|תשמיע לי|🎧)[.!?]?$/.test(rawBody.trim());
+    const _hearAlone = /^(שמע|השמע|תשמיע|תשמיע לי|🎧)(\s[1-4])?[.!?]?$/.test(rawBody.trim());
     const _hearFind = rawBody.trim().match(/^(?:🎧|שמע ברדיו|תשמיע מהרדיו)\s+(.{2,80})$/);
     if (_hearAlone || _hearFind) {
       const bd = require('./src/broadcast-digest');
@@ -4567,10 +4601,10 @@ client.on('message_create', async (msg) => {
         const c = bd.findOnAir(_hearFind[1], 6);
         if (c) target = { station: c.station, ts: c.ts, q: _hearFind[1] };
       } else {
-        let quoted = '';
-        if (msg.hasQuotedMsg) { try { quoted = (await msg.getQuotedMessage())?.body || ''; } catch (_) {} }
-        const h = quoted ? hl.recent(40).find(x => quoted.includes(String(x.headline).substring(0, 30)))
-          : hl.recent(20).filter(x => Date.now() - x.ts < 3 * 3600000)[0];
+        let quoted = '', qMsg = null;
+        if (msg.hasQuotedMsg) { try { qMsg = await msg.getQuotedMessage(); quoted = qMsg?.body || ''; } catch (_) {} }
+        const h = quoted ? hl.forReply({ quotedId: _msgIdOf(qMsg), quotedBody: quoted }).h : await _pickHeadline('שמע');
+        if (!quoted && !h) return;   // he was asked which, or told there is none
         if (h) target = { station: h.station, ts: h.ts, q: h.quote || h.headline };
         else if (quoted) {
           // Any alert: the words in quotes, or its bold line, found on air.
@@ -4615,15 +4649,10 @@ client.on('message_create', async (msg) => {
     }
 
     // ── ⚡ "טיוטה" — the response package for a radio headline, on request ──
-    if (/^(טיוטה|טיוטת תגובה|תכין טיוטה)[.!?]?$/.test(rawBody.trim())) {
-      const hl = require('./src/broadcast-headlines');
-      let h = null;
-      if (msg.hasQuotedMsg) {
-        try { const q = (await msg.getQuotedMessage())?.body || ''; h = hl.recent(40).find(x => q.includes(String(x.headline).substring(0, 30))); } catch (_) {}
-      }
-      if (!h) h = hl.recent(20).filter(x => Date.now() - x.ts < 3 * 3600000)[0];
+    if (/^(טיוטה|טיוטת תגובה|תכין טיוטה)(\s[1-4])?[.!?]?$/.test(rawBody.trim())) {
+      const h = await _pickHeadline('טיוטה');
+      if (!h) return;
       const _hc = await client.getChatById(OWNER_ID);
-      if (!h) { await botSend(_hc, 'אין כותרת מהשידור מהשעות האחרונות. ענה *טיוטה* על הודעת כותרת.'); return; }
       try { await msg.react('⚡'); } catch (_) {}
       try {
         const lr = require('./src/lead-radar');
@@ -4636,26 +4665,16 @@ client.on('message_create', async (msg) => {
     // ── "הרחב" on a radio headline ───────────────────────────────
     // The headline arrives as one line. "הרחב" answers with who said what,
     // from the transcript around it. Replying to a specific headline expands
-    // that one; otherwise the newest from the last three hours.
-    if (/^(הרחב|הרחבה|פרט|מי אמר מה)[.!?]?$/.test(rawBody.trim())) {
+    // that one; otherwise the one sent last (see _pickHeadline).
+    if (/^(הרחב|הרחבה|פרט|מי אמר מה)(\s[1-4])?[.!?]?$/.test(rawBody.trim())) {
       const hl = require('./src/broadcast-headlines');
-      let pool = hl.recent(20).filter(h => Date.now() - h.ts < 3 * 60 * 60 * 1000);
-      if (msg.hasQuotedMsg) {
-        try {
-          const q = (await msg.getQuotedMessage())?.body || '';
-          const hit = hl.recent(40).find(h => q.includes(h.headline.substring(0, 30)));
-          if (hit) pool = [hit];
-        } catch (_) {}
-      }
+      const h = await _pickHeadline('הרחב');
+      if (!h) return;
       const _hc = await client.getChatById(OWNER_ID);
-      if (!pool.length) {
-        await botSend(_hc, 'אין כותרת מהשידור מהשעות האחרונות להרחיב.');
-        return;
-      }
       try { await msg.react('🔎'); } catch (_) {}
       try {
-        const x = await hl.expand(pool[0].id);
-        await botSend(_hc, hl.formatExpansion(pool[0], x));
+        const x = await hl.expand(h.id);
+        await botSend(_hc, hl.formatExpansion(h, x));
       } catch (e) {
         await botSend(_hc, e.code === 'NO_TRANSCRIPT'
           ? 'אין מספיק תמלול סביב הכותרת הזו כדי להרחיב.'
@@ -8795,7 +8814,11 @@ setInterval(async () => {
         (who ? `\n🎙️ ${who}` : '\n🎙️ _דובר לא מזוהה — ענה *הרחב* להקשר_') +
         (h.quote ? `\n\n"${h.quote}"` : '') +
         `\n\n_נקלט באוויר — לפני שפורסם._\n↩️ ענה *הרחב* — מי אמר מה · *שמע* — הקטע עצמו · *טיוטה* — תגובה מוכנה`;
-      try { await botSend(await client.getChatById(OWNER_ID), wa); } catch {}
+      // Marked as sent, with the message id — "הרחב" on this message finds it.
+      try {
+        const sent = await botSend(await client.getChatById(OWNER_ID), wa);
+        require('./src/broadcast-headlines').markSent(h.id, _msgIdOf(sent));
+      } catch {}
       try {
         require('./src/jarvis-api').pushAlert({
           title: `🗞️ ${h.headline}`,
