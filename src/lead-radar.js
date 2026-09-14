@@ -141,6 +141,13 @@ function _journalists(headline) {
  */
 async function onHeadline(h) {
   const claude = require('./claude');
+  // Nobody to answer: "דובר ימין: … משפחתו צריכה למות" had no speaker, and a
+  // draft for Kellner was built on it anyway (14.9). Only when it names his world.
+  const _his = /(קלנר|ליכוד|נתניהו|ראש הממשלה|הקואליציה|בן גביר|סמוטריץ|כ"ץ|כ״ץ|רגב|לוין|זוהר|בחירות)/;
+  if (!h.speaker && !_his.test(`${h.headline} ${h.quote || ''}`)) {
+    logger.info(`⚡ ready-response: "${String(h.headline).substring(0, 40)}" — no speaker, not his world; skipped`);
+    return null;
+  }
   const brief = _kellnerBrief();
   const rel = await claude.classifyJSON(
     `כותרת: ${h.headline}\n${h.speaker ? `דובר: ${h.speaker}\n` : ''}${h.quote ? `ציטוט: "${h.quote}"\n` : ''}` +
@@ -163,6 +170,8 @@ async function onHeadline(h) {
     `עמדות ח"כ קלנר:\n${brief || '(אין פירוט)'}`,
     {
       system: 'אתה הדובר של ח"כ אריאל קלנר (ליכוד). סגנון: חד, ישיר, לאומי, בגוף ראשון, בלי קלישאות. אסור להמציא עובדות שלא בכותרת או בתמלול. ' +
+        'אם הציטוט קיצוני או פוגעני (למשל קריאה לפגוע באזרחים או במשפחות) — אל תאמץ אותו: הטיוטה מסתייגת ממנו, או שהתשובה היא שעדיף לא להגיב. ' +
+        'עברית תקינה בלבד: "השבעה באוקטובר", לא שיבוש מהתמלול ("שיבת אוקטובר"). ' +
         'התמלול אוטומטי ויש בו שגיאות שמיעה (למשל "ערג" הוא "הרג") — אל תצטט מילה שלא קיימת בעברית; כתוב את המילה הנכונה או השמט. ' +
         'החזר JSON בלבד: {"draft": "תגובה לתקשורת, 2-3 משפטים", "tweet": "ציוץ עד 240 תווים", ' +
         '"questions": [{"q": "שאלה קשה שעיתונאי ישאל", "a": "תשובה חדה במשפט"}, {"q": "...", "a": "..."}]}',
@@ -170,6 +179,14 @@ async function onHeadline(h) {
     }
   );
   if (!draft || !draft.draft) return null;
+  // ✍️ Proof-read: Hebrew and the transcript's slips ("שיבת אוקטובר", 14.9).
+  try {
+    const fixed = await claude.classifyJSON(JSON.stringify({ draft: draft.draft, tweet: draft.tweet, questions: draft.questions }), {
+      system: 'הגה את הטקסט: תקן שגיאות עברית, שיבושי תמלול ומילים שלא קיימות (למשל "שיבת אוקטובר" → "השבעה באוקטובר"). אל תשנה תוכן, עמדה או אורך. החזר את אותו JSON בדיוק, מתוקן.',
+      maxTokens: 1400, temperature: 0,
+    });
+    if (fixed && fixed.draft) { draft.draft = fixed.draft; if (fixed.tweet) draft.tweet = fixed.tweet; if (Array.isArray(fixed.questions)) draft.questions = fixed.questions; }
+  } catch (_) {}
 
   const pkg = {
     ts: Date.now(),

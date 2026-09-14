@@ -79,6 +79,7 @@ const SYSTEM = `אתה עורך מבזקים בחדר חדשות פוליטי ב
 - ⛔ speaker: **אסור לנחש.** רק אם השם נאמר בקטע עצמו — המנחה פונה אליו בשמו או מציג אותו. אם השם לא מופיע בטקסט — null, גם אם "נראה לך" שאתה יודע מי זה. שם שגוי בכותרת גרוע בהרבה מכותרת בלי שם.
 - role: רק אם נאמר בקטע. אחרת null.
 - headline: אם הדובר לא מזוהה, נסח בלי שם — "קריאה לוינטר לפרוש" ולא "אוחנה: וינטר צריך לפרוש".
+- ⛔ אל תמציא תווית לדובר לא מזוהה — לא "דובר ימין", לא "גורם", לא "פרשן", לא "מרואיין". כתוב את האמירה עצמה, בלי ייחוס.
 - score: 5 = מבזק (אמירה חריפה/חדשה על דמות או מהלך מרכזי), 4 = כותרת טובה, 3 ומטה = לא לפרסם.
 
 בנוסף, kind — מה יש בקטע האחרון (הפסקה האחרונה בתמלול): "news" = מהדורה או מבזק, "talk" = דיבור, ראיון, פאנל או מנחה, "music" = שיר או מוזיקה (גם מילים של שיר), "ads" = פרסומות וקדימונים.
@@ -140,6 +141,14 @@ async function onChunk({ station, text, ts = Date.now() }) {
     let speaker = r.speaker ? String(r.speaker).trim() : null;
     let role = r.role ? String(r.role).trim() : null;
     let headline = String(r.headline).trim();
+    // An invented label in front of an unknown speaker — "דובר ימין: …" (14.9) — goes.
+    if (!r.speaker) {
+      const lab = headline.match(/^([^:]{2,30}):\s*/);
+      if (lab && (/(דובר|גורם|פרשן|מרואיין|אדם|מישהו|מגיש|מנחה|ימין|שמאל|בכיר|מקור)/.test(lab[1]) || !norm(window).includes(norm(lab[1])))) {
+        logger.info(`📻 headline: dropped invented label "${lab[1]}"`);
+        headline = headline.slice(lab[0].length).trim();
+      }
+    }
     if (speaker) {
       const surname = speaker.split(/\s+/).pop();
       if (!norm(window).includes(norm(surname))) {

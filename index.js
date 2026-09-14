@@ -134,6 +134,24 @@ require('./src/news-prior').setGroupSource({
   },
 });
 
+/**
+ * The message's id as getMessageById wants it. On this whatsapp-web.js build
+ * msg.id often arrives without _serialized — every id in the groups cache was
+ * empty, so "הצג" could never fetch the original (14.9). Built from its parts.
+ */
+let _idShapeLogged = false;
+function _msgIdOf(msg) {
+  const i = msg && msg.id;
+  if (!i) return '';
+  if (typeof i === 'string') return i;
+  if (i._serialized) return i._serialized;
+  const remote = (i.remote && typeof i.remote === 'object') ? (i.remote._serialized || '') : (i.remote || '');
+  const part = (i.participant && typeof i.participant === 'object') ? (i.participant._serialized || '') : (i.participant || '');
+  if (!_idShapeLogged) { _idShapeLogged = true; try { logger.info('🆔 msg.id shape: ' + JSON.stringify(i).substring(0, 200)); } catch (_) {} }
+  if (i.id && remote) return `${i.fromMe ? 'true' : 'false'}_${remote}_${i.id}${part ? '_' + part : ''}`;
+  return '';
+}
+
 function _cacheGroupMsg(msg) {
   // Cache messages from BOTH groups (@g.us) AND WhatsApp channels (@newsletter).
   // wwebjs Store.Chat.get(cid) returns undefined for newsletter cids, so
@@ -174,7 +192,7 @@ function _cacheGroupMsg(msg) {
     })();
   }
 
-  const id = msg.id?._serialized || '';
+  const id = _msgIdOf(msg) || '';
   if (!_msgCache[cid]) _msgCache[cid] = [];
   if (id && _msgCache[cid].some(m => m.id === id)) return; // deduplicate
   const _mTs = msg.timestamp || Math.floor(Date.now() / 1000);
@@ -2296,6 +2314,7 @@ client.on('qr', async (qr) => {
 client.on('loading_screen', (pct) => process.stdout.write(`\r⏳ טוען... ${pct}%`));
 client.on('authenticated', () => { console.log('\n🔐 אומת!'); botStatus = 'authenticated'; io.emit('status', 'authenticated'); });
 
+let _readyHandled = false;
 client.on('ready', () => {
   botStatus = 'connected';
   currentQR = null;
@@ -2303,6 +2322,10 @@ client.on('ready', () => {
   try { fs.writeFileSync(_initFailFile, JSON.stringify({ count: 0 })); } catch {} // healthy — reset crash counter
   const info = client.info;
   logger.info(`✅ בוטי מחובר! | ${info.pushname} (+${info.wid.user})`);
+  // 'ready' fires twice on this build (09:18:35 and :42, 14.9): the timers,
+  // daily jobs and health check below were set up twice. Once per process.
+  if (_readyHandled) { io.emit('status', 'connected'); return; }
+  _readyHandled = true;
 
   // ── Chrome-death detector ─────────────────────────────────────
   // Chrome can hard-crash (renderer segfault) leaving this Node process
@@ -4084,7 +4107,7 @@ client.on('message_create', async (msg) => {
   console.log(`📩 msg_create: type=${msg.type} from=${(msg.from||'').substring(0,25)} to=${(msg.to||'').substring(0,25)} fromMe=${msg.fromMe}`);
 
   // ── Dedup: prevent re-processing the same msg id (wwebjs replays on reconnect)
-  const _msgId = msg.id?._serialized || '';
+  const _msgId = _msgIdOf(msg) || '';
   if (_seenAndMark(_msgId)) {
     console.log(`⏭️  dedup skip: ${_msgId.substring(0, 40)}`);
     return;
@@ -4392,7 +4415,7 @@ client.on('message_create', async (msg) => {
             (_okc.where ? `🔎 המילה מופיעה ${_okc.where}:\n` : '') +
             `💬 "${boldKeyword(_preview, _matchOwner)}"`
           );
-          require('./src/keyword-alerts').logAlert(_matchOwner, _grpCht.name || msg.to, 'אתה', _preview, { full: msg.body, msgId: msg.id && msg.id._serialized, chatId: msg.to });
+          require('./src/keyword-alerts').logAlert(_matchOwner, _grpCht.name || msg.to, 'אתה', _preview, { full: msg.body, msgId: _msgIdOf(msg), chatId: msg.to });
         } catch (_oe) { /* silent */ }
       }
     }
@@ -4962,7 +4985,7 @@ ${rawBody}`;
           if (_m && _m.data) {
             const att = require('./src/attention');
             const item = await att.check({
-              msgId: msg.id?._serialized, chatId: OWNER_ID, group: 'שלחת לי', sender: '',
+              msgId: _msgIdOf(msg), chatId: OWNER_ID, group: 'שלחת לי', sender: '',
               text: caption, isImage: true, media: { buffer: Buffer.from(_m.data, 'base64') },
               ts: (msg.timestamp || 0) * 1000 || Date.now(), direct: true,
             });
@@ -6276,7 +6299,7 @@ client.on('message', async (msg) => {
             // ~33 pings/day down to a handful of useful ones.
             const _verdict = require('./src/alert-hub').queueAlert({
               keyword: _matchedKw, group: _groupNameForAlert, sender: _sender, preview: _preview,
-              msgId: msg.id?._serialized || '', chatId: _kFromJid,
+              msgId: _msgIdOf(msg) || '', chatId: _kFromJid,
             });
             if (_verdict === 'urgent') {
               const _ownerC = await client.getChatById(OWNER_ID);
@@ -6292,7 +6315,7 @@ client.on('message', async (msg) => {
               // about the WhatsApp side changes — this is an addition.
               try {
                 const _j = require('./src/jarvis-api');
-                const _ctx = await _j.fetchContext(_alertChat, msg.id?._serialized || '', 3);
+                const _ctx = await _j.fetchContext(_alertChat, _msgIdOf(msg) || '', 3);
                 _j.mirrorAlert({
                   title: `🚨 מילת מפתח: "${_matchedKw}"`,
                   body: [
@@ -6311,7 +6334,7 @@ client.on('message', async (msg) => {
             }
           }
           // Always log to keyword-alerts journal (whether war-room or solo alert)
-          require('./src/keyword-alerts').logAlert(_matchedKw, _groupNameForAlert, _sender, _preview, { full: msg.body, msgId: msg.id && msg.id._serialized, chatId: msg.from });
+          require('./src/keyword-alerts').logAlert(_matchedKw, _groupNameForAlert, _sender, _preview, { full: msg.body, msgId: _msgIdOf(msg), chatId: msg.from });
         } catch (_alertErr) { /* silent */ }
       }
     }
@@ -6335,7 +6358,7 @@ client.on('message', async (msg) => {
         if (m?.data) media = { buffer: Buffer.from(m.data, 'base64') };
       }
       const item = await att.check({
-        msgId: msg.id?._serialized, chatId: _from, group: _gname,
+        msgId: _msgIdOf(msg), chatId: _from, group: _gname,
         sender: msg._data?.notifyName || '', text: msg.body || '',
         isImage: msg.type === 'image', media, ts: (msg.timestamp || 0) * 1000 || Date.now(),
       });
@@ -8709,7 +8732,7 @@ setInterval(async () => {
       const who = [h.speaker, h.role].filter(Boolean).join(', ');
       const wa = `🗞️ *כותרת מהשידור* · ${h.station} · ${time}\n\n` +
         `*${h.headline}*` +
-        (who ? `\n🎙️ ${who}` : '') +
+        (who ? `\n🎙️ ${who}` : '\n🎙️ _דובר לא מזוהה — ענה *הרחב* להקשר_') +
         (h.quote ? `\n\n"${h.quote}"` : '') +
         `\n\n_נקלט באוויר — לפני שפורסם._\n↩️ ענה *הרחב* — מי אמר מה · *שמע* — הקטע עצמו`;
       try { await botSend(await client.getChatById(OWNER_ID), wa); } catch {}
