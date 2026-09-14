@@ -929,6 +929,14 @@ function attach(app, deps = {}) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }
   });
+  // 📊 ניתוח מקורות: who breaks stories first, how often others follow, denials.
+  app.get('/api/jarvis/news/analytics', guard, (req, res) => {
+    try {
+      const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 7);
+      res.json({ ok: true, ...require('./news-analytics').analyze(days) });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+
   // 📰 חדשות בהרחבה: all stories of the last hours (cached checks only), one
   // story in full, and a short "what is known" written from all its sources.
   app.get('/api/jarvis/news/stories', guard, (req, res) => {
