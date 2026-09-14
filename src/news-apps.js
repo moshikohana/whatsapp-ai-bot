@@ -647,7 +647,15 @@ function story(id) {
   const s = latest(48, 2000).find(x => x.id === id || (x.memberIds || []).includes(id));
   if (!s) return null;
   const ids = new Set(s.memberIds || []);
-  const members = _load().filter(p => ids.has(p.id)).sort((a, b) => a.ts - b.ts).map(p => ({
+  // The same post from the same source twice (a channel and its Telegram twin,
+  // a repost) was listed twice in the story sheet (14.9) — once.
+  const seenPost = new Set();
+  const members = _load().filter(p => ids.has(p.id)).sort((a, b) => a.ts - b.ts).filter(p => {
+    const k = p.source + '|' + _norm(p.full || p.text).substring(0, 70);
+    if (seenPost.has(k)) return false;
+    seenPost.add(k);
+    return true;
+  }).map(p => ({
     id: p.id, source: p.source, ts: p.ts, text: p.text, via: p.via || 'app',
     full: p.full || null, link: p.link || null, linkKind: p.linkKind || null, linkChecked: !!p.linkChecked, reporter: !!p.reporter, img: p.img || null,
     radio: p.radio ? { station: p.radio.station || null, ts: p.radio.ts, headline: p.radio.headline || p.radio.excerpt || null, quote: p.radio.excerpt || p.radio.headline || null, leadMin: p.radio.leadMin } : null,

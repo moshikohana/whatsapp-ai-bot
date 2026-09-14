@@ -145,6 +145,8 @@ function _msgIdOf(msg) {
   if (!i) return '';
   if (typeof i === 'string') return i;
   if (i._serialized) return i._serialized;
+  // On this build the serialized id sits under a minified key ("$1").
+  for (const v of Object.values(i)) if (typeof v === 'string' && /^(true|false)_.+@.+_[A-Z0-9]{8,}/i.test(v)) return v;
   const remote = (i.remote && typeof i.remote === 'object') ? (i.remote._serialized || '') : (i.remote || '');
   const part = (i.participant && typeof i.participant === 'object') ? (i.participant._serialized || '') : (i.participant || '');
   if (!_idShapeLogged) { _idShapeLogged = true; try { logger.info('🆔 msg.id shape: ' + JSON.stringify(i).substring(0, 200)); } catch (_) {} }
