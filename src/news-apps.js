@@ -257,6 +257,26 @@ async function _same(headline, quote, text) {
   return !!(r && r.same === true);
 }
 
+/**
+ * כבר פורסם? — before a radio headline is pushed. The match used to run only
+ * after the push (onHeadline), so "נורווגיה מכינה חקיקה" reached him as a
+ * radio scoop four hours after Channel 14 had it, and the Likud request to
+ * disqualify the Joint List four and a half hours after three groups (14.9).
+ * @returns {{ source, ts, min, text } | null} the earliest publication, minBefore+ minutes earlier
+ */
+async function publishedBefore(h, minBefore = 20) {
+  const txt = `${h.headline} ${h.speaker || ''} ${h.quote || ''}`;
+  const cands = _load().filter(p => !p.skip && p.ts < h.ts - minBefore * 60000 && h.ts - p.ts < 6 * 3600000)
+    .map(p => ({ p, n: _overlap(txt, p.text) })).filter(c => c.n >= 3)
+    .sort((a, b) => b.n - a.n || a.p.ts - b.p.ts).slice(0, 3);
+  for (const { p } of cands) {
+    if (await _same(h.headline, h.quote, p.text)) {
+      return { source: p.source, ts: p.ts, min: Math.round((h.ts - p.ts) / 60000), text: String(p.text).substring(0, 200) };
+    }
+  }
+  return null;
+}
+
 function _link(h, p) {
   // On the push: when radio had it. On the headline: when each app sent it.
   const lead = Math.round((p.ts - h.ts) / 60000);   // > 0: radio was first
@@ -718,4 +738,4 @@ function setImg(id, img) {
 
 module.exports = {
   fixRole,
-  rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
+  publishedBefore, rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

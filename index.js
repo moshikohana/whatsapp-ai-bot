@@ -4611,6 +4611,8 @@ client.on('message_create', async (msg) => {
       if (r.h) return r.h;
       const _hc = await client.getChatById(OWNER_ID);
       if (r.ask) {
+        // Asked the same a moment ago (he sent the word twice) — once is enough.
+        if (_hlAsk && Date.now() - _hlAsk.ts < 60000 && _hlAsk.verb === verb && _hlAsk.ids.join() === r.ask.map(x => x.id).join()) return null;
         _hlAsk = { ts: Date.now(), ids: r.ask.map(x => x.id), verb };
         const t = ts => new Date(ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
         await botSend(_hc, `איזו כותרת? נשלחו ${r.ask.length} בדקות האחרונות:\n\n` +
@@ -7066,7 +7068,11 @@ async function _showHubItem(chat, a, n) {
     try { orig = await client.getMessageById(s.msgId); } catch (_) {}
     const cached = (_msgCache[s.chatId] || []).find(m => m.id === s.msgId) || {};
     const body = String((orig && orig.body) || cached.body || '').trim();
-    const group = _jidNames.get(s.chatId) || s.group || 'קבוצה';
+    // Right after a restart the name map is still empty and the group showed as
+    // its id ("120363…@g.us", 14.9) — asked of WhatsApp then.
+    let group = _jidNames.get(s.chatId) || (/@g\.us$|@newsletter$/.test(String(s.group || '')) ? '' : s.group) || '';
+    if (!group) { try { group = (await client.getChatById(s.chatId || s.group))?.name || ''; } catch (_) {} }
+    group = group || 'קבוצה';
     const sender = cached.sender || (orig && orig._data && orig._data.notifyName) || '';
     const ts = ((orig && orig.timestamp) || cached.ts || 0) * 1000;
     if (!body && !orig) continue;
@@ -8848,13 +8854,17 @@ setInterval(async () => {
     // speaker and the verified quote, so it reaches him while it is still news
     // rather than an hour later inside a summary.
     for (const h of (hits.headlines || [])) {
+      // 🔕 Kept for the tab and the hourly summary, not pushed: the round-hour
+      // bulletin, already out in the apps/groups, or over the hourly cap (14.9).
+      if (h.silent) { try { require('./src/news-apps').onHeadline(h); } catch (_) {} continue; }
       // With the date — a time alone was read as today when it was yesterday (13.9).
       const time = new Date(h.ts).toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', day: 'numeric', month: 'numeric' }) + ' · ' + new Date(h.ts).toLocaleTimeString('he-IL', {
         timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit',
       });
       const who = [h.speaker, h.role].filter(Boolean).join(', ');
-      const wa = `🗞️ *כותרת מהשידור* · ${h.station} · ${time}\n\n` +
-        `*${h.headline}*` +
+      const _upd = h.update ? `🔄 *עדכון* לסיפור מ${h.update.station} ${new Date(h.update.at).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' })}: ${h.update.what}\n` : '';
+      const wa = `🗞️ *כותרת מהשידור* · ${h.station} · ${time}${h.segment && h.segment.name ? ` · ${h.segment.name}` : ''}\n\n` +
+        _upd + `*${h.headline}*` +
         (who ? `\n🎙️ ${who}` : '\n🎙️ _דובר לא מזוהה — ענה *הרחב* להקשר_') +
         (h.quote ? `\n\n"${h.quote}"` : '') +
         // Not "לפני שפורסם": the Likud request (14.9) was in three groups hours earlier.

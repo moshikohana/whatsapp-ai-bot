@@ -775,7 +775,10 @@ async function checkTrendingKeywords({ minGroups = 5, minHits = 3, minRatio = 1.
   if (!trends || !trends.length) return [];
 
   // Filter to keywords that appeared in ≥ minGroups distinct groups today
-  const hot = trends.filter(t => (t.groups || []).length >= minGroups);
+  // An urgency word is not a story: "מיידי" in 8 groups got a hot-trend alert
+  // with a drafted statement (14.9). They still alert as keywords, not as trends.
+  const _GENERIC_KW = /^(מיידי|דחוף|חדשות אחרונות|פרסום ראשון|דרמה|כינוס חירום|בלעדי|מבזק|עדכון|חשוב)$/;
+  const hot = trends.filter(t => (t.groups || []).length >= minGroups && !_GENERIC_KW.test(String(t.keyword || '').trim()));
   if (!hot.length) return [];
 
   const state = loadState();

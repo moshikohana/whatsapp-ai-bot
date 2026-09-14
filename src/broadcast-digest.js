@@ -392,6 +392,12 @@ async function analyseHour({ fromTs, toTs } = {}) {
     }).filter(t => !t.drop);
   } catch (e) { logger.warn('digest grounding: ' + (e.message || '').substring(0, 60)); }
 
+  // 📻 The programme heard this hour, per station — the map learns it (broadcast-schedule).
+  try {
+    const sch = require('./broadcast-schedule');
+    for (const p of digest.programs || []) sch.learn(p.station, from + 30 * 60000, p.name, p.confidence);
+  } catch (_) {}
+
   const list = _loadDigests().filter(d => d.id !== digest.id);
   list.push(digest);
   list.sort((a, b) => b.from - a.from);

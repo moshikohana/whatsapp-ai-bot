@@ -66,11 +66,13 @@ const SYSTEM = `אתה עורך מבזקים בחדר חדשות פוליטי ב
 
 השאלה היחידה: **האם יש כאן כותרת** — משהו שאתר חדשות או ערוץ וואטסאפ פוליטי היו מפרסמים כמבזק?
 
-כותרת = אמירה בולטת על פוליטיקה, בחירות, ביטחון, מלחמה, חטופים או משפט — עמדה חריפה, קריאה למישהו לפרוש, התקפה על פוליטיקאי, חשיפה, הכרזה — או התפתחות חדשותית ממשית.
+כותרת = אמירה בולטת או התפתחות בנושא **פוליטי, מדיני או ביטחוני**: בחירות, מפלגות, שרים וממשלה, כנסת, מערכת המשפט, צבא ומלחמה, חטופים, מדיניות חוץ — עמדה חריפה, קריאה למישהו לפרוש, התקפה על פוליטיקאי, חשיפה, הכרזה.
+כלכלה, צרכנות, תרבות, פשיעה, תאונות ואסונות — כותרת רק כשיש בהם זווית פוליטית (שר, ממשלה, מחדל, חקיקה).
 
 ⚠️ הדובר לא חייב להיות מזוהה כדי שזו תהיה כותרת. הקטעים הם דגימות של 55 שניות, ולרוב ההצגה של המרואיין נפלה לפני הדגימה. "וינטר צריך לפרוש, הוא מסכן את מחנה הימין" היא כותרת גם כשלא ברור מי אמר אותה — היא עוסקת בדמויות מוכרות ובעמדה חדה.
 
 לא כותרת: פרסומות, מוזיקה, ספורט, מזג אוויר, תנועה, טיפים צרכניים, שיחת חולין של מנחים, קריינות של מבזק שכבר ידוע.
+מנחה שמסכם או מקריא חדשות שכבר פורסמו — לא כותרת. במבזק החדשות של השעה העגולה — כותרת רק אם זו ידיעה חדשה לגמרי, ואז score 5.
 
 ⚠️ התמלול אוטומטי ויש בו שגיאות שמיעה — "הערג" במקום "הרג", "פילוג צהל" במקום "פעילות צה"ל". ב-headline כתוב את המילה הנכונה; אל תבנה כותרת על מילה שלא קיימת בעברית.
 
@@ -112,16 +114,26 @@ async function onChunk({ station, text, ts = Date.now() }) {
     // left blank.
     const window = [...recentArr.slice(-2).map(p => p.text), clean].join('\n');
 
+    // 📻 Where in the day this is: the round-hour bulletin, or which programme
+    // (and its hosts, who are never the "speaker"). See broadcast-schedule.
+    let seg = { bulletin: false, name: null, hosts: [], type: 'morning' };
+    try { seg = require('./broadcast-schedule').segmentAt(station, ts); } catch (_) {}
+    if (seg.type === 'sports' || seg.type === 'music') { _kind[station] = { ts, kind: seg.type === 'music' ? 'music' : 'talk' }; return null; }
+    const segLine = seg.bulletin ? 'עכשיו: מבזק החדשות של השעה העגולה'
+      : `עכשיו: ${seg.name ? `התוכנית "${seg.name}"` : 'תוכנית'}${seg.type === 'interviews' ? ' (ראיונות)' : ''}` +
+        (seg.hosts.length ? `\nמנחי התוכנית (הם לא הדוברים): ${seg.hosts.join(', ')}` : '');
+
     const claude = require('./claude');
     const r = await claude.classifyJSON(
-      `תחנה: ${station}\n\nתמלול:\n${window}`,
+      `תחנה: ${station}\n${segLine}\n\nתמלול:\n${window}`,
       { system: SYSTEM, maxTokens: 400, model: 'claude-haiku-4-5-20251001' }
     );
     // One line per check. Without it a quiet hour and a broken detector look
     // the same in the log.
     if (r && ['news', 'talk', 'music', 'ads'].includes(r.kind)) _kind[station] = { ts, kind: r.kind };
-    logger.info(`📻 headline check [${station}] → ${r && r.headline ? `★${r.score || 0} ${String(r.headline).substring(0, 50)}` : 'nothing'}${r && r.kind ? ` · ${r.kind}` : ''}`);
+    logger.info(`📻 headline check [${station}${seg.bulletin ? ' · מבזק' : ''}] → ${r && r.headline ? `★${r.score || 0} ${String(r.headline).substring(0, 50)}` : 'nothing'}${r && r.kind ? ` · ${r.kind}` : ''}`);
     if (!r || !r.headline || (r.score || 0) < MIN_SCORE) return null;
+    const bulletin = seg.bulletin || r.kind === 'news';
 
     // Verified against the transcript, exactly as the hourly digest does. A
     // spokesperson must never be handed a quote that was tidied up.
@@ -164,6 +176,12 @@ async function onChunk({ station, text, ts = Date.now() }) {
       // The role was inferred from the name, so it goes with it.
       if (!speaker) role = null;
     }
+    // The host says the guest's name, then asks the question: a host is not the speaker.
+    if (speaker && seg.hosts.some(hn => norm(hn).split(' ').pop() === norm(speaker).split(' ').pop())) {
+      logger.info(`📻 headline: "${speaker}" is the programme's host — not the speaker`);
+      if (headline.startsWith(speaker)) headline = headline.slice(speaker.length).replace(/^[\s:—-]+/, '');
+      speaker = null; role = null;
+    }
 
     const list = _load();
     const key = norm(`${speaker || ''} ${headline}`).substring(0, 60);
@@ -205,6 +223,43 @@ async function onChunk({ station, text, ts = Date.now() }) {
       return null;
     }
 
+    // 📡 The same story on another station, or hours later (14.9: the Venice
+    // film five times in two hours, on three stations). Shared words find the
+    // candidates; the model says whether this one adds anything — a new
+    // voice, a decision, a fact. Repeating the same stance is not news.
+    const hhmm = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+    let update = null;
+    const mineAll = words(`${headline} ${quote || ''}`);
+    const cands = list.filter(h => h.ts < ts && ts - h.ts < 6 * 3600000).map(h => {
+      let shared = 0;
+      for (const w of words(`${h.headline} ${h.quote || ''}`)) if ([...mineAll].some(m => same(m, w))) shared++;
+      return { h, shared, q: !!(quote && h.quote && run(quote, h.quote)) };
+    }).filter(c => c.q || c.shared >= 2).sort((a, b) => b.shared - a.shared).slice(0, 3);
+    if (cands.length) {
+      const v = await claude.classifyJSON(
+        `כותרת חדשה (${station} ${hhmm(ts)}): "${headline}"${quote ? `\nציטוט: "${quote}"` : ''}\n\nכותרות קודמות:\n` +
+        cands.map((c, i) => `${i + 1}. ${c.h.station} ${hhmm(c.h.ts)}: "${c.h.headline}"${c.h.quote ? ` — "${c.h.quote}"` : ''}`).join('\n'),
+        {
+          system: 'האם הכותרת החדשה היא אותו סיפור כמו אחת הקודמות — אותו אירוע או אותה מחלוקת שכבר דווחה, גם בניסוח אחר או מפי דובר אחר שחוזר על אותה עמדה? ' +
+            'אם כן — האם יש בה חידוש ממשי: דמות חשובה חדשה עם עמדה חדשה, החלטה, צעד, עובדה חדשה? חזרה על אותה טענה או אותה עמדה אינה חידוש. ' +
+            'החזר JSON בלבד: {"same": מספר הכותרת הקודמת או 0, "new": "החידוש במשפט קצר, או null"}',
+          maxTokens: 150, model: 'claude-haiku-4-5-20251001', temperature: 0,
+        });
+      const n = v ? parseInt(v.same, 10) : 0;
+      if (n >= 1 && n <= cands.length) {
+        const orig = cands[n - 1].h;
+        if (!v.new) {
+          // One entry per station and hour on the original: "✅ גם ב…".
+          orig.alsoOn = [...(orig.alsoOn || []).filter(a => !(a.station === station && ts - a.ts < 3600000)), { station, ts }].slice(-8);
+          _save(list);
+          logger.info(`📻 headline: same story as ${orig.station} ${hhmm(orig.ts)} — "גם ב${station}", not sent`);
+          return null;
+        }
+        update = { of: orig.id, at: orig.ts, station: orig.station, what: String(v.new).substring(0, 160) };
+        logger.info(`📻 headline: update to ${orig.station} ${hhmm(orig.ts)} — ${update.what.substring(0, 60)}`);
+      }
+    }
+
     // 🎙️ No speaker in the sample: the introduction, minutes back.
     if (!speaker) {
       try {
@@ -222,6 +277,18 @@ async function onChunk({ station, text, ts = Date.now() }) {
       if (g[0]) { headline = g[0].fields.headline || headline; confirmed = g[0].confirmed || null; corrected = g[0].corrected || null; }
     } catch (_) {}
 
+    // 🔕 Kept — in the tab and the hourly summary — but not pushed to him:
+    //   bulletin  — the round-hour news repeats what is known; only a scoop (5) interrupts
+    //   published — out in the apps or groups 20+ minutes before the radio
+    //   cap       — a fifth headline inside the hour, unless it is a 5
+    let silent = null, earlier = null;
+    if (bulletin && (r.score || 0) < 5) silent = 'bulletin';
+    if (!silent) {
+      try { earlier = await require('./news-apps').publishedBefore({ headline, quote, speaker, ts }, 20); } catch (_) {}
+      if (earlier) silent = 'published';
+    }
+    if (!silent && (r.score || 0) < 5 && list.filter(h => h.sentAt && ts - h.sentAt < 3600000).length >= 4) silent = 'cap';
+
     const item = {
       id: `${ts}-${station}`.replace(/[^\w-]/g, ''),
       ...(confirmed && confirmed.length ? { confirmed } : {}),
@@ -233,12 +300,16 @@ async function onChunk({ station, text, ts = Date.now() }) {
       quote,
       score: r.score,
       key,
+      segment: { bulletin, name: seg.name, type: seg.type },
+      ...(update ? { update } : {}),
+      ...(silent ? { silent } : {}),
+      ...(earlier ? { appsSeen: { [earlier.source]: { ts: earlier.ts, text: earlier.text, leadMin: -earlier.min } } } : {}),
       // Kept so the app can open the surrounding transcript on demand.
       context: window.substring(0, 1600),
     };
     list.unshift(item);
     _save(list);
-    logger.info(`📻 HEADLINE [${station}] ${item.speaker || '?'}: ${item.headline}`);
+    logger.info(`📻 HEADLINE [${station}] ${item.speaker || '?'}: ${item.headline}${silent ? ` — not sent (${silent}${earlier ? `: ${earlier.source}, ${earlier.min} min earlier` : ''})` : ''}`);
     return item;
   } catch (e) {
     logger.warn('headline check: ' + (e.message || '').substring(0, 60));
