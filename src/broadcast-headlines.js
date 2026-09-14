@@ -194,6 +194,14 @@ async function onChunk({ station, text, ts = Date.now() }) {
       return null;
     }
 
+    // 🎙️ No speaker in the sample: the introduction, minutes back.
+    if (!speaker) {
+      try {
+        const f = await findSpeaker(station, ts, quote || headline);
+        if (f) { speaker = f.speaker; role = role || f.role; logger.info(`🎙️ headline speaker found: ${f.speaker} — "${f.evidence.substring(0, 60)}"`); }
+      } catch (_) {}
+    }
+
     // 🔎 Checked against the transcript and the apps before it reaches him.
     let confirmed = null, corrected = null;
     try {
@@ -237,6 +245,35 @@ function recent(n = 30) {
  * התמלול סביב רגע מסוים — לכפתור "פתח הקשר".
  * מחזיר את הדגימות של אותה תחנה בחלון של כמה דקות לפני ואחרי.
  */
+// 🎙️ The host introduces a guest once — "איתנו על הקו", "שלום ל…", "מצטרף
+// אלינו" — and the 55-second sample with the quote comes minutes later, so the
+// speaker was always "לא מזוהה" (14.9, 103FM 09:30). The station's last 25
+// minutes are searched for an introduction; a name only if it is said there.
+const _INTRO = /(איתנו על הקו|על הקו איתנו|איתנו עכשיו|עכשיו איתנו|מצטרף אלינו|מצטרפת אלינו|נמצא איתנו|נמצאת איתנו|איתי באולפן|איתנו באולפן|אורחנו|אורחתנו|שלום ל|בוקר טוב ל|ערב טוב ל|תודה רבה ל|תודה ל|ח"כ|ח״כ|חבר הכנסת|חברת הכנסת|השר |השרה |ראש העיר|פרופסור|ד"ר|עו"ד)/;
+async function findSpeaker(station, ts, quote) {
+  const chunks = require('./broadcast-digest').chunksBetween(ts - 25 * 60000, ts + 60000)
+    .filter(c => c.station === station && !isAd(c.text)).sort((a, b) => a.ts - b.ts);
+  const hits = [];
+  for (const c of chunks) {
+    const parts = c.text.split(/(?<=[.?!])\s+/);
+    parts.forEach((p, i) => { if (_INTRO.test(p)) hits.push(`[${new Date(c.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' })}] ${[parts[i - 1], p, parts[i + 1]].filter(Boolean).join(' ')}`); });
+  }
+  if (!hits.length) return null;
+  const r = await require('./claude').classifyJSON(
+    `קטעים מהשידור שבהם מוצג מישהו:\n${hits.slice(-8).join('\n').substring(0, 3000)}\n\nהציטוט (נאמר אחר כך): "${String(quote || '').substring(0, 300)}"`,
+    {
+      system: 'מי אמר את הציטוט? רק אם שמו נאמר בקטעים במפורש — הוצג, קיבל "שלום", או שפנו אליו בשמו — ורק אם סביר שזה הוא שמדבר בציטוט (האורח האחרון שהוצג לפניו). אל תנחש ואל תשלים מהידע שלך. ' +
+        'החזר JSON בלבד: {"speaker":"שם כפי שנאמר או null","role":"תפקיד כפי שנאמר או null","evidence":"המשפט שבו הוצג"}',
+      maxTokens: 200, model: 'claude-haiku-4-5-20251001', temperature: 0,
+    });
+  if (!r || !r.speaker) return null;
+  const norm = s => String(s || '').replace(/["'״׳]/g, '').replace(/\s+/g, ' ').trim();
+  // The code checks the name is really there.
+  const surname = norm(r.speaker).split(' ').pop();
+  if (!surname || !norm(hits.join(' ')).includes(surname)) return null;
+  return { speaker: String(r.speaker).substring(0, 60), role: r.role ? String(r.role).substring(0, 60) : null, evidence: String(r.evidence || '').substring(0, 200) };
+}
+
 function contextAround(ts, station, minutes = 12) {
   const bd = require('./broadcast-digest');
   const from = ts - minutes * 60 * 1000;
@@ -330,4 +367,4 @@ function formatExpansion(h, x) {
   return parts.join('\n');
 }
 
-module.exports = { lastKind, onChunk, recent, contextAround, isAd, expand, formatExpansion };
+module.exports = { findSpeaker, lastKind, onChunk, recent, contextAround, isAd, expand, formatExpansion };

@@ -32,8 +32,10 @@ const CRISIS_TIMEOUT_MINUTES = 60;       // auto-end crisis after 60 min of inac
 // 'דרמה' was removed on 10.9: it counted "דרמה מגזרית: חנמאל דורפמן הוריד את
 // הפיאות" — gossip — toward an emergency. It is a headline word, not a crisis.
 const DEFAULT_CRITICAL_KEYWORDS = [
-  'מיידי', 'ירי', 'התנקשות', 'פיגוע', 'חירום',
-  'מתקפה', 'הרוג', 'נפצע', 'נחטף', 'דחוף',
+  // "מיידי" and "דחוף" are in almost every news post — two false emergencies
+  // in a day (13.9, 14.9); taken out at his request.
+  'ירי', 'התנקשות', 'פיגוע', 'חירום',
+  'מתקפה', 'הרוג', 'נפצע', 'נחטף',
   'בהול', 'משבר', 'קריסה', 'הופלה',
 ];
 
