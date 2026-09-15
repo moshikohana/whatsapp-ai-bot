@@ -38,12 +38,14 @@ const _hhmm = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jer
 const _id = () => 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
 
 /** The stories of a topic, as news-apps groups them now (merges move items between stories). */
+// Sets, kept per topic: with arrays the topics list took 11s (15.9).
+const _setOf = t => { if (!t._set || t._setN !== (t.members || []).length) { Object.defineProperty(t, '_set', { value: new Set(t.members || []), writable: true, enumerable: false, configurable: true }); Object.defineProperty(t, '_setN', { value: (t.members || []).length, writable: true, enumerable: false, configurable: true }); } return t._set; };
 function _storiesOf(t, all) {
-  const mine = new Set(t.members || []);
+  const mine = _setOf(t);
   return all.filter(s => (s.memberIds || []).some(id => mine.has(id))).sort((a, b) => a.firstTs - b.firstTs);
 }
 function _topicOf(s, topics) {
-  return topics.find(t => (s.memberIds || []).some(id => (t.members || []).includes(id)));
+  return topics.find(t => { const m = _setOf(t); return (s.memberIds || []).some(id => m.has(id)); });
 }
 function _addStory(t, s) {
   const m = new Set(t.members || []);

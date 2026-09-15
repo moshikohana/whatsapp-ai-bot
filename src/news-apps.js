@@ -243,7 +243,7 @@ function _cands(pool, mine) {
     // every word and are a claim and its denial — the model decides those.
     const auto = mine.some(m => _overlap(m.text, x.text) >= 4.5 && _sameSpeaker(m.text, x.text));
     return { x, head, auto, n: Math.max(head, body) };
-  }).filter(c => c.head >= 2 || c.n >= 3).sort((a, b) => b.n - a.n);
+  }).filter(c => c.head >= 2 || c.n >= 3).sort((a, b) => b.n - a.n || (b.x.story ? 1 : 0) - (a.x.story ? 1 : 0));
 }
 // Who is talking: the words before the colon, up to the verb — "הליכוד על
 // דברי וינטר:" is the Likud, "ליברמן מגיב לידידי:" is Liberman.
@@ -415,12 +415,16 @@ async function _drain() {
       // the other — the same Kushner story twice on the home screen (13.9).
       const near = all.filter(x => x.id !== p.id && !x.skip && !(p.part && x.part === p.part) && Math.abs(p.ts - x.ts) < 3 * 3600000);
       // The same post word for word — no model needed.
+      // Copies already in a story first: five identical "נתניהו וכ״ץ: צה״ל תקף את
+      // מפקד חטיבת רפיח" arrived within a minute and each joined another copy not
+      // matched yet — three stories for one statement (15.9, 22:44).
+      near.sort((a, b) => (b.story ? 1 : 0) - (a.story ? 1 : 0));
       const twin = near.find(x => _sharedRun(x, p, all));
       let story = twin ? (twin.story || twin.id) : null;
       const cands = story ? [] : _cands(near, [p]).slice(0, 3);
       for (const c of cands) {
         // The same channel twice (an update, a second post) is asked about too, when close enough.
-        if (c.auto || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(_body(_orig(c.x)).substring(0, 400), _body(_orig(p)).substring(0, 400)))) { story = c.x.story || c.x.id; break; }
+        if (c.auto || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(`${c.x.text} — ${_body(_orig(c.x)).substring(0, 200)}`, `${p.text} — ${_body(_orig(p)).substring(0, 200)}`))) { story = c.x.story || c.x.id; break; }
       }
       const l2 = _load(); const pp = l2.find(x => x.id === p.id);
       if (pp) {
@@ -447,12 +451,21 @@ async function _drain() {
       // One of its posts is word for word one of theirs — the same story.
       const twin = others.find(x => mine.some(m => _sharedRun(x, m, all)));
       let target = twin ? twin.story : null;
-      const cands = target ? [] : _cands(others, mine);
+      // Whole stories merge by their headlines only. The long posts put Winter's
+      // speech ("…לא ציטוטים של חברי קבינט על חיסול של סינוואר") next to the Rafah
+      // brigade strike, the model said "same", and merges chained into one story
+      // of 192 reports (15.9, 22:49).
+      const cands = target ? [] : _cands(others, mine).filter(c => c.head >= 2);
       const asked = new Set();
       for (const c of cands) {
         if (asked.has(c.x.story) || asked.size >= 3) continue;
         asked.add(c.x.story);
-        if (c.auto || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(_body(_orig(c.x)).substring(0, 400), _body(_orig(p)).substring(0, 400)))) { target = c.x.story; break; }
+        if (c.auto || ((c.x.source !== p.source || c.head >= 3) && await _sameApps(c.x.text, p.text))) { target = c.x.story; break; }
+      }
+      // A big story grows only by the same post word for word.
+      if (target && !twin && mine.length + all.filter(x => x.story === target).length > 50) {
+        logger.info(`🔗 merge refused (too big without a shared post): "${p.text.substring(0, 40)}" → ${target}`);
+        target = null;
       }
       const l2 = _load();
       for (const x of l2) {
