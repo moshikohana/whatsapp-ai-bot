@@ -1007,6 +1007,23 @@ function attach(app, deps = {}) {
       res.json({ ok: true, stories: list.map(s => ({ ...s, hot: hotIds.has(s.id) })) });
     } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
   });
+  // ── 🌐 תרגום לעברית — פוסט בערבית, בפרסית או באנגלית, בלחיצה ──
+  const _trCache = new Map();
+  app.post('/api/jarvis/translate', guard, async (req, res) => {
+    try {
+      const text = String((req.body || {}).text || '').trim().substring(0, 3000);
+      if (!text) return res.status(400).json({ error: 'אין טקסט' });
+      if (_trCache.has(text)) return res.json({ ok: true, text: _trCache.get(text) });
+      const r = await require('./claude').classifyJSON(text, {
+        system: 'תרגם לעברית פשוטה ונאמנה, בלי להוסיף ובלי להשמיט. שמות אנשים ומקומות — בכתיב המקובל בעברית. מונחים צבאיים בדיוק (غارة = תקיפה אווירית, לא גדוד). החזר JSON בלבד: {"text":"התרגום"}',
+        maxTokens: 1500, model: 'claude-sonnet-4-6', temperature: 0,
+      });
+      if (!r || !r.text) return res.status(502).json({ error: 'התרגום לא הצליח' });
+      _trCache.set(text, r.text); if (_trCache.size > 300) _trCache.delete([..._trCache.keys()][0]);
+      res.json({ ok: true, text: r.text });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+
   // ── 🧵 נושאים — עלילה אחת מעל הידיעות ──
   app.get('/api/jarvis/news/topics', guard, (req, res) => {
     try { res.json({ ok: true, topics: require('./news-topics').list() }); }
@@ -1090,13 +1107,19 @@ function attach(app, deps = {}) {
       const key = `${s.id}|${s.members.length}|${(s.verify && s.verify.sources || []).length}`;
       if (_briefCache.has(key)) return res.json({ ok: true, text: _briefCache.get(key) });
       const material = {
-        pushes: s.members.map(m => ({ app: m.source, time: new Date(m.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' }), text: m.text, radio: m.radio })),
+        // Who wrote it inside a group ("*מיכאל שמש:*") — without it the brief
+        // gave Shemesh's 18:32 post to Amit Segal, another source of the story (15.9).
+        pushes: s.members.map(m => {
+          const au = String(m.full || '').match(/^\s*\*?([^*:\n]{2,30}):\*?/);
+          return { app: m.source, author: au && au[1].trim() !== m.source ? au[1].trim() : null, time: new Date(m.ts).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' }), text: m.text, radio: m.radio };
+        }),
         alsoReported: (s.verify && s.verify.sources) || [],
         knownBefore: s.prior && s.prior.status === 'known' ? { radio: s.prior.radio, groups: s.prior.groups, apps: s.prior.apps } : null,
       };
       const r = await require('./claude').classifyJSON(JSON.stringify(material).substring(0, 12000), {
         system: 'אתה עורך חדשות. כתוב למושיקו בעברית פשוטה 3–5 משפטים: מה ידוע עד עכשיו על הידיעה, מי דיווח ומתי, מה אומת במקור נוסף ומה עדיין רק מפי מקור אחד, ואם יש סתירות בין המקורות. ' +
-          'בלי להמציא דבר שאינו בחומר. החזר JSON בלבד: {"text":"..."}',
+          'בלי להמציא דבר שאינו בחומר. ייחס כל דיווח רק למי שכתוב לידו באותה שורה — author אם יש, אחרת app — ובשעה שלה; אל תעביר דיווח ממקור אחד לאחר. ' +
+          'החזר JSON בלבד: {"text":"..."}',
         maxTokens: 600,
       });
       const text = (r && r.text) || 'לא הצלחתי לסכם את הידיעה.';

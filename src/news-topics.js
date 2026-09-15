@@ -173,7 +173,11 @@ const WRITE_SYSTEM = `אתה עורך חדשות. לפניך פוסטים ממק
 - framing: איך מקורות שונים הציגו את זה — רק כשזה ניכר בפוסטים עצמם. לכל אחד: side (למשל "ערוצי ימין", "ערוץ 14"), how (משפט אחד), p — הפוסטים שמראים את זה, quote — משפט מדויק מאחד מהם שמדגים את ההצגה. בלי ציטוט כזה — אל תכתוב. אם אין הבדל ניכר — מערך ריק.
 - open: 1–3 שאלות פתוחות או מה צפוי, רק ממה שעולה מהפוסטים (למשל "האם הליכוד יגיש את התביעה?").
 ⚠️ רק מה שכתוב בפוסטים. אל תוסיף שמות, תארים, מספרים, מקומות או מניעים שאין בהם. תארים בדיוק כמו בפוסט. אל תייחס דבר למקור שלא כתב אותו.
-החזר JSON בלבד: {"title":"...","summary":"...","steps":[{"p":[1],"label":"...","who":"...","what":"...","quote":"..."|null}],"framing":[{"side":"...","how":"...","p":[1],"quote":"..."}],"open":["..."]}`;
+⚠️ הכל בעברית — title, summary, who, what, how, open — גם כשהפוסטים באנגלית, בערבית או בפרסית (תרגם). ציטוט מפוסט בשפה זרה: quote במקור, מילה במילה, ו-quoteHe — התרגום שלו לעברית.
+⚠️ שלב אחד לכל פוסט: שני שלבים שמבוססים על אותו פוסט הם שלב אחד.
+החזר JSON בלבד: {"title":"...","summary":"...","steps":[{"p":[1],"label":"...","who":"...","what":"...","quote":"..."|null,"quoteHe":"..."|null}],"framing":[{"side":"...","how":"...","p":[1],"quote":"..."}],"open":["..."]}`;
+// Share of Hebrew letters — a post in English or Arabic has no Hebrew words to check against.
+const _heb = s => { const t = String(s || '').replace(/[^\p{L}]/gu, ''); return t.length ? (t.match(/[֐-׿]/g) || []).length / t.length : 0; };
 
 const _qn = s => String(s || '').replace(/["'״׳“”„`]/g, '').replace(/[.,!?:;()\-–—*_]/g, ' ').replace(/\s+/g, ' ').trim();
 /** The post (among these) that has the quote word for word. */
@@ -237,17 +241,28 @@ async function write(id, { force = false } = {}) {
     }
     const base = own.length ? own : (qHit ? [qHit] : []);
     if (!base.length) { logger.info(`🧵 step dropped (no posts cited): "${String(st.what).substring(0, 50)}"`); continue; }
-    draft.push({ st, own: base, quote, qHit, miss: g.missingWords(`${st.who || ''} ${st.what || ''}`, base.map(p => p.text).join('\n')) });
+    // One step per post (Beit She'an, 15.9: "אמירה" and "התפתחות" at 21:12 from one message).
+    const same = draft.find(d => d.own.some(p => base.includes(p)));
+    if (same) {
+      if (!same.quote && quote) { same.quote = quote; same.qHit = qHit; same.st.quoteHe = st.quoteHe; }
+      for (const p of base) if (!same.own.includes(p)) same.own.push(p);
+      logger.info(`🧵 step joined (same post): "${String(st.what).substring(0, 40)}"`);
+      continue;
+    }
+    // Hebrew words are checked only against Hebrew posts; a translated step rests on its quote.
+    const hebPosts = base.filter(p => _heb(p.text) >= 0.5);
+    draft.push({ st, own: base, quote, qHit, miss: hebPosts.length ? g.missingWords(`${st.who || ''} ${st.what || ''}`, hebPosts.map(p => p.text).join('\n')) : [] });
   }
   // 2. Words the posts do not have — the step is written again from its posts
   //    (dropping it lost the Likud's "why only now?" in the first trial).
   const flagged = draft.filter(d => d.miss.length >= 3);
-  const sumMiss = g.missingWords(String(r.summary || ''), corpus);
+  const hebCorpus = posts.filter(p => _heb(p.text) >= 0.5).map(p => p.text).join('\n');
+  const sumMiss = hebCorpus ? g.missingWords(String(r.summary || ''), hebCorpus).filter(w => _heb(w) > 0.5) : [];
   if (flagged.length || sumMiss.length >= 4) {
     const items = flagged.map((d, i) => `${i + 1}. פוסטים:\n${d.own.map(p => `   ${p.source}: ${p.text.replace(/\s+/g, ' ').substring(0, 500)}`).join('\n')}\n   who: ${d.st.who}\n   what: ${d.st.what}\n   מילים שאין בפוסטים: ${d.miss.join(', ')}`);
     if (sumMiss.length >= 4) items.push(`S. הפוסטים: כל האמורים למעלה\n   summary: ${r.summary}\n   מילים שאין בפוסטים: ${sumMiss.join(', ')}`);
     const fx = await require('./claude').classifyJSON(items.join('\n\n'), {
-      system: 'לכל פריט: כתוב מחדש את who ו-what (או את summary בפריט S) רק לפי הפוסטים שלו — בלי שום פרט, שם, תואר או מניע שאין בהם, במילים של הפוסט עצמו, לא בפעלים משלך ("אמר שיגיש" כשבפוסט "נגיש" — כתוב "נגיש"). החזר JSON בלבד: {"items":[{"n":מספר או "S","who":"...","what":"..."}]}',
+      system: 'לכל פריט: כתוב מחדש את who ו-what (או את summary בפריט S) רק לפי הפוסטים שלו — בלי שום פרט, שם, תואר או מניע שאין בהם, במילים של הפוסט עצמו, לא בפעלים משלך ("אמר שיגיש" כשבפוסט "נגיש" — כתוב "נגיש"). תמיד בעברית — פוסט בשפה זרה מתרגמים. החזר JSON בלבד: {"items":[{"n":מספר או "S","who":"...","what":"..."}]}',
       maxTokens: 3000, model: 'claude-sonnet-4-6', temperature: 0,
     });
     for (const f of ((fx && fx.items) || [])) {
@@ -264,6 +279,7 @@ async function write(id, { force = false } = {}) {
     steps.push({
       label: String(d.st.label || 'התפתחות').substring(0, 20), who: String(d.st.who || '').substring(0, 60), what: String(d.st.what || '').substring(0, 300),
       quote: d.quote ? d.quote.substring(0, 400) : null, quoteSrc: d.qHit ? d.qHit.source.substring(0, 60) : null,
+      quoteHe: d.quote && d.st.quoteHe && _heb(d.quote) < 0.5 ? String(d.st.quoteHe).substring(0, 400) : null,
       // When it was reported — its own posts, not the story's earliest item.
       ts: first.ts, stories: ss.map(s => s.id),
       sources: new Set(ss.flatMap(s => Object.keys(s.apps || {}))).size,
@@ -293,15 +309,26 @@ async function write(id, { force = false } = {}) {
 
 // ── API helpers ──────────────────────────────────────────────────
 function list() {
-  const all = require('./news-apps').latest(48, 3000);
+  const na = require('./news-apps');
+  const all = na.latest(48, 3000);
   const now = Date.now();
+  let hotIds = new Set();
+  try { hotIds = new Set(na.hot(12, 12).map(s => s.id)); } catch (_) {}
   return _load().topics.filter(t => !t.closed && now - (t.updated || t.created) < KEEP_H * 3600000).map(t => {
     const ss = _storiesOf(t, all);
+    // Its category: the one most of its stories have (for the filter chips).
+    const cats = {}; for (const s of ss) if (s.cat) cats[s.cat] = (cats[s.cat] || 0) + 1;
+    const cat = Object.entries(cats).sort((a, b) => b[1] - a[1])[0];
+    const newest = ss.length ? ss.slice().sort((a, b) => b.last - a.last)[0] : null;
     return {
       id: t.id, title: t.title, actors: t.actors || [], followed: !!t.followed,
       steps: ss.length, sources: new Set(ss.flatMap(s => Object.keys(s.apps || {}))).size,
       first: ss.length ? ss[0].firstTs : t.created, last: ss.length ? Math.max(...ss.map(s => s.last)) : t.updated,
-      latest: ss.length ? ss[ss.length - 1].title : null,
+      latest: newest ? newest.title : null,
+      // Who reported the newest one (he asked, 15.9): the latest source in it.
+      latestSource: newest ? (Object.entries(newest.apps || {}).sort((a, b) => b[1] - a[1])[0] || [null])[0] : null,
+      cat: cat ? cat[0] : null,
+      hot: ss.some(s => hotIds.has(s.id)) || (newest && now - newest.last < 3 * 3600000 && new Set(ss.flatMap(s => Object.keys(s.apps || {}))).size >= 15),
       written: !!t.doc, stale: !!t.doc && t.docSig !== ss.map(s => s.id + ':' + (s.memberIds || []).length).join(','),
       img: (ss.slice().reverse().find(s => s.img) || {}).img || null, video: ss.some(s => s.video),
     };
@@ -357,6 +384,7 @@ function format(res) {
     lines.push(`*${st.ts ? _hhmm(st.ts) + ' · ' : ''}${st.label}${st.who ? ' — ' + st.who : ''}*`);
     lines.push(st.what);
     if (st.quote) lines.push(`> "${st.quote}"${st.quoteSrc ? ` (${st.quoteSrc})` : ''}`);
+    if (st.quoteHe) lines.push(`🌐 ${st.quoteHe}`);
     lines.push(`_${st.sources} מקורות${st.firstSource ? ' · ראשון: ' + st.firstSource : ''}_`, '');
   }
   if (doc.framing.length) { lines.push('*איך הוצג*'); for (const f of doc.framing) lines.push(`• ${f.side}: ${f.how}`); lines.push(''); }
