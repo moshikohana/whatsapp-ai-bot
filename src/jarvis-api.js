@@ -1034,7 +1034,11 @@ function attach(app, deps = {}) {
     } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
   });
   app.post('/api/jarvis/news/topics/group', guard, async (req, res) => {
-    try { res.json({ ok: true, ...(await require('./news-topics').group()) }); }
+    try {
+      const nt = require('./news-topics');
+      const reset = req.query.reset === '1' ? nt.reset() : null;
+      res.json({ ok: true, reset, ...(await nt.group()) });
+    }
     catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
   });
 
