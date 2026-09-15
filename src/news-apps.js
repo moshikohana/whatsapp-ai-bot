@@ -540,6 +540,9 @@ function latest(hours = 12, limit = 20) {
       // The newest picture among its sources.
       img: (st.members.slice().reverse().find(m => m.img) || {}).img || null,
       video: st.members.some(m => m.video),
+      // For the app's search: every report in the story, not only the first
+      // per source — "משחררים את החסימה" sat under the headline "צומת גורלי" (15.9).
+      find: [...new Set(st.members.map(m => m.text.substring(0, 140)))].filter(t => !Object.values(texts).includes(t)).join(' · ').substring(0, 1500),
     };
   }).sort((a, b) => b.last - a.last).slice(0, limit);
 }

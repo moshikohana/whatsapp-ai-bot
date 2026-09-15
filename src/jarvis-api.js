@@ -998,7 +998,10 @@ function attach(app, deps = {}) {
     try {
       const na = require('./news-apps');
       const hours = Math.min(Math.max(parseInt(req.query.hours, 10) || 24, 1), 48);
-      const list = na.latest(hours, 120);
+      // The whole window, not the newest 120: with 40+ channels 120 was two
+      // hours, and the "24 hours" tab lost the afternoon's items (15.9).
+      // ~600 stories a day, ~80KB gzipped.
+      const list = na.latest(hours, 1500);
       require('./news-prior').peek(list); require('./news-verify').peek(list);
       const hotIds = new Set(na.hot(12, 12).map(s => s.id));
       res.json({ ok: true, stories: list.map(s => ({ ...s, hot: hotIds.has(s.id) })) });
