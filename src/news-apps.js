@@ -158,10 +158,10 @@ function tick() {
     logger.info(`📰 roundups split: ${split.length} stories`);
     for (const p of split) _queue.push({ kind: 'twin', id: p.id });
   }
-  for (const p of _load()) {
-    // 🔗 A story that is its own root, a quarter of an hour on: its twins
-    // have arrived by now. One more look, once.
-    if (!p.skip && !p.rejoin && p.story === p.id && now - p.ts > 15 * 60000 && now - p.ts < 3 * 3600000) _queue.push({ kind: 'rejoin', id: p.id });
+  // 🔗 Each story, a quarter of an hour on: its twins have arrived by now.
+  // One more look, once.
+  for (const [label, p] of _reps(_load())) {
+    if (!p.rejoin && now - p.ts > 15 * 60000 && now - p.ts < 3 * 3600000 && !_queue.some(j => j.kind === 'rejoin' && j.id === label)) _queue.push({ kind: 'rejoin', id: label });
   }
   for (const p of _load()) {
     if (p.radio || p.skip || p.part || !_isApp(p)) continue;
@@ -180,7 +180,7 @@ function onHeadline(h) {
 
 // ── התאמה ─────────────────────────────────────────────────────────
 const _queue = [];
-let _busy = false, _hourKey = 0, _checks = 0;
+let _busy = false, _hourKey = 0, _checks = 0, _bypassUntil = 0;
 
 // Shared content words; a long distinctive word ("עודפים", "ליברמן") counts
 // extra, so two good words are enough to ask the model — it has the last say.
@@ -188,6 +188,77 @@ function _overlap(a, b) {
   const x = _words(a), y = _words(b);
   let n = 0; for (const w of x) if (y.has(w)) n += w.length >= 5 ? 1.5 : 1;
   return n;
+}
+
+// 🔗 The same post, quoted by different channels: seven words in a row shared
+// by the originals. Liberman's reply to Winter (15.9, 20:37) became three rows —
+// "ממשלת המשתמטים", "תתחיל לעמוד בלחצים", "נושאים באחריות לטבח" — each channel
+// headlined another sentence of one message. Channel footers are cut first:
+// "להצטרפות לזמן ימין", "פיד ימין - The Right Way אינסטגרם" repeat in every post.
+const _FOOTER = /(https?:\/\/|chat\.whatsapp|t\.me\/|להצטרפות|הצטרפו|לשליחת חומרים|אינסטגרם|\*?עיתונאים מצייצים\*?\s*$)/;
+function _body(s) {
+  const t = String(s || '');
+  const cut = t.search(_FOOTER);
+  return (cut > 40 ? t.substring(0, cut) : t).replace(/^\s*\*[^*\n]{2,40}:\*\s*/, '');
+}
+const _orig = x => (x.full && x.full.length > (x.text || '').length ? x.full : x.text) || '';
+// Words only — "🚫 חדשות ישראל ללא צנזורה 🚫" is a footer, and emoji are not words.
+const _toks = x => _norm(_body(_orig(x))).split(' ').filter(w => /[\p{L}\p{N}]/u.test(w));
+function _sharedRun(x, y, all, n = 7) {
+  const wa = _toks(x), wb = _toks(y);
+  if (wa.length < n || wb.length < n) return false;
+  const short = wa.length <= wb.length ? wa : wb, long = short === wa ? wb : wa;
+  const grams = new Set();
+  for (let i = 0; i + n <= long.length; i++) grams.add(long.slice(i, i + n).join(' '));
+  const covered = new Array(short.length).fill(false), hits = [];
+  for (let i = 0; i + n <= short.length; i++) {
+    const g = short.slice(i, i + n), gs = g.join(' ');
+    // Real words, not "של את על" filler.
+    if (!grams.has(gs) || g.filter(w => w.length >= 3 && !STOP.has(w)).length < 4) continue;
+    hits.push(gs); for (let k = i; k < i + n; k++) covered[k] = true;
+  }
+  if (!hits.length) return false;
+  // Most of the shorter post, not one background sentence: Herzog at the
+  // judges' swearing-in opened "ברקע השקת תוכניתם של סמוטריץ' ורוטמן…", which
+  // is not the Religious Zionism plan story; nor is an interviewer's line
+  // ("לפרופ' משה כהן אליה וד"ר יעקב בן שמש") shared by two interviews.
+  if (covered.filter(Boolean).length / short.length < 0.35) return false;
+  // A channel's signature is in its other posts too — that is not the same story.
+  const others = all.filter(o => o.id !== x.id && o.id !== y.id && (o.source === x.source || o.source === y.source)
+    && Math.abs(o.ts - y.ts) < 24 * 3600000 && o.story !== (x.story || x.id) && o.story !== (y.story || y.id));
+  return hits.some(gs => !others.some(o => _toks(o).join(' ').includes(gs)));
+}
+
+// Who to ask the model about. The headlines decide alone only when they are
+// close (head ≥ 4.5). The original posts only put a candidate in front of the
+// model: two long posts share "נתניהו", "ממשלה", "ליברמן" by the dozen, and
+// letting that merge on its own made one story of 158 reports — Winter, Malaysia
+// and Shaked together (15.9, 21:02).
+function _cands(pool, mine) {
+  return pool.map(x => {
+    const head = Math.max(...mine.map(m => _overlap(m.text, x.text)));
+    const body = Math.max(...mine.map(m => _overlap(_body(_orig(m)).substring(0, 300), _body(_orig(x)).substring(0, 300)))) * 0.5;
+    // Close headlines merge alone only when the same one is talking: "וינטר:
+    // הליכוד שלח חוקרים" and "עמך ישראל: וינטר לא אמר שהליכוד שלח חוקרים" share
+    // every word and are a claim and its denial — the model decides those.
+    const auto = mine.some(m => _overlap(m.text, x.text) >= 4.5 && _sameSpeaker(m.text, x.text));
+    return { x, head, auto, n: Math.max(head, body) };
+  }).filter(c => c.head >= 2 || c.n >= 3).sort((a, b) => b.n - a.n);
+}
+// Who is talking: the words before the colon, up to the verb — "הליכוד על
+// דברי וינטר:" is the Likud, "ליברמן מגיב לידידי:" is Liberman.
+function _speaker(t) {
+  const m = String(t || '').match(/^([^:"״]{2,40}):/);
+  if (!m) return null;
+  const head = m[1].split(/\s(?:על|נגד|מגיב|מגיבה|מגיבים|משיב|משיבה|משיבים|תוקף|תוקפת|תוקפים|מבהיר|מבהירה|מבהירים|טוען|טוענת|טוענים|בתגובה|אומר|אומרת|מאשים|מאשימה)(?=\s|$)/)[0];
+  const w = _words(head);
+  return w.size ? w : null;
+}
+function _sameSpeaker(a, b) {
+  const x = _speaker(a), y = _speaker(b);
+  if (!x && !y) return true;
+  if (!x || !y) return false;
+  return [...x].some(w => y.has(w));
 }
 
 /**
@@ -198,7 +269,7 @@ function _overlap(a, b) {
 async function _sameApps(a, b) {
   const hk = Math.floor(Date.now() / 3600000);
   if (hk !== _hourKey) { _hourKey = hk; _checks = 0; }
-  if (_checks >= MAX_CHECKS_PER_HOUR) return false;
+  if (_checks >= MAX_CHECKS_PER_HOUR && Date.now() > _bypassUntil) return false;
   _checks++;
   const r = await require('./claude').classifyJSON(`התראה א:
 "${a}"
@@ -208,6 +279,8 @@ async function _sameApps(a, b) {
     system: 'שתי התראות מאפליקציות חדשות. האם הן מדווחות על אותה ידיעה — אותו אירוע או אותה אמירה, גם אם בניסוח אחר או עם פרטים נוספים? ' +
       'ערוצים שונים מתארים אותו אירוע אחרת: "פלסטינים" מול "מחבלים", "נהרג" מול "אותר ללא רוח חיים", "הושעה" מול "נעצר" — זו אותה ידיעה. ' +
       'גם עדכון על אותו אירוע (נמצא, נעצר, מת מפצעיו, פרט חדש) הוא אותה ידיעה. ' +
+      'גם שני ציטוטים שונים מאותה הודעה כתובה או תגובה אחת של אותו אדם — אותה ידיעה ("ליברמן: ממשלת המשתמטים לא הכריעה" ו"ליברמן לוינטר: תתחיל לעמוד בלחצים", מאותה תגובה). ' +
+      'אבל אמירות על נושאים שונים באותו נאום או ראיון — ידיעות נפרדות ("וינטר: ליברמן מטעה את בוחריו" ו"וינטר: הליכוד שלח חוקרים פרטיים"). ותגובה של אדם אחר — ידיעה נפרדת. ' +
       'לא מספיק אותו נושא כללי (שני אירועים שונים באותו אזור או באותה מדינה). החזר JSON בלבד: {"same": true|false}',
     maxTokens: 30, model: 'claude-haiku-4-5-20251001',
   });
@@ -340,37 +413,51 @@ async function _drain() {
       // Either side of it in time: a WhatsApp post stamped 17:42:43 was stored
       // after Kan's push of 17:42:45, and "earlier only" kept each from seeing
       // the other — the same Kushner story twice on the home screen (13.9).
-      const cands = all.filter(x => x.id !== p.id && !x.skip && !(p.part && x.part === p.part) && Math.abs(p.ts - x.ts) < 3 * 3600000)
-        .map(x => ({ x, n: _overlap(x.text, p.text) })).filter(c => c.n >= 2).sort((a, b) => b.n - a.n).slice(0, 3);
-      let story = null;
+      const near = all.filter(x => x.id !== p.id && !x.skip && !(p.part && x.part === p.part) && Math.abs(p.ts - x.ts) < 3 * 3600000);
+      // The same post word for word — no model needed.
+      const twin = near.find(x => _sharedRun(x, p, all));
+      let story = twin ? (twin.story || twin.id) : null;
+      const cands = story ? [] : _cands(near, [p]).slice(0, 3);
       for (const c of cands) {
         // The same channel twice (an update, a second post) is asked about too, when close enough.
-        if (c.n >= 4.5 || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(c.x.text, p.text))) { story = c.x.story || c.x.id; break; }
+        if (c.auto || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(_body(_orig(c.x)).substring(0, 400), _body(_orig(p)).substring(0, 400)))) { story = c.x.story || c.x.id; break; }
       }
       const l2 = _load(); const pp = l2.find(x => x.id === p.id);
-      if (pp) { pp.story = story || pp.id; _save(l2); }
+      if (pp) {
+        pp.story = story || pp.id;
+        // The item it joined, not matched yet itself, is that story's root now.
+        // Left alone it could move on to another story and leave its id behind
+        // as a label with no root — and no second look ever ran on those
+        // (Liberman's reply, 15.9: three rows for one message).
+        const root = story && l2.find(x => x.id === story && !x.story);
+        if (root) root.story = root.id;
+        _save(l2);
+      }
       if (story) logger.info(`📲 ${p.source} = same story as earlier push: "${p.text.substring(0, 40)}"`);
       return;
     }
     if (job.kind === 'rejoin') {
+      // By the story's label: its root, or the earliest item still under it.
       const all = _load();
-      const p = all.find(x => x.id === job.id);
-      if (!p || p.rejoin || p.story !== p.id) return;
-      const mine = all.filter(x => x.story === p.id);
-      const cands = all.filter(x => !x.skip && x.story && x.story !== p.id && Math.abs(p.ts - x.ts) < 3 * 3600000)
-        .map(x => ({ x, n: Math.max(...mine.map(m => _overlap(m.text, x.text))) }))
-        .filter(c => c.n >= 2).sort((a, b) => b.n - a.n);
-      let target = null;
+      const label = job.id;
+      const mine = all.filter(x => x.story === label);
+      const p = _reps(mine).get(label);
+      if (!p || p.rejoin) return;
+      const others = all.filter(x => !x.skip && x.story && x.story !== label && Math.abs(p.ts - x.ts) < 3 * 3600000);
+      // One of its posts is word for word one of theirs — the same story.
+      const twin = others.find(x => mine.some(m => _sharedRun(x, m, all)));
+      let target = twin ? twin.story : null;
+      const cands = target ? [] : _cands(others, mine);
       const asked = new Set();
       for (const c of cands) {
         if (asked.has(c.x.story) || asked.size >= 3) continue;
         asked.add(c.x.story);
-        if (c.n >= 4.5 || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(c.x.text, p.text))) { target = c.x.story; break; }
+        if (c.auto || ((c.x.source !== p.source || c.n >= 3) && await _sameApps(_body(_orig(c.x)).substring(0, 400), _body(_orig(p)).substring(0, 400)))) { target = c.x.story; break; }
       }
       const l2 = _load();
       for (const x of l2) {
         if (x.id === p.id) x.rejoin = 1;
-        if (target && x.story === p.id) x.story = target;
+        if (target && x.story === label) x.story = target;
       }
       _save(l2);
       if (target) logger.info(`🔗 story merged: "${p.text.substring(0, 40)}" (${mine.length}) → ${target}`);
@@ -661,12 +748,51 @@ function pushesBetween(from, to) {
  * ידיעה אחת במלואה — כל התראה שנשלחה עליה, מכל אפליקציה, עם הטקסט המלא,
  * ומתי נשמעה ברדיו. זה מה שנפתח כשלוחצים על כותרת.
  */
+/**
+ * 🩹 פירוק ומיזוג מחדש — for stories a rejoin merged in the last hours (the
+ * over-merge of 15.9, 21:02). Their items lose their story and are matched
+ * again, one by one, with the current rules; the hourly model cap is lifted
+ * for an hour so the rematch does not leave them as single rows.
+ */
+function repairMerges(hours = 10, { dry = false } = {}) {
+  const now = Date.now();
+  const l = _load();
+  const roots = new Set(l.filter(x => x.rejoin && x.story && x.story !== x.id && now - x.ts < hours * 3600000).map(x => x.story));
+  const reset = l.filter(x => !x.skip && roots.has(x.story) && now - x.ts < (hours + 3) * 3600000);
+  if (dry) return { stories: roots.size, items: reset.length };
+  const ids = new Set(reset.map(x => x.id));
+  for (const x of l) if (ids.has(x.id)) { delete x.story; delete x.rejoin; }
+  _save(l);
+  _bypassUntil = now + 3600000;
+  for (const x of reset.sort((a, b) => a.ts - b.ts)) _queue.push({ kind: 'twin', id: x.id });
+  _drain();
+  logger.info(`🩹 repair: ${reset.length} items from ${roots.size} merged stories — matching again`);
+  return { stories: roots.size, items: reset.length };
+}
+
 /** 🔗 מיזוג עכשיו — לסיפורים בודדים מהשעות האחרונות (בלי לחכות לסבב). */
 async function rejoinNow(hours = 3) {
   const now = Date.now();
-  for (const p of _load()) if (!p.skip && p.story === p.id && now - p.ts < hours * 3600000) { delete p.rejoin; _queue.push({ kind: 'rejoin', id: p.id }); }
-  const l = _load(); for (const p of l) if (p.story === p.id && now - p.ts < hours * 3600000) delete p.rejoin; _save(l);
+  const l = _load();
+  for (const [label, p] of _reps(l)) {
+    if (now - p.ts >= hours * 3600000) continue;
+    delete p.rejoin;
+    if (!_queue.some(j => j.kind === 'rejoin' && j.id === label)) _queue.push({ kind: 'rejoin', id: label });
+  }
+  _save(l);
   _drain();
+}
+
+// One item stands for each story: its root, or — when the root moved on to
+// another story and left its label behind — the earliest item still under it.
+function _reps(list) {
+  const m = new Map();
+  for (const x of list) {
+    if (x.skip || !x.story) continue;
+    const r = m.get(x.story);
+    if (!r || x.id === x.story || (r.id !== r.story && x.ts < r.ts)) m.set(x.story, x);
+  }
+  return m;
 }
 
 function story(id) {
@@ -757,4 +883,4 @@ function setImg(id, img) {
 
 module.exports = {
   fixRole,
-  item, setVideo, catOf: _catOf, publishedBefore, rejoinNow, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };
+  item, setVideo, catOf: _catOf, publishedBefore, rejoinNow, repairMerges, setLink, recentChannelItems, setImg, recheckRadio, addMany, onHeadline, recent, stats, stories, latest, hot, duel, idle, tick, pushesBetween, story, overlap: _overlap };

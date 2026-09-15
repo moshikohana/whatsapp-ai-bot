@@ -1007,6 +1007,54 @@ function attach(app, deps = {}) {
       res.json({ ok: true, stories: list.map(s => ({ ...s, hot: hotIds.has(s.id) })) });
     } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
   });
+  // ── 🧵 נושאים — עלילה אחת מעל הידיעות ──
+  app.get('/api/jarvis/news/topics', guard, (req, res) => {
+    try { res.json({ ok: true, topics: require('./news-topics').list() }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  // The story itself is written here — only when he opens the topic.
+  app.get('/api/jarvis/news/topic', guard, async (req, res) => {
+    try {
+      const r = await require('./news-topics').write(String(req.query.id || ''), { force: req.query.force === '1' });
+      if (!r) return res.status(404).json({ error: 'הנושא לא נמצא' });
+      const t = require('./news-topics').list().find(x => x.id === r.topic.id);
+      res.json({ ok: true, topic: t || { id: r.topic.id, title: r.topic.title, followed: !!r.topic.followed }, doc: r.doc, error: r.error || null,
+        stories: r.stories.map(s => ({ id: s.id, title: s.title, firstTs: s.firstTs, last: s.last, sources: Object.keys(s.apps || {}).length, firstAny: s.firstAny || null, img: s.img || null, video: !!s.video })) });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.post('/api/jarvis/news/topic/follow', guard, (req, res) => {
+    const ok = require('./news-topics').follow(String(req.query.id || ''), req.query.on === '1');
+    res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'הנושא לא נמצא' });
+  });
+  app.post('/api/jarvis/news/topic/build', guard, async (req, res) => {
+    try {
+      const t = await require('./news-topics').build(String(req.query.story || ''));
+      if (!t) return res.status(404).json({ error: 'הידיעה לא נמצאה' });
+      res.json({ ok: true, id: t.id, title: t.title });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  app.post('/api/jarvis/news/topics/group', guard, async (req, res) => {
+    try { res.json({ ok: true, ...(await require('./news-topics').group()) }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+
+  // 🩹 Take apart stories a rejoin merged, and match their items again.
+  app.post('/api/jarvis/news/repair', guard, (req, res) => {
+    try {
+      const hours = Math.min(Math.max(parseInt(req.query.hours, 10) || 10, 1), 24);
+      res.json({ ok: true, ...require('./news-apps').repairMerges(hours, { dry: req.query.dry === '1' }) });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
+  // 🔗 Merge again the stories of the last hours — after the matching improves.
+  app.post('/api/jarvis/news/rejoin', guard, async (req, res) => {
+    try {
+      const hours = Math.min(Math.max(parseInt(req.query.hours, 10) || 3, 1), 12);
+      const na = require('./news-apps');
+      // Runs in the background (a model check per candidate); the count shows progress.
+      na.rejoinNow(hours).catch(() => {});
+      res.json({ ok: true, stories: na.latest(hours, 3000).length });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 150) }); }
+  });
   app.get('/api/jarvis/news/story', guard, async (req, res) => {
     try {
       const na = require('./news-apps');

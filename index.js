@@ -4765,6 +4765,30 @@ client.on('message_create', async (msg) => {
       return;
     }
 
+    // ── 🧵 "נושאים" / "נושא וינטר" — the story behind a string of news items ──
+    if (/^נושאים[.!?]?$/.test(rawBody.trim())) {
+      const _hc = await client.getChatById(OWNER_ID);
+      const ts = require('./src/news-topics').list().slice(0, 10);
+      await botSend(_hc, ts.length
+        ? '🧵 *נושאים פתוחים*\n\n' + ts.map((t, i) => `${i + 1}. ${t.followed ? '🔔 ' : ''}*${t.title}*\n   ${t.steps} ידיעות · ${t.sources} מקורות · עדכון ${new Date(t.last).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' })}`).join('\n') + '\n\nלסיפור המלא: "נושא <מספר>" או "נושא <שם>"'
+        : 'אין כרגע נושאים פתוחים (עלילה של שתי ידיעות ומעלה).');
+      return;
+    }
+    {
+      const _tm = rawBody.trim().match(/^נושא\s+(.{1,60}?)[.!?]?$/);
+      if (_tm) {
+        const nt = require('./src/news-topics');
+        const _hc = await client.getChatById(OWNER_ID);
+        const n = parseInt(_tm[1], 10);
+        const t = n >= 1 && n <= 10 && /^\d+$/.test(_tm[1].trim()) ? nt.list()[n - 1] : nt.find(_tm[1]);
+        if (!t) { await botSend(_hc, `לא מצאתי נושא פתוח על "${_tm[1]}". "נושאים" — לרשימה.`); return; }
+        try { await msg.react('🧵'); } catch (_) {}
+        try { await botSend(_hc, nt.format(await nt.write(t.id))); }
+        catch (e) { await botSend(_hc, '❌ הכתיבה נכשלה — נסה שוב בעוד רגע.'); }
+        return;
+      }
+    }
+
     // ── "הרחב" on a radio headline ───────────────────────────────
     // The headline arrives as one line. "הרחב" answers with who said what,
     // from the transcript around it. Replying to a specific headline expands
@@ -9034,6 +9058,7 @@ setInterval(async () => {
 let _digestHour = null;
 // 📡 WhatsApp/Telegram news channels as news sources (see news-feed).
 try { require('./src/news-feed').start(); } catch (e) { logger.warn('news-feed: ' + e.message); }
+try { require('./src/news-topics').start(); } catch (e) { logger.warn('news-topics: ' + e.message); }
 // 🗞️ The round-hour bulletins — four minutes from each news station.
 try { require('./src/news-bulletins').start(); } catch (e) { logger.warn('news-bulletins: ' + e.message); }
 setInterval(async () => {
