@@ -153,6 +153,8 @@ function onWhatsApp({ cid, body, ts, media, video }) {
 const SYSTEM = `אתה עורך חדשות. לפניך פוסטים מערוצי חדשות וקבוצות עדכונים בוואטסאפ ובטלגרם.
 לכל פוסט החלט: האם הוא ידיעה — דיווח על אירוע, אמירה של אדם, החלטה, נתון או עובדה חדשה?
 לא ידיעה: דעה או פרשנות בלבד, פרסומת, ברכה, הזמנה להצטרף, בדיחה, שאלה, שיחה, קישור בלי תוכן, סקר "מה דעתכם".
+✅ כן ידיעה — הודעה פוליטית: אמירה של ראש הממשלה, שר, ח"כ או מפלגה (גם כשהיא תוקפת או מאשימה: "נתניהו: איזו בושה, יאיר גולן לא מגנה את הסרט"), הודעת דובר (דובר צה"ל, דובר משרד), וסרטון או מסר של מפלגה או קמפיין ("סרטון הציונות הדתית: משחררים את החסימה של שופט בג"ץ") — זו לא "פרסומת". הכותרת: מי אמר מה.
+✅ כן ידיעה — גם סיפור קל, ויראלי או מגמתי על פוליטיקאי או מפלגה: רגע מביך, תגובת קהל, סרטון מאירוע, סקר. גם כשזה רק כותרת-טיזר לסרטון ("זה מה שקרה כש…") ואחריה "הצטרפו לעדכונים" — הכותרת והטיזר הם הידיעה, הקישור לא הופך אותה לפרסומת. דוגמה: "הצעירים סולדים מבנט • זה מה שקרה כשהאבא המבוגר החמיא לנפתלי" → news:true, "סרטון: צעירים סולדים מבנט כשאב מבוגר מחמיא לו", cat "פוליטיקה".
 ✅ כן ידיעה, גם כשהפוסט כתוב בכעס או עם דעה: טענה או חשיפה שכלי תקשורת פרסם מידע שגוי, הכחשה של דיווח, פרסום שנמחק או תוקן, עימות סביב דיווח — בעיקר בענייני ביטחון, יהודה ושומרון ופנים ישראל. פוסט שמשלב דעה עם עובדה חדשה הוא ידיעה, והכותרת לפי העובדה (למשל: "אבו עלי: ערוץ 13 פרסם בטעות שמתנחלים הציתו שדות — בפועל כיבו שריפה; הציוץ נמחק").
 cat — קטגוריה: "ביטחון" (צבא, מלחמה, פיגועים, יו"ש, ביטחון פנים), "פנים ישראל" (חברה, משטרה, משפט, תקשורת בישראל), "פוליטיקה", "חוץ", "אחר".
 לידיעה — כתוב כותרת של משפט אחד בעברית, נאמנה לפוסט, בלי להוסיף פרט שאין בו.
@@ -162,10 +164,19 @@ cat — קטגוריה: "ביטחון" (צבא, מלחמה, פיגועים, יו
 החזר JSON בלבד: {"items":[{"n":מספר הפוסט,"news":true|false,"headline":"כותרת או null","cat":"ביטחון|פנים ישראל|פוליטיקה|חוץ|אחר"}]}`;
 
 let _busy = false;
+// When the model cannot be reached (no credit, 15.9 from noon), the batch goes
+// back to the queue and the feed waits 5 minutes — posts used to be dropped,
+// and the Netanyahu statement of 15:19 with them. A post waits up to 12 hours.
+let _pauseUntil = 0;
+const _LAST_FILE = path.join(__dirname, '..', 'data', 'news-feed-last.json');
 async function _flush() {
-  if (_busy || !_pending.length) return;
+  if (_busy || !_pending.length || Date.now() < _pauseUntil) return;
   _busy = true;
   try {
+    // New posts first: after an outage the catch-up put 221 old posts in the
+    // queue, and a post from a minute ago waited behind all of them (15.9).
+    const fresh = p => Date.now() - (p.ts || 0) < 20 * 60000 ? 0 : 1;
+    _pending.sort((a, b) => fresh(a) - fresh(b));
     const batch = _pending.splice(0, 25);
     // Each post with the one its channel sent just before: "כך נראה הרכב
     // שהותקף" means nothing alone (13.9 it became "Abu Ali's car was hit").
@@ -208,13 +219,25 @@ async function _flush() {
         ...(p.video ? { video: p.video } : {}),
       });
     }
-    if (!r) logger.warn(`📡 feed: classification failed — ${batch.length} posts not judged`);
+    if (!r) {
+      const back = batch.filter(p => Date.now() - (p.ts || 0) < 12 * 3600000);
+      _pending.unshift(...back);
+      if (_pending.length > 1500) _pending.splice(1500);
+      _pauseUntil = Date.now() + 5 * 60000;
+      logger.warn(`📡 feed: classification failed — ${back.length} posts back in the queue, retry in 5 min (${_pending.length} waiting)`);
+    } else {
+      try { fs.writeFileSync(_LAST_FILE, JSON.stringify({ ts: Date.now() })); } catch (_) {}
+    }
     if (out.length) {
       const added = require('./news-apps').addMany(out);
       logger.info(`📡 feed: ${batch.length} posts → ${out.length} news (${added} new) · ${out.filter(o => o.reporter).map(o => o.source).join(', ')}`);
     } else if (r) logger.info(`📡 feed: ${batch.length} posts → no news · ${[...new Set(batch.map(p => p.source))].join(', ').substring(0, 80)}`);
   } catch (e) { logger.warn('📡 feed: ' + (e.message || '').substring(0, 70)); }
-  finally { _busy = false; }
+  finally {
+    _busy = false;
+    // A backlog is worked through every few seconds, not one batch per 45.
+    if (_pending.length && Date.now() >= _pauseUntil) setTimeout(_flush, 5000);
+  }
 }
 
 // ── Telegram: live updates from the channels, plus a poll of the reporters ──
@@ -249,20 +272,50 @@ async function _hookTelegram() {
 
 // Updates can be missed across reconnects; the reporters matter most, so
 // their last posts are read directly every ten minutes.
-async function _pollReporters() {
+// 📡 Telegram, read directly. The live updates delivered 6 of the 44 channels
+// in a week (15.9) — 38 had not one item: אבו עלי אקספרס, צה"ל, ערוץ 14,
+// מוריה אסרף… Every run reads the reporters and the next 8 channels, so each
+// channel is read about every 10 minutes without a burst of calls.
+let _tgCursor = 0;
+const _tgLastId = new Map();
+async function _pollChannels() {
   try {
     const tg = require('./telegram');
     if (!tg.isConfigured()) return;
+    const c = await tg.getClient();
+    if (!c) return;
+    const { Api } = require('telegram');
+    const all = [..._sources().tg.entries()];
+    const reps = all.filter(([, n]) => isReporter(n));
+    const rest = all.filter(([, n]) => !isReporter(n));
+    const slice = [];
+    for (let i = 0; i < Math.min(8, rest.length); i++) slice.push(rest[(_tgCursor + i) % rest.length]);
+    _tgCursor = rest.length ? (_tgCursor + 8) % rest.length : 0;
     const since = Date.now() - 3 * 3600000;
-    for (const [chId, name] of _sources().tg) {
-      if (!isReporter(name)) continue;
-      const r = await tg.readMessages({ chatName: name, limit: 8 }).catch(() => null);
-      for (const m of (r && r.messages) || []) {
-        const ts = (m.timestamp || 0) * 1000;
-        if (ts < since || !m.body || m.body.length < MIN_LEN) continue;
-        _push({ via: 'tg', source: name, text: m.body.substring(0, 1500), ts, link: m.id ? `https://t.me/c/${chId}/${m.id}` : null });
+    let n = 0;
+    for (const [chId, name] of [...reps, ...slice]) {
+      try {
+        const peer = new Api.PeerChannel({ channelId: BigInt(chId) });
+        const msgs = await Promise.race([c.getMessages(peer, { limit: 10 }), new Promise((_, rj) => setTimeout(() => rj(new Error('timeout')), 15000))]);
+        const last = _tgLastId.get(chId) || 0;
+        for (const m of (msgs || []).slice().reverse()) {
+          if (!m || !m.id || m.id <= last || !m.message || m.message.length < MIN_LEN) continue;
+          const ts = (m.date || 0) * 1000;
+          if (ts < since) continue;
+          const link = `https://t.me/c/${chId}/${m.id}`;
+          const before = _pending.length;
+          _push({ via: 'tg', source: name, text: m.message.substring(0, 1500), ts, link, media: m.media ? () => _tgPicture(c, m) : null, video: _tgVideo(m, link) });
+          n += _pending.length - before;
+        }
+        const top = Math.max(last, ...(msgs || []).map(m => (m && m.id) || 0));
+        if (top) _tgLastId.set(chId, top);
+        await new Promise(r => setTimeout(r, 400));
+      } catch (e) {
+        // Telegram asking to slow down: stop this run, the next one continues.
+        if (/FLOOD|wait of/i.test(e.message || '')) { logger.warn('📡 feed poll: Telegram asked to slow down'); break; }
       }
     }
+    if (n) logger.info(`📡 feed: Telegram read — ${n} new posts from ${reps.length + slice.length} channels`);
   } catch (e) { logger.warn('📡 feed poll: ' + (e.message || '').substring(0, 60)); }
 }
 
@@ -299,12 +352,18 @@ function catchUp(hours = 4) {
 function start() {
   if (_started) return;
   _started = true;
-  setTimeout(catchUp, 3 * 60000);
+  // Back after an outage (no credit, a crash): the hours since the last batch
+  // that was judged, up to 12 — not just the last 4.
+  setTimeout(() => {
+    let h = 4;
+    try { const t = JSON.parse(fs.readFileSync(_LAST_FILE, 'utf8')).ts; if (t) h = Math.min(12, Math.max(4, Math.ceil((Date.now() - t) / 3600000) + 1)); } catch (_) {}
+    catchUp(h);
+  }, 3 * 60000);
   setInterval(_flush, 45000);
   setTimeout(_hookTelegram, 20000);
   setInterval(_hookTelegram, 5 * 60000);        // re-hook after a reconnect
-  setTimeout(_pollReporters, 60000);
-  setInterval(_pollReporters, 10 * 60000);
+  setTimeout(_pollChannels, 60000);
+  setInterval(_pollChannels, 2 * 60000);
 }
 
 function status() { return { pending: _pending.length, wa: _sources().wa.size, tg: _sources().tg.size, reporters: reporters(), telegramLive: !!_tgClient }; }

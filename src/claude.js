@@ -845,6 +845,10 @@ async function callWithRetry(fn, opts = {}) {
     try {
       return await fn();
     } catch (err) {
+      // No credit: every background job (news, radio) fails through here, and
+      // only the chat path used to raise the alert — so on 15.9 the credit ran
+      // out at noon and nobody was told (15.9).
+      if (/credit balance|too low/i.test(err.message || '')) { try { _creditAlert?.(err.message); } catch {} throw err; }
       const isLast = i === maxRetries - 1;
       if (!isRetryableError(err) || isLast) throw err;
       const delay = baseDelayMs * Math.pow(2, i);

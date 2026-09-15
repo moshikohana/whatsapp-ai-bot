@@ -2798,6 +2798,11 @@ function notifyOwnerCreditLow(detail) {
       logger.info(`📧 Credit-low email sent to ${OWNER_EMAIL}`);
     } catch (e) { logger.warn(`📧 Credit-low email FAILED: ${e.message?.substring(0, 120)}`); }
   })();
+  // Also where he looks: WhatsApp and the app. The email alone went unseen, and
+  // on 15.9 news and radio stood still for four hours (15.9).
+  const _txt = '💳 *נגמרו הקרדיטים ב-Anthropic*\n\nחדשות, כותרות רדיו וסיכומים עצרו עד שיוטענו קרדיטים. ההודעות מהקבוצות נשמרות בתור ויעובדו כשהקרדיט יחזור.\n\nלטעינה: console.anthropic.com → Plans & Billing (מומלץ Auto-reload).';
+  (async () => { try { await botSend(await client.getChatById(OWNER_ID), _txt); } catch (_) {} })();
+  try { require('./src/jarvis-api').pushAlert({ title: '💳 נגמרו הקרדיטים ב-Anthropic', body: _txt.replace(/\*/g, ''), kind: 'system', urgency: 'high' }); } catch (_) {}
 }
 try { require('./src/claude').onCreditError(notifyOwnerCreditLow); } catch (e) { logger.warn('onCreditError hook: ' + e.message); }
 
