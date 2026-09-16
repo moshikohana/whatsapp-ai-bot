@@ -247,7 +247,7 @@ async function onChunk({ station, text, ts = Date.now() }) {
     const hhmm = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
     let update = null;
     const mineAll = words(`${headline} ${quote || ''}`);
-    const cands = list.filter(h => h.ts < ts && ts - h.ts < 6 * 3600000).map(h => {
+    const cands = list.filter(h => h.ts <= ts && ts - h.ts < 6 * 3600000).map(h => {
       let shared = 0;
       for (const w of words(`${h.headline} ${h.quote || ''}`)) if ([...mineAll].some(m => same(m, w))) shared++;
       return { h, shared, q: !!(quote && h.quote && run(quote, h.quote)) };
@@ -266,6 +266,10 @@ async function onChunk({ station, text, ts = Date.now() }) {
       if (n >= 1 && n <= cands.length) {
         const orig = cands[n - 1].h;
         if (!v.new) {
+          if (orig.station === station && Math.abs(orig.ts - ts) < 2 * 60000) {
+            logger.info(`📻 headline: same speaker in the same chunk as "${orig.headline.substring(0, 40)}" — merged, not sent`);
+            continue;
+          }
           // One entry per station and hour on the original: "✅ גם ב…".
           orig.alsoOn = [...(orig.alsoOn || []).filter(a => !(a.station === station && ts - a.ts < 3600000)), { station, ts }].slice(-8);
           _save(list);
@@ -275,6 +279,14 @@ async function onChunk({ station, text, ts = Date.now() }) {
         update = { of: orig.id, at: orig.ts, station: orig.station, what: String(v.new).substring(0, 160) };
         logger.info(`📻 headline: update to ${orig.station} ${hhmm(orig.ts)} — ${update.what.substring(0, 60)}`);
       }
+    }
+
+    // 🗯️ כותרת שהיא רק ציטוט ערום — בלי נושא ובלי דובר — לא אומרת כלום
+    // בהתראה בטלפון ("'הם מתכוונים הכי ברצינות'", 16.9).
+    const bare = headline.replace(/["'״׳「」]/g, '').trim();
+    if (!speaker && !c.about && (c.score || 0) < 5 && bare.split(/s+/).length <= 5) {
+      logger.info(`📻 headline: bare quote without a subject — "${bare.substring(0, 50)}", not kept`);
+      continue;
     }
 
     // 🎙️ No speaker in the sample: the introduction, minutes back.
