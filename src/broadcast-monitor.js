@@ -232,8 +232,8 @@ async function checkOnce() {
     // check says what the sample is; a song or an advert is not stored.
     let _kindNow = null;
     try {
-      const h = await hlm.onChunk({ station: st.name, text, ts: _ts });
-      if (h) headlines.push(h);
+      const hs = await hlm.onChunk({ station: st.name, text, ts: _ts });
+      for (const h of (Array.isArray(hs) ? hs : (hs ? [hs] : []))) headlines.push(h);
       const k0 = hlm.lastKind(st.name);
       if (k0 && k0.ts === _ts) _kindNow = k0.kind;
     } catch (_) {}

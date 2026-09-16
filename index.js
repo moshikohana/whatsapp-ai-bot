@@ -8935,7 +8935,15 @@ setInterval(async () => {
     // Headlines — the reason the monitor exists. Sent immediately, with the
     // speaker and the verified quote, so it reaches him while it is still news
     // rather than an hour later inside a summary.
-    for (const h of (hits.headlines || [])) {
+    // A headline that was built but never went out (a send that failed, a
+    // restart mid-loop) is picked up here rather than lost (15.9, 103FM 9:44).
+    let _headlines = hits.headlines || [];
+    try {
+      const _pend = require('./src/broadcast-headlines').pendingUnsent(45).filter(p => !_headlines.some(h => h.id === p.id));
+      if (_pend.length) { logger.info(`🗞️ ${_pend.length} headline(s) never went out — sending now`); _headlines = _headlines.concat(_pend); }
+    } catch (_) {}
+    for (const h of _headlines) {
+      try { require('./src/broadcast-headlines').markTried(h.id); } catch (_) {}
       // 🔕 Kept for the tab and the hourly summary, not pushed: the round-hour
       // bulletin, already out in the apps/groups, or over the hourly cap (14.9).
       if (h.silent) { try { require('./src/news-apps').onHeadline(h); } catch (_) {} continue; }

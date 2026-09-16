@@ -23,7 +23,9 @@ const DIR = path.join(__dirname, '..', 'data', 'broadcast');
 const FILE = path.join(DIR, 'headlines.json');
 const MAX_KEPT = 150;
 const DEDUPE_MS = 90 * 60 * 1000;
-const MIN_SCORE = 4;          // 1-5; only genuine headlines interrupt him
+const MIN_SCORE = 4;
+// ⭐ מי שאמירה עליו לא מפספסים: התקרה השעתית לא חוסמת כותרת שעוסקת בהם (16.9).
+const KEY_FIGURES = /(נתניהו|איזנקוט|אייזנקוט|גנץ|ליברמן|וינטר|בן גביר|סמוטריץ|יאיר גולן|בנט|לפיד|דרעי|גולדקנופף|קלנר|הליכוד|עמך ישראל|הציונות הדתית|עוצמה יהודית|ש"ס|יהדות התורה|הדמוקרטים|ישראל ביתנו|כחול לבן)/;          // 1-5; only genuine headlines interrupt him
 
 const _prev = {};             // station -> recent chunks [{ ts, text }]
 
@@ -69,6 +71,8 @@ const SYSTEM = `אתה עורך מבזקים בחדר חדשות פוליטי ב
 כותרת = אמירה בולטת או התפתחות בנושא **פוליטי, מדיני או ביטחוני**: בחירות, מפלגות, שרים וממשלה, כנסת, מערכת המשפט, צבא ומלחמה, חטופים, מדיניות חוץ — עמדה חריפה, קריאה למישהו לפרוש, התקפה על פוליטיקאי, חשיפה, הכרזה.
 כלכלה, צרכנות, תרבות, פשיעה, תאונות ואסונות — כותרת רק כשיש בהם זווית פוליטית (שר, ממשלה, מחדל, חקיקה).
 
+⭐ מה שהכי חשוב: אמירה על אחת הדמויות המרכזיות — נתניהו, איזנקוט, גנץ, ליברמן, וינטר, בן גביר, סמוטריץ, יאיר גולן, בנט, לפיד, דרעי, אריאל קלנר — או על הליכוד, עמך ישראל, הציונות הדתית, עוצמה יהודית ושאר המפלגות. גם כשהאומר הוא מרואיין, פרשן או אלוף במיל: ביקורת, חשיפה, האשמה, תמיכה או הערכה פוליטית עליהם היא כותרת (score 4 לפחות). זו בדיוק המטרה של המעקב — לתפוס בזמן אמת מה נאמר עליהם.
+
 ⚠️ הדובר לא חייב להיות מזוהה כדי שזו תהיה כותרת. הקטעים הם דגימות של 55 שניות, ולרוב ההצגה של המרואיין נפלה לפני הדגימה. "וינטר צריך לפרוש, הוא מסכן את מחנה הימין" היא כותרת גם כשלא ברור מי אמר אותה — היא עוסקת בדמויות מוכרות ובעמדה חדה.
 
 לא כותרת: פרסומות, מוזיקה, ספורט, מזג אוויר, תנועה, טיפים צרכניים, שיחת חולין של מנחים, קריינות של מבזק שכבר ידוע.
@@ -78,16 +82,21 @@ const SYSTEM = `אתה עורך מבזקים בחדר חדשות פוליטי ב
 
 כללים:
 - quote חייב להיות מילה במילה מתוך הקטע. אסור לנסח מחדש.
+- ⛔ אל תהפוך מי עושה מה: קרא את המשפט ובדוק מי הנושא. "רונן מנליס… העמדות שלו העמדות יאיר גולן… והוא זה שמנהל את כל הקמפיין" — מנליס מנהל את הקמפיין ועמדותיו כשל יאיר גולן; לא "יאיר גולן מנהל קמפיין".
+- about: על מי הידיעה — הדמות או המפלגה שהאמירה עוסקת בהן (נתניהו, איזנקוט, וינטר, הליכוד…), או null.
 - ⛔ speaker: **אסור לנחש.** רק אם השם נאמר בקטע עצמו — המנחה פונה אליו בשמו או מציג אותו. אם השם לא מופיע בטקסט — null, גם אם "נראה לך" שאתה יודע מי זה. שם שגוי בכותרת גרוע בהרבה מכותרת בלי שם.
 - role: רק אם נאמר בקטע. אחרת null.
 - headline: אם הדובר לא מזוהה, נסח בלי שם — "קריאה לוינטר לפרוש" ולא "אוחנה: וינטר צריך לפרוש".
 - ⛔ אל תמציא תווית לדובר לא מזוהה — לא "דובר ימין", לא "גורם", לא "פרשן", לא "מרואיין". כתוב את האמירה עצמה, בלי ייחוס.
-- score: 5 = מבזק (אמירה חריפה/חדשה על דמות או מהלך מרכזי), 4 = כותרת טובה, 3 ומטה = לא לפרסם.
+- score: 5 = מבזק (אמירה חריפה או חדשה על דמות או מהלך מרכזי). 4 = כל אמירה על אחת הדמויות או המפלגות שברשימה למעלה — ביקורת, האשמה, חשיפה, הערכה פוליטית או טענה על מי שעומד מאחוריהם — גם מפי פרשן, מרואיין או אלוף במיל׳, וגם אם היא לא דרמטית. 3 ומטה = דיבור כללי בלי דמות או מפלגה מרכזית, פרשנות על מגמות, או מה שכבר נאמר בקטע קודם.
 
 בנוסף, kind — מה יש בקטע האחרון (הפסקה האחרונה בתמלול): "news" = מהדורה או מבזק, "talk" = דיבור, ראיון, פאנל או מנחה, "music" = שיר או מוזיקה (גם מילים של שיר), "ads" = פרסומות וקדימונים.
 
+בקטע אחד יכולות להיות שתי אמירות נפרדות (למשל ויכוח על מפלגה, ומיד אחריו אמירה על מנהל קמפיין) — החזר את שתיהן, כל אחת בנפרד. עד ארבע, כל אחת ידיעה נפרדת באמת. עדיף להחזיר אחת נוספת מאשר לפספס אמירה על אחת הדמויות.
+
 החזר JSON בלבד:
-{"headline":"כותרת של עד 12 מילים או null","speaker":null,"role":null,"quote":"ציטוט מדויק או null","score":1,"kind":"news|talk|music|ads"}`;
+{"headlines":[{"headline":"כותרת של עד 12 מילים","speaker":null,"role":null,"about":null,"quote":"ציטוט מדויק או null","score":4}],"kind":"news|talk|music|ads"}
+אין כותרת — headlines: [].`;
 
 // 🎵 What each station was playing at its last sample — the monitor pauses a
 // station that is only playing music (see broadcast-monitor).
@@ -98,13 +107,14 @@ function lastKind(station) { return _kind[station] || null; }
  * נקרא על כל דגימה חדשה. לא חוסם את לולאת הדגימה — רץ ברקע ובולע שגיאות.
  */
 async function onChunk({ station, text, ts = Date.now() }) {
+  const out = [];                     // a chunk can yield more than one headline
   const clean = String(text || '').trim();
-  const recentArr = (_prev[station] || []).filter(p => ts - p.ts < 14 * 60 * 1000 && !isAd(p.text));
-  _prev[station] = [...recentArr, { ts, text: clean }].slice(-3);
+  const recentArr = (_prev[station] || []).filter(p => ts - p.ts < 20 * 60 * 1000 && !isAd(p.text));
+  _prev[station] = [...recentArr, { ts, text: clean }].slice(-4);
   // 55 seconds of speech is 500+ characters; a few words is a song or silence.
-  if (!clean || clean.length < 60) { _kind[station] = { ts, kind: 'music' }; return null; }
-  if (isAd(clean)) { _kind[station] = { ts, kind: 'ads' }; return null; }
-  if (_busy) return null;            // one at a time; the next chunk carries the context
+  if (!clean || clean.length < 60) { _kind[station] = { ts, kind: 'music' }; return out; }
+  if (isAd(clean)) { _kind[station] = { ts, kind: 'ads' }; return out; }
+  if (_busy) return out;             // one at a time; the next chunk carries the context
   _busy = true;
   try {
     // The last three samples from this station, about twelve minutes.
@@ -112,13 +122,13 @@ async function onChunk({ station, text, ts = Date.now() }) {
     // introduced once, at the start — the wider the window, the likelier that
     // introduction is in it and the speaker can be named honestly rather than
     // left blank.
-    const window = [...recentArr.slice(-2).map(p => p.text), clean].join('\n');
+    const window = [...recentArr.slice(-3).map(p => p.text), clean].join('\n');
 
     // 📻 Where in the day this is: the round-hour bulletin, or which programme
     // (and its hosts, who are never the "speaker"). See broadcast-schedule.
     let seg = { bulletin: false, name: null, hosts: [], type: 'morning' };
     try { seg = require('./broadcast-schedule').segmentAt(station, ts); } catch (_) {}
-    if (seg.type === 'sports' || seg.type === 'music') { _kind[station] = { ts, kind: seg.type === 'music' ? 'music' : 'talk' }; return null; }
+    if (seg.type === 'sports' || seg.type === 'music') { _kind[station] = { ts, kind: seg.type === 'music' ? 'music' : 'talk' }; return out; }
     const segLine = seg.bulletin ? 'עכשיו: מבזק החדשות של השעה העגולה'
       : `עכשיו: ${seg.name ? `התוכנית "${seg.name}"` : 'תוכנית'}${seg.type === 'interviews' ? ' (ראיונות)' : ''}` +
         (seg.hosts.length ? `\nמנחי התוכנית (הם לא הדוברים): ${seg.hosts.join(', ')}` : '');
@@ -131,14 +141,21 @@ async function onChunk({ station, text, ts = Date.now() }) {
     // One line per check. Without it a quiet hour and a broken detector look
     // the same in the log.
     if (r && ['news', 'talk', 'music', 'ads'].includes(r.kind)) _kind[station] = { ts, kind: r.kind };
-    logger.info(`📻 headline check [${station}${seg.bulletin ? ' · מבזק' : ''}] → ${r && r.headline ? `★${r.score || 0} ${String(r.headline).substring(0, 50)}` : 'nothing'}${r && r.kind ? ` · ${r.kind}` : ''}`);
-    if (!r || !r.headline || (r.score || 0) < MIN_SCORE) return null;
+    const _cands0 = Array.isArray(r && r.headlines) ? r.headlines : (r && r.headline ? [r] : []);
+    logger.info(`📻 headline check [${station}${seg.bulletin ? ' · מבזק' : ''}] → ${_cands0.length ? _cands0.map(c => `★${c.score || 0} ${String(c.headline).substring(0, 45)}`).join(' | ') : 'nothing'}${r && r.kind ? ` · ${r.kind}` : ''}`);
+    // One chunk can hold two separate statements — an argument about a party,
+    // and right after it a line about a campaign manager (103FM 9:44, 15.9:
+    // the second, on Eisenkot's manager, was lost). Each is taken on its own.
+    const cands = (Array.isArray(r && r.headlines) ? r.headlines : (r && r.headline ? [r] : []))
+      .filter(c => c && c.headline && (c.score || 0) >= MIN_SCORE).slice(0, 4);
+    if (!cands.length) return out;
     const bulletin = seg.bulletin || r.kind === 'news';
+    for (const c of cands) {
 
     // Verified against the transcript, exactly as the hourly digest does. A
     // spokesperson must never be handed a quote that was tidied up.
     const norm = s => String(s || '').replace(/["'״׳]/g, '').replace(/\s+/g, ' ').trim();
-    let quote = r.quote ? String(r.quote).trim() : null;
+    let quote = c.quote ? String(c.quote).trim() : null;
     if (quote && !norm(window).includes(norm(quote))) {
       logger.info(`📻 headline: dropped unverifiable quote "${norm(quote).substring(0, 40)}…"`);
       quote = null;
@@ -150,11 +167,11 @@ async function onChunk({ station, text, ts = Date.now() }) {
     // samples. It happened to be right. A wrong name in a headline handed to a
     // spokesperson is worse than no name, so a name that is not in the text
     // is dropped, and the headline is kept.
-    let speaker = r.speaker ? String(r.speaker).trim() : null;
-    let role = r.role ? String(r.role).trim() : null;
-    let headline = String(r.headline).trim();
+    let speaker = c.speaker ? String(c.speaker).trim() : null;
+    let role = c.role ? String(c.role).trim() : null;
+    let headline = String(c.headline).trim();
     // An invented label in front of an unknown speaker — "דובר ימין: …" (14.9) — goes.
-    if (!r.speaker) {
+    if (!c.speaker) {
       const lab = headline.match(/^([^:]{2,30}):\s*/);
       // Only a label that was never said: "דובר צה"ל:" heard on air stays.
       if (lab && !norm(window).includes(norm(lab[1]))) {
@@ -220,7 +237,7 @@ async function onChunk({ station, text, ts = Date.now() }) {
     });
     if (dup) {
       logger.info(`📻 headline: same story as ${new Date(dup.ts).toISOString().substring(11, 16)} — skipped`);
-      return null;
+      continue;
     }
 
     // 📡 The same story on another station, or hours later (14.9: the Venice
@@ -253,7 +270,7 @@ async function onChunk({ station, text, ts = Date.now() }) {
           orig.alsoOn = [...(orig.alsoOn || []).filter(a => !(a.station === station && ts - a.ts < 3600000)), { station, ts }].slice(-8);
           _save(list);
           logger.info(`📻 headline: same story as ${orig.station} ${hhmm(orig.ts)} — "גם ב${station}", not sent`);
-          return null;
+          continue;
         }
         update = { of: orig.id, at: orig.ts, station: orig.station, what: String(v.new).substring(0, 160) };
         logger.info(`📻 headline: update to ${orig.station} ${hhmm(orig.ts)} — ${update.what.substring(0, 60)}`);
@@ -273,7 +290,7 @@ async function onChunk({ station, text, ts = Date.now() }) {
     try {
       const g = await require('./grounding').ground([{ id: 'h', fields: { headline } }], window,
         { label: 'headline', window: [ts - 3 * 3600000, ts + 60000] });
-      if (g[0] && g[0].drop) { logger.info(`📻 headline: dropped — not supported by the broadcast: "${headline.substring(0, 50)}"`); return null; }
+      if (g[0] && g[0].drop) { logger.info(`📻 headline: dropped — not supported by the broadcast: "${headline.substring(0, 50)}"`); continue; }
       if (g[0]) { headline = g[0].fields.headline || headline; confirmed = g[0].confirmed || null; corrected = g[0].corrected || null; }
     } catch (_) {}
 
@@ -282,15 +299,17 @@ async function onChunk({ station, text, ts = Date.now() }) {
     //   published — out in the apps or groups 20+ minutes before the radio
     //   cap       — a fifth headline inside the hour, unless it is a 5
     let silent = null, earlier = null;
-    if (bulletin && (r.score || 0) < 5) silent = 'bulletin';
+    if (bulletin && (c.score || 0) < 5) silent = 'bulletin';
     if (!silent) {
       try { earlier = await require('./news-apps').publishedBefore({ headline, quote, speaker, ts }, 20); } catch (_) {}
       if (earlier) silent = 'published';
     }
-    if (!silent && (r.score || 0) < 5 && list.filter(h => h.sentAt && ts - h.sentAt < 3600000).length >= 4) silent = 'cap';
+    const about = c.about ? String(c.about).trim().substring(0, 60) : null;
+    const keyOne = KEY_FIGURES.test(`${about || ''} ${headline}`);
+    if (!silent && !keyOne && (c.score || 0) < 5 && list.filter(h => h.sentAt && ts - h.sentAt < 3600000).length >= 6) silent = 'cap';
 
     const item = {
-      id: `${ts}-${station}`.replace(/[^\w-]/g, ''),
+      id: `${ts}-${station}${out.length ? '-' + (out.length + 1) : ''}`.replace(/[^\w-]/g, ''),
       ...(confirmed && confirmed.length ? { confirmed } : {}),
       ...(corrected ? { corrected } : {}),
       ts, station,
@@ -298,7 +317,8 @@ async function onChunk({ station, text, ts = Date.now() }) {
       speaker,
       role,
       quote,
-      score: r.score,
+      score: c.score,
+      ...(about ? { about } : {}),
       key,
       segment: { bulletin, name: seg.name, type: seg.type },
       ...(update ? { update } : {}),
@@ -310,10 +330,12 @@ async function onChunk({ station, text, ts = Date.now() }) {
     list.unshift(item);
     _save(list);
     logger.info(`📻 HEADLINE [${station}] ${item.speaker || '?'}: ${item.headline}${silent ? ` — not sent (${silent}${earlier ? `: ${earlier.source}, ${earlier.min} min earlier` : ''})` : ''}`);
-    return item;
+      out.push(item);
+    }
+    return out;
   } catch (e) {
     logger.warn('headline check: ' + (e.message || '').substring(0, 60));
-    return null;
+    return out;
   } finally {
     _busy = false;
   }
@@ -328,6 +350,22 @@ function recent(n = 30) {
  * picked the newest *stored* headline, and one stored at 10:30 reached him
  * only at 10:32, after he had asked about another (14.9).
  */
+/**
+ * כותרות שלא יצאו — רשת ביטחון. ב-15.9 כותרת של 103FM מ-9:44 נשמרה בלי
+ * silent ובלי sentAt, כלומר היא נבנתה ופשוט לא הגיעה אליו. עד שלושה נסיונות.
+ */
+function pendingUnsent(minutes = 45) {
+  const now = Date.now();
+  return _load().filter(h => !h.silent && !h.sentAt && (h.tries || 0) < 3 && now - h.ts < minutes * 60000);
+}
+function markTried(id) {
+  const list = _load();
+  const h = list.find(x => x.id === id);
+  if (!h) return;
+  h.tries = (h.tries || 0) + 1;
+  _save(list);
+}
+
 function markSent(id, waId) {
   const list = _load();
   const h = list.find(x => x.id === id);
@@ -527,4 +565,4 @@ function formatExpansion(h, x) {
   return parts.join('\n');
 }
 
-module.exports = { findSpeaker, lastKind, onChunk, recent, markSent, forReply, contextAround, isAd, expand, formatExpansion };
+module.exports = { pendingUnsent, markTried, findSpeaker, lastKind, onChunk, recent, markSent, forReply, contextAround, isAd, expand, formatExpansion };
