@@ -83,6 +83,58 @@ const GROUP_SYSTEM = `אתה עורך חדשות פוליטי. לפניך נוש
 כותרת לנושא: קצרה, מי נגד מי ועל מה ("וינטר נגד הליכוד: חוקרים פרטיים ותביעת דיבה"). actors: השחקנים המרכזיים (אנשים/מפלגות).
 החזר JSON בלבד: {"assign":[{"s":מספר,"t":"T1"}],"new":[{"title":"...","actors":["..."],"s":[מספרים]}]}`;
 
+/**
+ * 🔗 שני נושאים שהם אותה פרשה.
+ *
+ * בדיקת ה-twin עובדת רק ברגע היצירה, ולכן פרשה שנפתחה בשתי הרצות שונות
+ * נשארה מפוצלת: "חיסול מח"ט רפיח", "הלוויית מח"ט רפיח ותגובות לחיסול"
+ * ו"כץ מגיב לוינטר על חיסול מח"ט רפיח" היו שלושה נושאים נפרדים (16.9).
+ * כאן עוברים על הנושאים הפתוחים ומאחדים את מה שבאמת אותו סיפור.
+ */
+async function _mergePass(db, all, open) {
+  const na = require("./news-apps");
+  const pairs = [];
+  for (let i = 0; i < open.length; i++) {
+    for (let j = i + 1; j < open.length; j++) {
+      const a = open[i], b = open[j];
+      if (na.overlap(a.title, b.title) < 2.5) continue;
+      // פרשה אחת מתפתחת ברצף — לא שני אירועים שנפרדים ביומיים.
+      if (Math.abs((a.updated || a.created) - (b.updated || b.created)) > 36 * 3600000) continue;
+      if (_elsewhere(a.title, b.title)) continue;
+      pairs.push([a, b]);
+    }
+  }
+  if (!pairs.length) return 0;
+  const top = pairs.sort((x, y) => na.overlap(y[0].title, y[1].title) - na.overlap(x[0].title, x[1].title)).slice(0, 8);
+  const NL = String.fromCharCode(10);
+  const body = top.map(([a, b], i) => [(i + 1) + ".", "א: " + a.title, "ב: " + b.title].join(NL)).join(NL + NL);
+  const r = await require("./claude").classifyJSON(body, {
+    system: "לפניך זוגות של כותרות נושאים. לכל זוג: האם שתי הכותרות הן אותה פרשה אחת שמתפתחת — אותו אירוע, ההמשך שלו או התגובות אליו? (״חיסול מח״ט רפיח״ ו״הלוויית מח״ט רפיח ותגובות״ = כן. ״וינטר נגד כ״ץ על הצ׳ק האמריקאי״ ו״נטעלי שם טוב חושפת שוינטר ידע על הצ׳ק״ = כן. ״תקיפות בעזה״ ו״תקיפות בלבנון״ = לא. ״בנט נגד נתניהו״ ו״בן גביר נגד נתניהו״ = לא, שתי מחלוקות שונות.) אל תאחד רק בגלל שם משותף או זירה משותפת. החזר JSON בלבד: {\"same\":[מספרי הזוגות שהם אותה פרשה]}",
+    maxTokens: 300, model: GROUP_MODEL, temperature: 0,
+  });
+  if (!r || !Array.isArray(r.same)) return 0;
+  const done = new Set();
+  let merged = 0;
+  for (const x of r.same) {
+    const p = top[(+String(x).replace(new RegExp("\\D", "g"), "") || 0) - 1];
+    if (!p) continue;
+    const [a, b] = p;
+    if (done.has(a.id) || done.has(b.id) || a.closed || b.closed) continue;
+    // הוותיק נשאר, הצעיר נבלע — כדי שמעקב וקישורים קיימים ימשיכו לעבוד.
+    const [keep, drop] = a.created <= b.created ? [a, b] : [b, a];
+    for (const id of (drop.members || [])) if (!(keep.members || []).includes(id)) keep.members.push(id);
+    delete keep._set;
+    keep.updated = Math.max(keep.updated || 0, drop.updated || 0);
+    keep.actors = [...new Set([...(keep.actors || []), ...(drop.actors || [])])].slice(0, 8);
+    keep.followed = keep.followed || drop.followed;
+    keep.written = null;   // הסיפור ייכתב מחדש עם כל השלבים
+    drop.closed = true; drop.mergedInto = keep.id; drop.members = [];
+    done.add(a.id); done.add(b.id); merged++;
+    logger.info(`🔗 נושאים אוחדו: "${drop.title.substring(0, 45)}" → "${keep.title.substring(0, 45)}"`);
+  }
+  return merged;
+}
+
 let _busy = false;
 const GROUP_MODEL = 'claude-sonnet-4-6';   // Haiku split the Winter affair and made "topics" of categories (15.9 trial)
 async function group({ dry = false, model = GROUP_MODEL, fresh = false } = {}) {
@@ -161,12 +213,16 @@ async function group({ dry = false, model = GROUP_MODEL, fresh = false } = {}) {
       db.topics.push(t); created++;
       logger.info(`🧵 new topic: "${t.title}" (${ss.length} stories)`);
     }
+    // נושאים שהתפצלו בהרצות שונות — לאחד לפני השמירה.
+    let mergedTopics = 0;
+    try { mergedTopics = await _mergePass(db, all, db.topics.filter(t => !t.closed)); } catch (e) { logger.warn("🔗 merge: " + (e.message || "").substring(0, 60)); }
+
     // Keep the seen map small.
     for (const k of Object.keys(db.seen)) if (!all.some(s => s.id === k)) delete db.seen[k];
     _save();
     for (const [t, ss] of grown) if (t.followed) _alert(t, ss);
-    if (assigned || created) logger.info(`🧵 topics: ${assigned} stories added, ${created} new topics`);
-    return { assigned, created };
+    if (assigned || created || mergedTopics) logger.info(`🧵 topics: ${assigned} stories added, ${created} new topics, ${mergedTopics} merged`);
+    return { assigned, created, merged: mergedTopics };
   } catch (e) { logger.warn('🧵 group: ' + (e.message || '').substring(0, 80)); return { error: e.message }; }
   finally { if (!dry) _busy = false; }
 }
