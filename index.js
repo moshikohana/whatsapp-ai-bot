@@ -4117,6 +4117,37 @@ function _videoEta(durationSec, withText) {
   return Math.round(4 + d / 40 + 3 + (withText ? 3 + d / 25 : 0));
 }
 
+/**
+ * ממתין שוואטסאפ יהיה באמת מוכן — לא רק "connected", אלא שהדף הזריק את
+ * WWebJS. אחרי הפעלה מחדש יש חלון של ~40 שניות שבו כל פעולה על צ'אט נופלת
+ * עם "Cannot read properties of undefined (reading 'getChat')" — וזה מה
+ * שהאפליקציה הציגה למשתמש (16.9). עדיף לחכות מאשר להיכשל.
+ */
+async function waitWaReady(maxMs = 120000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < maxMs) {
+    if (botStatus === 'connected') {
+      try {
+        const ok = await Promise.race([
+          client.pupPage.evaluate(() => typeof window.WWebJS !== 'undefined' && typeof window.Store !== 'undefined'),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 8000)),
+        ]);
+        if (ok) return true;
+      } catch (_) {}
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  return false;
+}
+
+/** שגיאה טכנית → משפט בעברית שאפשר להבין ממנו מה לעשות. */
+function _friendlyErr(msg) {
+  const m = String(msg || '');
+  if (/getChat|waitForChatLoad|Store|Evaluation failed|Target closed|Session closed|Protocol error/i.test(m))
+    return 'וואטסאפ עוד מתחבר אחרי הפעלה מחדש — נסה שוב בעוד דקה';
+  return m.substring(0, 120);
+}
+
 async function _sendVideoAudio(id, withText = false, jobId = null) {
   const vids = require('./src/videos');
   const jobs = require('./src/jobs');
@@ -4126,6 +4157,8 @@ async function _sendVideoAudio(id, withText = false, jobId = null) {
   const t0 = Date.now();
   const left = () => Math.max(1, eta - (Date.now() - t0) / 1000);
   try {
+    jobs.update(jobId, { stage: '⏳ מחכה לוואטסאפ…', pct: 2, etaSec: left() });
+    if (!(await waitWaReady(120000))) throw new Error('וואטסאפ לא מחובר כרגע — נסה שוב בעוד דקה');
     const oc = await client.getChatById(OWNER_ID);
     const { MessageMedia } = require('whatsapp-web.js');
     const stamp = new Date(v.ts).toLocaleString('sv-SE', { timeZone: 'Asia/Jerusalem' }).slice(0, 16).replace(' ', '-').replace(':', '');
@@ -4146,7 +4179,7 @@ async function _sendVideoAudio(id, withText = false, jobId = null) {
     }
     jobs.done(jobId, withText ? '✅ ה-MP3 והתמלול נשלחו לוואטסאפ' : '✅ ה-MP3 נשלח לוואטסאפ');
     return true;
-  } catch (e) { jobs.fail(jobId, e.message); throw e; }
+  } catch (e) { jobs.fail(jobId, _friendlyErr(e.message)); throw e; }
 }
 
 // 🎬 The open "what to do with the video" question.
