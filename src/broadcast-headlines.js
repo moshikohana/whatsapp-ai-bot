@@ -296,6 +296,12 @@ async function onChunk({ station, text, ts = Date.now() }) {
         if (f) { speaker = f.speaker; role = role || f.role; logger.info(`🎙️ headline speaker found: ${f.speaker} — "${f.evidence.substring(0, 60)}"`); }
       } catch (_) {}
     }
+    // עדיין בלי שם — אבל אולי הוא זה שמתארח כאן כבר רבע שעה.
+    if (!speaker) {
+      const g = _currentGuest(station, ts, seg && seg.name);
+      if (g) { speaker = g.speaker; role = role || g.role; logger.info("🎙️ headline speaker from the open interview: " + g.speaker); }
+    }
+    if (speaker && !bulletin) _rememberGuest(station, ts, speaker, role, seg && seg.name);
 
     // 🔎 Checked against the transcript and the apps before it reaches him.
     let confirmed = null, corrected = null;
@@ -434,9 +440,26 @@ function forReply({ quotedId = null, quotedBody = null } = {}) {
 // אלינו" — and the 55-second sample with the quote comes minutes later, so the
 // speaker was always "לא מזוהה" (14.9, 103FM 09:30). The station's last 25
 // minutes are searched for an introduction; a name only if it is said there.
-const _INTRO = /(איתנו על הקו|על הקו איתנו|איתנו עכשיו|עכשיו איתנו|מצטרף אלינו|מצטרפת אלינו|נמצא איתנו|נמצאת איתנו|איתי באולפן|איתנו באולפן|אורחנו|אורחתנו|שלום ל|בוקר טוב ל|ערב טוב ל|תודה רבה ל|תודה ל|ח"כ|ח״כ|חבר הכנסת|חברת הכנסת|השר |השרה |ראש העיר|פרופסור|ד"ר|עו"ד)/;
+const _INTRO = /(איתנו על הקו|על הקו איתנו|איתנו עכשיו|עכשיו איתנו|מצטרף אלינו|מצטרפת אלינו|נמצא איתנו|נמצאת איתנו|איתי באולפן|איתנו באולפן|אורחנו|אורחתנו|שלום ל|בוקר טוב ל|ערב טוב ל|תודה רבה ל|תודה ל|ח"כ|ח״כ|חבר הכנסת|חברת הכנסת|השר |השרה |ראש העיר|פרופסור|ד"ר|עו"ד|בוא נשמע|בואי נשמע|איתנו כעת|כעת איתנו|מה שלומך|תודה שבאת|תודה שהצטרפת|ברוך הבא|ברוכה הבאה|אני מארח|אני מארחת|מדבר איתנו|מדברת איתנו|בסטודיו|באולפן איתנו|הפרשן|הפרשנית|הכתב|הכתבת|אלוף במילואים|תת אלוף|ניצב|עיתונאי|עיתונאית|יושב ראש|יו"ר)/;
+// התמלול דוגם 55 שניות כל 4 דקות, ולכן ההצגה עצמה נופלת לרוב בין הדגימות —
+// לכן גם הדרכים העקיפות שבהן שם של אורח נשמע באוויר (16.9).
+// 🎙️ מי מתארח עכשיו בכל תחנה. ברגע שזוהה אורח, ציטוט נוסף מאותה תוכנית
+// בעשרים הדקות הבאות הוא שלו — אחרת רוב ההתראות יוצאות "דובר לא מזוהה"
+// (51 מתוך 72 ב-24 שעות, 16.9), כי ההצגה נפלה בין דגימות התמלול.
+const _guest = new Map();   // station → { speaker, role, at, seg }
+function _rememberGuest(station, ts, speaker, role, seg) {
+  if (speaker) _guest.set(station, { speaker, role: role || null, at: ts, seg: seg || null });
+}
+function _currentGuest(station, ts, seg) {
+  const g = _guest.get(station);
+  if (!g || ts < g.at || ts - g.at > 20 * 60000) return null;
+  // תוכנית אחרת = אורח אחר, גם אם עברו פחות מ-20 דקות.
+  if (g.seg && seg && g.seg !== seg) return null;
+  return g;
+}
+
 async function findSpeaker(station, ts, quote) {
-  const chunks = require('./broadcast-digest').chunksBetween(ts - 25 * 60000, ts + 60000)
+  const chunks = require('./broadcast-digest').chunksBetween(ts - 40 * 60000, ts + 60000)
     .filter(c => c.station === station && !isAd(c.text)).sort((a, b) => a.ts - b.ts);
   const hits = [];
   for (const c of chunks) {
