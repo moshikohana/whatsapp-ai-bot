@@ -329,6 +329,17 @@ async function onChunk({ station, text, ts = Date.now() }) {
     };
     list.unshift(item);
     _save(list);
+    // 📻 הרדיו נכנס לחדשות: אמירה באוויר מצטרפת לסיפור ולנושא, ולא נשארת
+    // רק בטאב הרדיו (16.9). רק כותרת שנשלחה — שקטה או חוזרת לא מוסיפה רעש.
+    if (!silent) {
+      try {
+        require('./news-apps').addMany([{
+          source: `${station} · רדיו`, via: 'radio', ts,
+          text: [speaker, headline].filter(Boolean).join(': ').substring(0, 240),
+          full: quote || (item.context || '').substring(0, 400) || undefined,
+        }]);
+      } catch (e) { logger.warn('📻 → news: ' + (e.message || '').substring(0, 50)); }
+    }
     logger.info(`📻 HEADLINE [${station}] ${item.speaker || '?'}: ${item.headline}${silent ? ` — not sent (${silent}${earlier ? `: ${earlier.source}, ${earlier.min} min earlier` : ''})` : ''}`);
       out.push(item);
     }
