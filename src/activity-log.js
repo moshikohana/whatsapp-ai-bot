@@ -43,6 +43,14 @@ function describe(method, route, body) {
     [/\/decisions\/answer$/, () => `הכרעה על ספק: ${b.value || ''}`],
     [/\/warroom\/end$/, () => 'סיום מצב חירום'],
     [/\/keywords/, () => method === 'GET' ? null : 'עדכון מילות מפתח'],
+    // 🧵 חדשות ונושאים — לא היו ביומן, ולכן לא ידענו מה הוא בכלל פותח (16.9).
+    [new RegExp("/news/topics$"), () => method === "GET" ? "פתיחת טאב נושאים" : null],
+    [new RegExp("/news/topic$"), () => "פתיחת נושא"],
+    [new RegExp("/news/topic/build$"), () => "בניית נושא מידיעה"],
+    [new RegExp("/news/topic/follow$"), () => "מעקב אחרי נושא"],
+    [new RegExp("/news/story/brief$"), () => "סיכום כל המקורות של ידיעה"],
+    [new RegExp("/news/story$"), () => "פתיחת ידיעה"],
+    [new RegExp("/translate$"), () => "תרגום טקסט"],
   ];
   for (const [re, fn] of map) if (re.test(route)) return fn();
   return null;
@@ -52,6 +60,7 @@ function _category(label) {
   if (/סריק|פריסט/.test(label)) return 'סריקה';
   if (/רדיו|שידור|מילת מעקב/.test(label)) return 'רדיו';
   if (/פרצוף|ייחוס|תמונה|אדם|ספק/.test(label)) return 'פנים';
+  if (/נושא|ידיעה|תרגום|מקורות/.test(label)) return 'חדשות';
   if (/שיחה/.test(label)) return 'שיחה';
   if (/פקודה/.test(label)) return 'פקודה';
   return 'אחר';

@@ -30,10 +30,29 @@ const _norm = s => String(s || '').replace(/["'״׳.,!?:;()\-–—|/\\*_~]/g, '
 const _stem = w => (w.length >= 5 && /^[והבלמשכ]/.test(w) ? w.slice(1) : w);
 const _words = s => new Set(_norm(s).split(' ').filter(w => w.length >= 3 && !STOP.has(w)).map(_stem));
 
-function _load() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return []; } }
-function _save(list) {
-  try { fs.writeFileSync(FILE, JSON.stringify(list)); } catch (e) { logger.warn('news-apps save: ' + (e.message || '').substring(0, 50)); }
+// 2.8MB of JSON was parsed again on every match, every rejoin and every API
+// call — hundreds of times a minute, blocking the event loop, and the phone's
+// one-minute poll timed out (app reports, 10–15.9). Parsed once per change.
+let _cache = null, _cacheAt = -1;
+function _load() {
+  try {
+    const m = fs.statSync(FILE).mtimeMs;
+    if (_cache && m === _cacheAt) return _cache;
+    _cache = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+    _cacheAt = m;
+    return _cache;
+  } catch { return _cache || []; }
 }
+function _save(list) {
+  try {
+    fs.writeFileSync(FILE, JSON.stringify(list));
+    _cache = list; _latest.clear();
+    try { _cacheAt = fs.statSync(FILE).mtimeMs; } catch { _cacheAt = -1; }
+  } catch (e) { logger.warn('news-apps save: ' + (e.message || '').substring(0, 50)); }
+}
+// The grouped stories for the same window, while nothing changed: the topics
+// screen asked for 48 hours on every card.
+const _latest = new Map();
 function _loadH() { try { return JSON.parse(fs.readFileSync(HEADLINES, 'utf8')); } catch { return []; } }
 function _saveH(list) { try { fs.writeFileSync(HEADLINES, JSON.stringify(list, null, 1)); } catch (_) {} }
 
@@ -567,6 +586,14 @@ function stories(hours = 24, limit = 15) {
  * מאפליקציה אחת שלחה — סיפור שרק אחת שלחה אינו ניצחון של אף אחת.
  */
 function latest(hours = 12, limit = 20) {
+  const memo = _latest.get(`${hours}|${limit}`);
+  if (memo && Date.now() - memo.at < 20000) return memo.out;
+  const out = _latestUncached(hours, limit);
+  _latest.set(`${hours}|${limit}`, { at: Date.now(), out });
+  if (_latest.size > 20) _latest.delete([..._latest.keys()][0]);
+  return out;
+}
+function _latestUncached(hours = 12, limit = 20) {
   const since = Date.now() - hours * 3600000;
   // _SKIP again: items stored before a word was added to it.
   const pushes = _load().filter(x => !x.skip && !_SKIP.test(x.text) && x.ts >= since).sort((a, b) => a.ts - b.ts);

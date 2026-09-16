@@ -53,6 +53,15 @@ function _addStory(t, s) {
   t.members = [...m];
 }
 const _srcCount = s => Object.keys(s.apps || {}).length;
+// Gaza and Lebanon are two topics, however similar the words: a story whose
+// place is named, and is not the topic's place, does not belong to it (16.9).
+const PLACES = ['לבנון', 'עזה', 'רפיח', 'יונס', 'באליה', 'שומרון', 'איראן', 'סעודיה', 'תימן', 'סוריה', 'ירדן', 'מצרים', 'עיראק', 'קטאר', 'אוקראינה'];
+function _elsewhere(title, topicText) {
+  const inTitle = PLACES.filter(p => title.includes(p));
+  const inTopic = PLACES.filter(p => topicText.includes(p));
+  if (!inTitle.length || !inTopic.length) return false;
+  return !inTitle.some(p => inTopic.includes(p));
+}
 // An actor's name as it is written in the stories — the model wrote "יאיר
 // ליברמן" (Avigdor, next to Yair Golan) in the 15.9 trial. Not there — out.
 function _grounded(actors, stories) {
@@ -69,6 +78,8 @@ const GROUP_SYSTEM = `אתה עורך חדשות פוליטי. לפניך נוש
 1. לכל ידיעה S ששייכת בבירור לנושא פתוח T — שייך אותה.
 2. פתח נושא חדש רק כשיש לפחות 2 ידיעות S שהן שרשרת (אחת מגיבה לשנייה, או שתיהן חלק מאותה פרשה) — לא שתי אמירות נפרדות של אותו אדם על דברים שונים.
 3. ידיעה שלא שייכת לשום עלילה — השאר אותה בחוץ. עדיף להשאיר בחוץ מאשר לשייך בכוח.
+4. ⛔ נושא הוא פרשה אחת, לא ערב שלם של פוליטיקה. אותם שמות או אותה זירה זה לא מספיק: "וינטר נגד הליכוד" הוא לא המקום של בן גביר מול נתניהו או של סקר חדש; "חיסול מח"ט רפיח" הוא לא המקום ליום ההולדת של כ"ץ או לאמירה של איזנקוט על סיום הלחימה. אירוע אחר באותו ערב — נושא אחר, או בחוץ.
+5. ⛔ אותה זירה גיאוגרפית: תקיפות בעזה ותקיפות בלבנון הן שני נושאים.
 כותרת לנושא: קצרה, מי נגד מי ועל מה ("וינטר נגד הליכוד: חוקרים פרטיים ותביעת דיבה"). actors: השחקנים המרכזיים (אנשים/מפלגות).
 החזר JSON בלבד: {"assign":[{"s":מספר,"t":"T1"}],"new":[{"title":"...","actors":["..."],"s":[מספרים]}]}`;
 
@@ -121,7 +132,14 @@ async function group({ dry = false, model = GROUP_MODEL, fresh = false } = {}) {
       if (!s || !t || used.has(s.id)) continue;
       // Two words in common at least — one name is not enough: "נתניהו יגיע
       // לבית שאן" went into "הרמטכ"ל לנתניהו: חמאס הובס" (15.9).
-      if (na.overlap(s.title, about(t)) < 2.5) { logger.info(`🧵 assignment refused: "${s.title.substring(0, 40)}" ↛ "${t.title.substring(0, 40)}"`); continue; }
+      // And the bigger the topic, the more it attracts: a topic of twenty
+      // stories has every word in it, so the bar rises with its size, and the
+      // match must be with the topic's own headline, not only with its pile (16.9).
+      const size = _storiesOf(t, all).length;
+      const need = size >= 10 ? 4.5 : size >= 5 ? 3.5 : 2.5;
+      if (na.overlap(s.title, about(t)) < need || na.overlap(s.title, t.title) < 1.5 || _elsewhere(s.title, about(t))) {
+        logger.info(`🧵 assignment refused: "${s.title.substring(0, 40)}" ↛ "${t.title.substring(0, 40)}"`); continue;
+      }
       used.add(s.id); _addStory(t, s); t.updated = Math.max(t.updated || 0, s.last); assigned++;
       if (!grown.has(t)) grown.set(t, []);
       grown.get(t).push(s);
