@@ -650,4 +650,4 @@ function formatExpansion(h, x) {
   return parts.join('\n');
 }
 
-module.exports = { pendingUnsent, markTried, findSpeaker, lastKind, onChunk, recent, markSent, forReply, contextAround, isAd, expand, formatExpansion };
+module.exports = { KEY_FIGURES, pendingUnsent, markTried, findSpeaker, lastKind, onChunk, recent, markSent, forReply, contextAround, isAd, expand, formatExpansion };

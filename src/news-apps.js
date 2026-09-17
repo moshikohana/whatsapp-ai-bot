@@ -118,6 +118,9 @@ function addMany(items) {
     // The same push again — now with its picture: keep the picture.
     if (dup) { if (it.img && !dup.img) { dup.img = String(it.img).substring(0, 40); } continue; }
     const item = { id: `${ts}-${Math.random().toString(36).slice(2, 6)}`, source, text, ts, key, skip: _SKIP.test(text) || undefined };
+    // 🎧 "איזנקוט בריאיון… הצטרפו לשידור" — skipped as news, but it means an
+    // interview is on air right now: record it without gaps (17.9).
+    if (!it.via || it.via === 'app') { try { require('./broadcast-focus').fromPush(text); } catch (_) {} }
     if (it.via && it.via !== 'app') {
       item.via = it.via;
       if (it.reporter) item.reporter = true;
@@ -626,7 +629,7 @@ function _latestUncached(hours = 12, limit = 20) {
   }
   return out.map(st => {
     const apps = {}, texts = {}, vias = {};
-    for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) { apps[m.source] = m.ts; texts[m.source] = m.text.substring(0, 160); vias[m.source] = m.via || 'app'; }
+    for (const m of st.members) if (!apps[m.source] || m.ts < apps[m.source]) { apps[m.source] = m.ts; texts[m.source] = _cleanTitle(m.text).substring(0, 160); vias[m.source] = m.via || 'app'; }
     const order = Object.entries(apps).sort((a, b) => a[1] - b[1]);
     // 🔄 A story that came back with a new wave — the defence minister's
     // statement on עלי טאהר, from eleven sources, sat under the 19:53 title
@@ -863,7 +866,7 @@ function story(id) {
     seenPost.add(k);
     return true;
   }).map(p => ({
-    id: p.id, source: p.source, ts: p.ts, text: p.text, via: p.via || 'app',
+    id: p.id, source: p.source, ts: p.ts, text: _cleanTitle(p.text), via: p.via || 'app',
     full: p.full || null, link: p.link || null, linkKind: p.linkKind || null, linkChecked: !!p.linkChecked, reporter: !!p.reporter, img: p.img || null,
     video: p.video ? { d: p.video.d, s: p.video.s } : null,
     radio: p.radio ? { station: p.radio.station || null, ts: p.radio.ts, headline: p.radio.headline || p.radio.excerpt || null, quote: p.radio.excerpt || p.radio.headline || null, leadMin: p.radio.leadMin } : null,

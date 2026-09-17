@@ -9076,14 +9076,14 @@ setInterval(async () => {
   } catch (e) { logger.warn('focus loop: ' + (e.message || '').substring(0, 70)); }
 }, 10 * 1000);
 try {
-  require('./src/broadcast-focus').setSender(async (text, file) => {
+  require('./src/broadcast-focus').setSender(async (text, file, radio) => {
     const oc = await client.getChatById(OWNER_ID);
     await botSend(oc, text);
     if (file && fs.existsSync(file) && fs.statSync(file).size < 95 * 1024 * 1024) {
       const { MessageMedia } = require('whatsapp-web.js');
       await oc.sendMessage(new MessageMedia('audio/mpeg', fs.readFileSync(file).toString('base64'), path.basename(file)), { sendMediaAsDocument: true, caption: '🎧 ההקלטה המלאה' + BOT_MARKER });
     }
-    try { require('./src/jarvis-api').pushAlert({ title: '🎧 סיכום האזנה', body: text.replace(/[*_]/g, '').substring(0, 1500), kind: 'broadcast-focus', urgency: 'normal' }); } catch (_) {}
+    try { require('./src/jarvis-api').pushAlert({ title: '🎧 סיכום האזנה', body: text.replace(/[*_]/g, '').substring(0, 1500), kind: 'broadcast-focus', urgency: 'normal', ...(radio ? { radio: [{ label: radio.station, station: radio.station, ts: radio.ts, q: radio.q }] } : {}) }); } catch (_) {}
   });
 } catch (_) {}
 

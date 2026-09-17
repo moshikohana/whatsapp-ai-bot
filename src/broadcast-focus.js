@@ -254,7 +254,9 @@ async function _finish() {
   let out = null;
   if (transcript.length > 200) {
     try {
-      out = await require('./claude').classifyJSON(transcript.substring(0, 60000), {
+      // He said who is interviewed; without it the summary said "המרואיין" throughout (17.9).
+      const who = s.subject ? `מה הוקלט, כפי שנמסר: ${s.subject}. אם המרואיין הוא האדם הזה — כתוב את שמו, לא "המרואיין".\n\n` : '';
+      out = await require('./claude').classifyJSON(who + transcript.substring(0, 60000), {
         system: SUMMARY_SYSTEM, maxTokens: 3000, model: 'claude-sonnet-4-6', temperature: 0,
       });
     } catch (e) { logger.warn('🎧 summary: ' + (e.message || '').substring(0, 60)); }
@@ -288,14 +290,38 @@ async function _finish() {
   s.summary = { heads, strong, who: out && out.who, text: lines.join('\n') };
   s.full = full ? path.basename(full) : null;
   _save();
-  _notify(lines.join('\n'), full);
+  // The app opens the recording from the alert: station and the first minute of the interview.
+  _notify(lines.join('\n'), full, { station: s.station, ts: chunks[0].ts, q: (heads[0] && heads[0].quote) || '' });
 }
 
-let _sender = null;   // index.js: async (text, file) => …
+let _sender = null;   // index.js: async (text, file, radio) => …
 function setSender(fn) { _sender = fn; }
-function _notify(text, file) {
+function _notify(text, file, radio = null) {
   if (!_sender) { logger.warn('🎧 focus: no sender'); return; }
-  Promise.resolve(_sender(text, file)).catch(e => logger.warn('🎧 send: ' + (e.message || '').substring(0, 60)));
+  Promise.resolve(_sender(text, file, radio)).catch(e => logger.warn('🎧 send: ' + (e.message || '').substring(0, 60)));
 }
 
-module.exports = { parse, start, stop, status, tick, busyStation, drainHeadlines, setSender, stationOf };
+// ── Started by an alert ─────────────────────────────────────────────
+// "כאן חדשות ברשת ב' — איזנקוט בריאיון מיוחד… הצטרפו" came at 9:57 and the
+// interview was on air while nobody listened (17.9). A push that says a key
+// figure is being interviewed on a station we record starts the listen.
+const _LIVE = /(ב?רי?איון|משוחח|מתארח|אורח)/;
+const _JOIN = /(הצטרפו|האזינו|בשידור חי|עכשיו ב|ברשת ב|לשידור)/;
+const _autoLast = {};
+function fromPush(text) {
+  const t = String(text || '');
+  if (!_LIVE.test(t) || !_JOIN.test(t)) return null;
+  let key = null;
+  try { key = t.match(require('./broadcast-headlines').KEY_FIGURES); } catch (_) {}
+  if (!key) return null;
+  const stationId = /ברשת ב|כאן ב|כאן 11|כאן חדשות/.test(t) ? 'kanbet' : /103/.test(t) ? '103fm' : /גלי צה"?ל|גלצ/.test(t) ? 'glz' : null;
+  if (!stationId) return null;
+  if (_state && !_state.done) return null;                              // already listening
+  if (Date.now() - (_autoLast[stationId] || 0) < 2 * 3600000) return null; // one interview, many pushes
+  _autoLast[stationId] = Date.now();
+  const r = start({ stationId, minutes: 45, reason: `ראיון ${key[0]} — התחיל מהתראה: ${t.substring(0, 80)}` });
+  if (r && r.ok) logger.info(`🎧 focus started by a push: ${key[0]} on ${r.station}`);
+  return r && r.ok ? r : null;
+}
+
+module.exports = { parse, start, stop, status, tick, busyStation, drainHeadlines, setSender, stationOf, fromPush };
