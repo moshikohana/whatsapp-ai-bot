@@ -58,7 +58,11 @@ function _saveH(list) { try { fs.writeFileSync(HEADLINES, JSON.stringify(list, n
 
 // The notification title is sometimes the app's own name ("ynet", "C14") and
 // sometimes a real headline; only a real one is part of the story.
-const _GENERIC = /^(ynet|n12|החדשות 12|mako|c14|כאן|כאן 11|כאן חדשות|ערוץ 14|עכשיו 14|i24news)$/i;
+const _GENERIC = /^(ynet|n12|החדשות 12|mako|c14|כאן|כאן 11|כאן חדשות|ערוץ 14|עכשיו 14|i24news)$|@/i;
+// 'יולן כהן @ צ׳אט כתבים' — שם הכתב והערוץ ב-N12, לא כותרת; והסמל שלפני הגוף (📷) לא שייך לה (16.9).
+const _LEAD = /^(?:\s|📷|🎥|🎬|📹|🔴|•)+/u;
+// Stored rows from before the fix still carry the sender line in front.
+function _cleanTitle(t) { return String(t || '').replace(/^[^—:\n]{2,40}@[^—:\n]{2,40}\s+—\s+/, '').replace(_LEAD, ''); }
 // Podcasts, sport and culture channels inside the same apps are not news.
 // כאן BOX: the Kan app's series and shows ("רגע לפני פרק הסיום"), not news (13.9).
 const _SKIP = /(כאן BOX|כאן בוקס|כאןBOX|הסכתים|פודקאסט|פופ אפ|כדורגל|כדורסל|ליגת|מונדיאל|פרמייר|שער בכורה|בליגה|אליפות העולם|אליפות אירופה|אולימפי|יורוליג|NBA|טניס|ג'ודו|התעמלות אמנותית|פיפ"א|אירוויזיון|מתכון|מגזין חג|\| מגזין|פרויקט מיוחד|כאן גימל|כאן 88|כאן תרבות|הצטרפו לשידור החי|\| הצטרפו|כאן חדשות ברשת ב' —|למתחילים:)/;
@@ -105,7 +109,7 @@ function addMany(items) {
   for (const it of items || []) {
     const source = String(it.source || '').substring(0, 40);
     const title = String(it.title || '').trim();
-    const body = String(it.text || '').trim();
+    const body = String(it.text || '').trim().replace(_LEAD, '');
     const text = (_GENERIC.test(title) || !title ? body : (body && !body.startsWith(title) ? `${title} — ${body}` : title)).substring(0, 400);
     const ts = +it.ts || Date.now();
     if (!source || text.length < 12 || ts < cutoff) continue;
@@ -300,10 +304,21 @@ async function _sameApps(a, b) {
       'גם עדכון על אותו אירוע (נמצא, נעצר, מת מפצעיו, פרט חדש) הוא אותה ידיעה. ' +
       'גם שני ציטוטים שונים מאותה הודעה כתובה או תגובה אחת של אותו אדם — אותה ידיעה ("ליברמן: ממשלת המשתמטים לא הכריעה" ו"ליברמן לוינטר: תתחיל לעמוד בלחצים", מאותה תגובה). ' +
       'אבל אמירות על נושאים שונים באותו נאום או ראיון — ידיעות נפרדות ("וינטר: ליברמן מטעה את בוחריו" ו"וינטר: הליכוד שלח חוקרים פרטיים"). ותגובה של אדם אחר — ידיעה נפרדת. ' +
-      'לא מספיק אותו נושא כללי (שני אירועים שונים באותו אזור או באותה מדינה). החזר JSON בלבד: {"same": true|false}',
-    maxTokens: 30, model: 'claude-haiku-4-5-20251001',
+      'לא מספיק אותו נושא כללי (שני אירועים שונים באותו אזור או באותה מדינה). ' +
+      'ולא מספיק אותו אדם או אותה פרשה ברקע: "יועצת של השר לביטחון לאומי הותקפה" ו"מקורבי בן גביר צוחקים על המינוי של אריה דורון" — שני אירועים שונים. החזר JSON בלבד: {"same": true|false}',
+    maxTokens: 30, model: 'claude-haiku-4-5-20251001', temperature: 0,
   });
-  return !!(r && r.same === true);
+  if (!(r && r.same === true)) return false;
+  // "כן" מצרף ידיעה לסיפור של מישהו אחר — תמונה, סרטון וכותרת עוברים איתה.
+  // Haiku צירף את תקיפת היועצת של בן גביר למינוי של אריה דורון (16.9), אז
+  // על "כן" שואלים גם את Sonnet. "לא" נשאר זול.
+  const s = await require('./claude').classifyJSON(`התראה א:\n"${a}"\n\nהתראה ב:\n"${b}"`, {
+    system: 'אתה עורך חדשות קפדן. האם שתי ההתראות מדווחות על אותו אירוע ספציפי בדיוק — אותו מעשה או אותה אמירה, של אותם אנשים? ' +
+      'עדכון או פרט חדש על אותו אירוע — כן. אירוע אחר שקשור לאותו אדם, לאותה פרשה או לאותו עימות — לא. כשיש ספק — לא. החזר JSON בלבד: {"same": true|false}',
+    maxTokens: 30, model: 'claude-sonnet-4-6', temperature: 0,
+  });
+  if (!(s && s.same === true)) { logger.info(`📲 Sonnet overruled a merge: "${String(a).substring(0, 35)}" ≠ "${String(b).substring(0, 35)}"`); return false; }
+  return true;
 }
 
 // "פיצוצים נשמעו באיראן" was linked to Kan Bet's "נשיא איראן: אין מלחמה עם
@@ -567,7 +582,7 @@ function stories(hours = 24, limit = 15) {
     return {
       // Tappable in the app: the story sheet opens by any member's id.
       id: st.members[0].id,
-      title: st.members[0].text.substring(0, 140),
+      title: _cleanTitle(st.members[0].text).substring(0, 140),
       apps,
       radio: r ? { ts: r.ts, station: r.station } : null,
       first: first ? first[0] : null,
@@ -647,12 +662,12 @@ function _latestUncached(hours = 12, limit = 20) {
     const reporters = [...new Set(st.members.filter(m => m.reporter).map(m => m.source))];
     // The headline: an app's wording when there is one (edited), else a reporter's.
     const titleSrc = (appOrder[0] || order.find(([src]) => reporters.includes(src)) || order[0] || [null])[0];
-    const firstTitle = titleSrc ? texts[titleSrc] : st.members[0].text.substring(0, 160);
+    const firstTitle = _cleanTitle(titleSrc ? texts[titleSrc] : st.members[0].text.substring(0, 160));
     const waveHead = lastWave && (lastWave.find(m => _isApp(m) && !m.part) || lastWave.find(m => m.reporter) || lastWave[0]);
     return {
       id: st.members[0].id,
       memberIds: st.members.map(m => m.id),
-      title: waveHead ? waveHead.text.substring(0, 160) : firstTitle,
+      title: waveHead ? _cleanTitle(waveHead.text).substring(0, 160) : firstTitle,
       // What it was before the new wave, and when the wave began.
       was: waveHead ? firstTitle : null,
       cat: _catOf(st.members, Object.values(texts).join(' ')),

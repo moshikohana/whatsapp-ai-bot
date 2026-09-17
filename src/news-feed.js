@@ -140,6 +140,20 @@ function _push(item) {
 }
 
 /** מוואטסאפ: נקרא על כל הודעה בקבוצה או ערוץ. */
+/**
+ * מה שנשאר מהפוסט אחרי החתימה: שם הכותב בכוכביות, שם הקבוצה, קישורי הצטרפות.
+ * תמונה בלי כיתוב מגיעה רק עם החתימה — והמודל נתן לה את הכותרת של הפוסט
+ * הקודם, כך שתמונה של רבנים הופיעה על המינוי של אריה דורון (16.9).
+ */
+function _content(text) {
+  return String(text || '')
+    .replace(/https?:\/\/\S+|chat\.whatsapp\.com\/\S+|t\.me\/\S+/g, ' ')
+    .replace(/\*[^*\n]{1,40}\*/g, ' ')
+    .replace(/להצטרפות|הצטרפו|לשליחת חומרים|טלגרם|אינסטגרם|ווטסאפ|וואטסאפ/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
 function onWhatsApp({ cid, body, ts, media, video }) {
   const name = _sources().wa.get(cid);
   if (!name) return;
@@ -160,6 +174,7 @@ cat — קטגוריה: "ביטחון" (צבא, מלחמה, פיגועים, יו
 לידיעה — כתוב כותרת של משפט אחד בעברית, נאמנה לפוסט, בלי להוסיף פרט שאין בו. פוסט באנגלית, בערבית או בפרסית — תרגם לכותרת בעברית, אף פעם לא בשפת המקור.
 ⚠️ תפקידים ותארים — בדיוק כמו בפוסט. "השר לביטחון לאומי" (בן גביר) הוא לא "שר הביטחון" (כ"ץ); אל תקצר תואר לתואר אחר. ואל תוסיף פעולה שלא כתובה ("קרא להתפטר" כשלא נכתב).
 ⚠️ השם בסוגריים המרובעים הוא הערוץ ששלח את הפוסט — לא נושא הידיעה. אל תכניס אותו לכותרת כאילו הידיעה עליו ("רכב של אבו עלי אקספרס הותקף" — שגוי).
+⚠️ פוסט שכולו חתימה — שם כותב, שם הקבוצה, קישורי הצטרפות — בלי שום תוכן משלו (לרוב תמונה בלי כיתוב): news:false.
 ⚠️ פוסט שהוא המשך של פוסט קודם ("כך נראה הרכב שהותקף", "תיעוד מהזירה") — הכותרת לפי ההקשר שבשורת "הקודם" אם יש; בלי הקשר — news:false.
 החזר JSON בלבד: {"items":[{"n":מספר הפוסט,"news":true|false,"headline":"כותרת או null","cat":"ביטחון|פנים ישראל|פוליטיקה|חוץ|אחר"}]}`;
 
@@ -182,7 +197,9 @@ async function _flush() {
     // שהותקף" means nothing alone (13.9 it became "Abu Ali's car was hit").
     const list = batch.map((p, i) => {
       const prev = _lastBySource.get(p.source);
-      const ctx = prev && p.ts - prev.ts < 45 * 60000 && prev.text !== p.text ? `\n   (הקודם בערוץ: ${prev.text.replace(/\s+/g, ' ').substring(0, 200)})` : '';
+      // A post with nothing but a signature gets no context to borrow a
+      // headline from — it has no words of its own to continue anything with.
+      const ctx = prev && p.ts - prev.ts < 45 * 60000 && prev.text !== p.text && _content(p.text).length >= 12 ? `\n   (הקודם בערוץ: ${prev.text.replace(/\s+/g, ' ').substring(0, 200)})` : '';
       return `${i + 1}. [${p.source}] ${p.text.replace(/\s+/g, ' ').substring(0, 500)}${ctx}`;
     }).join('\n');
     for (const p of batch) _lastBySource.set(p.source, { ts: p.ts, text: p.text });

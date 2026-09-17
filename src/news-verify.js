@@ -134,16 +134,24 @@ async function check(story) {
       const r = await require('./claude').classifyJSON(`ידיעה:\n"${text}"\n\nמועמדים:\n${list}`, {
         system: 'אתה עורך חדשות שבודק אימות. אילו מהמועמדים מדווחים על אותו אירוע ספציפי שבידיעה — אותם אנשים או גופים, אותו מעשה או אמירה — ' +
           'גם בניסוח אחר או כחלק מסיכום? לא: אותו נושא כללי, אותו חג או מועד, או אירוע דומה אחר. כשיש ספק — לא. ' +
-          'החזר JSON בלבד: {"same": [מספרים]}',
-        maxTokens: 60, model: 'claude-sonnet-4-6',
+          // כמו ב"כבר ידוע" (16.9): קודם מי עושה או אומר מה בכל אחד, ואז הכרעה.
+          'לפני ההכרעה: כתוב מי עושה או אומר מה בידיעה ובכל מועמד. מועמד שבו מישהו אחר עשה או אמר משהו — לא. ' +
+          'החזר JSON בלבד: {"story":"מי — מה","cands":[{"n":1,"who_what":"מי — מה","same":true|false}]}',
+        maxTokens: 900, model: 'claude-sonnet-4-6', temperature: 0,
       });
-      const nums = Array.isArray(r && r.same) ? r.same.map(Number).filter(x => x >= 1 && x <= cands.length) : [];
+      const nums = Array.isArray(r && r.cands)
+        ? r.cands.filter(c => c && c.same === true).map(c => Number(c.n)).filter(x => x >= 1 && x <= cands.length)
+        : [];
       hits = nums.map(x => cands[x - 1]);
     }
     const sources = [];
     // Every other source already in the story confirms it — an app, a channel, a reporter.
+    // With its own wording: without it the card in the app was empty (16.9).
     const _t = { wa: 'whatsapp', tg: 'telegram' };
-    for (const a of appSources.slice(1)) sources.push({ type: _t[(story.vias || {})[a]] || 'app', name: a, ts: story.apps[a] });
+    for (const a of appSources.slice(1)) {
+      const own = String((story.texts || {})[a] || '').replace(/\s+/g, ' ').trim();
+      sources.push({ type: _t[(story.vias || {})[a]] || 'app', name: a, ts: story.apps[a], ...(own ? { excerpt: own.substring(0, 220) } : {}) });
+    }
     // What 'new or already known' found before the push is confirmation too:
     // the same event, from somewhere else, earlier.
     try {
