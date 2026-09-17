@@ -73,7 +73,9 @@ function parse(text) {
 function _station(id) { return require('./broadcast-monitor').STATIONS.find(s => s.id === id); }
 const _hhmm = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
 
-function start({ stationId, from = Date.now(), minutes = 30, reason = '' }) {
+function start({ stationId, from = Date.now(), minutes = 30, reason = '', auto = null }) {
+  // A listen on someone — by push or by hand — means no second automatic one on them today.
+  try { const k = String(reason || '').match(require('./broadcast-headlines').KEY_FIGURES); if (k) _figureLast[k[0].replace('אייזנקוט', 'איזנקוט')] = Date.now(); } catch (_) {}
   const st = _station(stationId);
   if (!st) return { error: 'תחנה לא מוכרת' };
   if (_state && !_state.done) return { error: `כבר מאזין ל${_state.station} עד ${_hhmm(_state.until)} — "עצור האזנה" קודם` };
@@ -81,6 +83,7 @@ function start({ stationId, from = Date.now(), minutes = 30, reason = '' }) {
   _state = {
     id, stationId, station: st.name, from, until: from + minutes * 60000, reason: String(reason || '').substring(0, 120),
     chunks: [], done: false, created: Date.now(),
+    ...(auto ? { auto } : {}),
     // "ראיון איזנקוט", "עם בנט" — what to listen for; bare "האזן לכאן ב" has none.
     subject: /ריאיון|ראיון|שיחה|נאום|עם /.test(String(reason || '')) ? String(reason).substring(0, 120) : '',
   };
@@ -171,6 +174,13 @@ async function _checkEnd() {
   if (!s || s.done) return;
   const last = (s.chunks || []).slice(-2).map(c => c.text).filter(Boolean);
   if (!last.length) return;
+  // Started by a push: the person has to be heard by name in the first four
+  // minutes, or this is not their interview (11:34, 17.9).
+  if (s.auto && !s.nameSeen) {
+    const variants = s.auto === 'איזנקוט' ? ['איזנקוט', 'אייזנקוט'] : [s.auto];
+    if (s.chunks.some(c => variants.some(v => String(c.text || '').includes(v)))) { s.nameSeen = true; _save(); }
+    else if (s.chunks.length >= 4) { s.endReason = `${s.auto} לא נשמע בשידור ב-4 הדקות הראשונות`; s.until = Date.now(); _save(); return; }
+  }
   const about = s.subject || '';
   let r = null;
   try {
@@ -306,11 +316,16 @@ function _notify(text, file, radio = null) {
 // interview was on air while nobody listened (17.9). A push that says a key
 // figure is being interviewed on a station we record starts the listen.
 const _LIVE = /(ב?רי?איון|משוחח|מתארח|אורח)/;
-const _JOIN = /(הצטרפו|האזינו|בשידור חי|עכשיו ב|ברשת ב|לשידור)/;
-const _autoLast = {};
+// "הצטרפו" is live. "האזינו" is the recording, after it ended: "סערה בעקבות
+// הריאיון של איזנקוט | האזינו" started a 15-minute listen to something else
+// (11:34, 17.9).
+const _JOIN = /(הצטרפו|בשידור חי|משודר עכשיו|כעת בשידור)/;
+const _AFTER = /(בעקבות|אחרי ה?רי?איון|האזינו)/;
+const _autoLast = {};      // station → ts
+const _figureLast = {};    // key figure → ts of the last listen on them
 function fromPush(text) {
   const t = String(text || '');
-  if (!_LIVE.test(t) || !_JOIN.test(t)) return null;
+  if (!_LIVE.test(t) || !_JOIN.test(t) || _AFTER.test(t)) return null;
   let key = null;
   try { key = t.match(require('./broadcast-headlines').KEY_FIGURES); } catch (_) {}
   if (!key) return null;
@@ -318,9 +333,11 @@ function fromPush(text) {
   if (!stationId) return null;
   if (_state && !_state.done) return null;                              // already listening
   if (Date.now() - (_autoLast[stationId] || 0) < 2 * 3600000) return null; // one interview, many pushes
+  const fig = key[0].replace('אייזנקוט', 'איזנקוט');
+  if (Date.now() - (_figureLast[fig] || 0) < 6 * 3600000) return null;    // this one was already heard today
   _autoLast[stationId] = Date.now();
-  const r = start({ stationId, minutes: 45, reason: `ראיון ${key[0]} — התחיל מהתראה: ${t.substring(0, 80)}` });
-  if (r && r.ok) logger.info(`🎧 focus started by a push: ${key[0]} on ${r.station}`);
+  const r = start({ stationId, minutes: 45, reason: `ראיון ${fig}`, auto: fig });
+  if (r && r.ok) logger.info(`🎧 focus started by a push: ${fig} on ${r.station}`);
   return r && r.ok ? r : null;
 }
 
