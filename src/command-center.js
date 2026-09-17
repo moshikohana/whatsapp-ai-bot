@@ -818,12 +818,9 @@ async function checkTrendingKeywords({ minGroups = 5, minHits = 3, minRatio = 1.
     } catch (e) {
       console.warn('⚠️ summarizeWhatHappened threw:', e.message);
     }
-    let draft = null;
-    try {
-      draft = await draftKellnerStatement(t.keyword, samples.slice(-5));
-    } catch (e) {
-      console.warn('⚠️ draftKellnerStatement threw:', e.message);
-    }
+    // A Kellner draft only when he asks ("טיוטות רק כשאבקש"): it was written
+    // on every trend alert, at Sonnet prices (measured 17.9).
+    const draft = null;
 
     const lines = [
       `🔥 *מגמה חמה — דחיפה מומלצת*`,
@@ -857,7 +854,7 @@ async function checkTrendingKeywords({ minGroups = 5, minHits = 3, minRatio = 1.
       lines.push(``);
     }
     lines.push(`❓ *מה לעשות?*`);
-    lines.push(`• אמור "תפרסם" — אשלח את הטיוטה לאישורך לפני פרסום`);
+    lines.push(`• אמור "תגובה על ${t.keyword}" — אנסח זווית לקלנר`);
     lines.push(`• אמור "תשלח לתקשורת" — אעביר לאנשי קשר תקשורת רלוונטיים`);
     lines.push(`• אמור "התעלם מ${t.keyword}" — לא היום`);
 
