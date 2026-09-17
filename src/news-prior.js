@@ -60,7 +60,7 @@ async function _confirm(storyText, cands, t0 = Date.now()) {
       'החזר JSON בלבד: {"story":"מי — מה","cands":[{"n":1,"who_what":"מי — מה","same":true|false}]}',
     // Sonnet, not Haiku: Haiku kept matching on the occasion alone. A few
     // calls per headline, once.
-    maxTokens: 700, model: 'claude-sonnet-4-6', temperature: 0,
+    maxTokens: 2000, model: 'claude-sonnet-4-6', temperature: 0,
   });
   const nums = Array.isArray(r && r.cands)
     ? r.cands.filter(c => c && c.same === true).map(c => Number(c.n)).filter(n => n >= 1 && n <= cands.length)

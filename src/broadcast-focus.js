@@ -151,7 +151,7 @@ async function _oneChunk() {
     try { audio = bd.keepAudio(file, st.id, ts); } catch (_) {}
     try { bd.recordChunk({ station: st.name, text, ts, audio }); } catch (_) {}
     try {
-      const hs = await hl.onChunk({ station: st.name, text, ts });
+      const hs = await hl.onChunk({ station: st.name, text, ts, guest: _state.subject || null, wait: true });
       for (const h of (Array.isArray(hs) ? hs : (hs ? [hs] : []))) _out.push(h);
     } catch (e) { logger.warn('🎧 focus headline: ' + (e.message || '').substring(0, 60)); }
   }

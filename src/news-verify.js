@@ -137,7 +137,7 @@ async function check(story) {
           // כמו ב"כבר ידוע" (16.9): קודם מי עושה או אומר מה בכל אחד, ואז הכרעה.
           'לפני ההכרעה: כתוב מי עושה או אומר מה בידיעה ובכל מועמד. מועמד שבו מישהו אחר עשה או אמר משהו — לא. ' +
           'החזר JSON בלבד: {"story":"מי — מה","cands":[{"n":1,"who_what":"מי — מה","same":true|false}]}',
-        maxTokens: 900, model: 'claude-sonnet-4-6', temperature: 0,
+        maxTokens: 2500, model: 'claude-sonnet-4-6', temperature: 0,
       });
       const nums = Array.isArray(r && r.cands)
         ? r.cands.filter(c => c && c.same === true).map(c => Number(c.n)).filter(x => x >= 1 && x <= cands.length)

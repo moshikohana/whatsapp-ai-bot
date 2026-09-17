@@ -107,7 +107,7 @@ function lastKind(station) { return _kind[station] || null; }
 /**
  * נקרא על כל דגימה חדשה. לא חוסם את לולאת הדגימה — רץ ברקע ובולע שגיאות.
  */
-async function onChunk({ station, text, ts = Date.now() }) {
+async function onChunk({ station, text, ts = Date.now(), guest = null, wait = false }) {
   const out = [];                     // a chunk can yield more than one headline
   const clean = String(text || '').trim();
   const recentArr = (_prev[station] || []).filter(p => ts - p.ts < 20 * 60 * 1000 && !isAd(p.text));
@@ -115,6 +115,8 @@ async function onChunk({ station, text, ts = Date.now() }) {
   // 55 seconds of speech is 500+ characters; a few words is a song or silence.
   if (!clean || clean.length < 60) { _kind[station] = { ts, kind: 'music' }; return out; }
   if (isAd(clean)) { _kind[station] = { ts, kind: 'ads' }; return out; }
+  // A focused listen waits its turn: each of its minutes is the only copy.
+  if (_busy && wait) { const t0 = Date.now(); while (_busy && Date.now() - t0 < 90000) await new Promise(r => setTimeout(r, 500)); }
   if (_busy) return out;             // one at a time; the next chunk carries the context
   _busy = true;
   try {
@@ -136,8 +138,13 @@ async function onChunk({ station, text, ts = Date.now() }) {
 
     const claude = require('./claude');
     const r = await claude.classifyJSON(
-      `תחנה: ${station}\n${segLine}\n\nתמלול:\n${window}`,
-      { system: SYSTEM, maxTokens: 400, model: 'claude-haiku-4-5-20251001' }
+      `תחנה: ${station}\n${segLine}\n` +
+      // A focused listen knows who is being interviewed — Eisenkot's words
+      // went out as Yair Golan's, a name he mentioned (17.9).
+      (guest ? `הקלטה רציפה של: ${guest}. אם הדובר בקטע הוא המרואיין הזה — הוא הדובר; אל תייחס את דבריו לאדם אחר שהוזכר.\n` : '') +
+      `\nתמלול:\n${window}`,
+      // 400 cut four Hebrew headlines mid-JSON and every one of them was lost (17.9).
+      { system: SYSTEM, maxTokens: 1600, model: 'claude-haiku-4-5-20251001' }
     );
     // One line per check. Without it a quiet hour and a broken detector look
     // the same in the log.
@@ -171,18 +178,27 @@ async function onChunk({ station, text, ts = Date.now() }) {
     let speaker = c.speaker ? String(c.speaker).trim() : null;
     let role = c.role ? String(c.role).trim() : null;
     let headline = String(c.headline).trim();
+    // In a focused listen he named who is interviewed; that counts as said.
+    // The hosts called Eisenkot "גדי" for minutes, his name was dropped, and an
+    // earlier guest took his place in two headlines (17.9, 10:21).
+    const said = norm(`${window} ${guest || ''}`);
+    // The headline's own "שם:" label is the speaker when it is the guest.
+    if (!speaker && guest) {
+      const lab = headline.match(/^([^:]{2,30}):\s*/);
+      if (lab && norm(guest).includes(norm(lab[1]).split(' ').pop())) speaker = lab[1].trim();
+    }
     // An invented label in front of an unknown speaker — "דובר ימין: …" (14.9) — goes.
-    if (!c.speaker) {
+    if (!speaker) {
       const lab = headline.match(/^([^:]{2,30}):\s*/);
       // Only a label that was never said: "דובר צה"ל:" heard on air stays.
-      if (lab && !norm(window).includes(norm(lab[1]))) {
+      if (lab && !said.includes(norm(lab[1]))) {
         logger.info(`📻 headline: dropped invented label "${lab[1]}"`);
         headline = headline.slice(lab[0].length).trim();
       }
     }
     if (speaker) {
       const surname = speaker.split(/\s+/).pop();
-      if (!norm(window).includes(norm(surname))) {
+      if (!said.includes(norm(surname))) {
         logger.info(`📻 headline: dropped unstated speaker "${speaker}"`);
         if (headline.includes(speaker)) headline = headline.replace(speaker, '').replace(/^[\s:—-]+/, '');
         if (surname && headline.includes(surname)) headline = headline.replace(surname, '').replace(/^[\s:—-]+/, '');
@@ -311,14 +327,16 @@ async function onChunk({ station, text, ts = Date.now() }) {
     }
 
     // 🎙️ No speaker in the sample: the introduction, minutes back.
-    if (!speaker) {
+    // Not in a focused listen: there the guest is known, and a search back
+    // found the previous guest instead (נדב שושני for Eisenkot, 17.9).
+    if (!speaker && !guest) {
       try {
         const f = await findSpeaker(station, ts, quote || headline);
         if (f) { speaker = f.speaker; role = role || f.role; logger.info(`🎙️ headline speaker found: ${f.speaker} — "${f.evidence.substring(0, 60)}"`); }
       } catch (_) {}
     }
     // עדיין בלי שם — אבל אולי הוא זה שמתארח כאן כבר רבע שעה.
-    if (!speaker) {
+    if (!speaker && !guest) {
       const g = _currentGuest(station, ts, seg && seg.name);
       if (g) { speaker = g.speaker; role = role || g.role; logger.info("🎙️ headline speaker from the open interview: " + g.speaker); }
     }
@@ -480,7 +498,7 @@ function _currentGuest(station, ts, seg) {
 }
 
 async function findSpeaker(station, ts, quote) {
-  const chunks = require('./broadcast-digest').chunksBetween(ts - 40 * 60000, ts + 60000)
+  const chunks = require('./broadcast-digest').chunksBetween(ts - 25 * 60000, ts + 60000)
     .filter(c => c.station === station && !isAd(c.text)).sort((a, b) => a.ts - b.ts);
   const hits = [];
   for (const c of chunks) {
