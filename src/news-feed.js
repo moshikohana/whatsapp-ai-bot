@@ -141,6 +141,7 @@ function _push(item) {
   const k = `${item.via}|${item.source}|${item.text.replace(/\s+/g, ' ').substring(0, 80)}`;
   if (_seen.has(k)) return;
   _seen.add(k); if (_seen.size > 5000) _seen.clear();
+  item._q = Date.now();   // when it joined the queue — see _ready
   _pending.push(item);
 }
 
@@ -189,15 +190,67 @@ let _busy = false;
 // and the Netanyahu statement of 15:19 with them. A post waits up to 12 hours.
 let _pauseUntil = 0;
 const _LAST_FILE = path.join(__dirname, '..', 'data', 'news-feed-last.json');
+// 💰 What a post was judged, by its words: the same post in five groups is
+// asked about once (17.9 — 256 of 350 news items an hour were repeats).
+const _judged = new Map();   // content key → { news, headline, cat }
+const _jkey = t => _content(t).substring(0, 120);
+function _remember(key, v) {
+  if (!key || key.length < 20) return;
+  _judged.set(key, v);
+  if (_judged.size > 3000) _judged.delete(_judged.keys().next().value);
+}
+
+// A batch pays for the instructions once: posts wait for company, not long.
+const BATCH_MIN = 15;
+const WAIT_MS = 90 * 1000;
+const NIGHT_WAIT_MS = 20 * 60 * 1000;
+function _ready() {
+  if (_pending.length >= BATCH_MIN) return true;
+  const oldest = Math.min(..._pending.map(p => p._q || Date.now()));
+  const h = +new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem', hour: '2-digit', hour12: false }) % 24;
+  return Date.now() - oldest >= (h < 6 ? NIGHT_WAIT_MS : WAIT_MS);
+}
+
+async function _toItem(p, headline, cat) {
+  const h = require('./news-apps').fixRole(headline, p.text);
+  let img = null;
+  if (p.media) { try { img = await _saveMedia(await Promise.race([p.media(), new Promise(r2 => setTimeout(() => r2(null), 20000))]), p.video ? 400 : 2000); } catch (_) {} }
+  return {
+    source: p.source, via: p.via, title: String(h).substring(0, 240), text: '',
+    cat: ['ביטחון', 'פנים ישראל', 'פוליטיקה', 'חוץ', 'אחר'].includes(cat) ? cat : undefined,
+    full: p.text, ts: p.ts, link: p.link, reporter: isReporter(p.source), img,
+    ...(p.video ? { video: p.video } : {}),
+  };
+}
+
 async function _flush() {
   if (_busy || !_pending.length || Date.now() < _pauseUntil) return;
+  if (!_ready()) return;
   _busy = true;
   try {
     // New posts first: after an outage the catch-up put 221 old posts in the
     // queue, and a post from a minute ago waited behind all of them (15.9).
     const fresh = p => Date.now() - (p.ts || 0) < 20 * 60000 ? 0 : 1;
     _pending.sort((a, b) => fresh(a) - fresh(b));
-    const batch = _pending.splice(0, 25);
+    let batch = _pending.splice(0, 25);
+    // Already judged — the same words from another group — go straight in.
+    const known = [];
+    const seenNow = new Set();
+    batch = batch.filter(p => {
+      const k = _jkey(p.text);
+      const j = _judged.get(k);
+      if (j) { known.push({ p, j }); return false; }
+      if (k.length >= 20 && seenNow.has(k)) { known.push({ p, k }); return false; }   // twin in this batch: after the model
+      seenNow.add(k);
+      return true;
+    });
+    if (!batch.length) {
+      const outK = [];
+      for (const { p, j } of known) if (j && j.news) outK.push(await _toItem(p, j.headline, j.cat));
+      if (outK.length) require('./news-apps').addMany(outK);
+      logger.info(`📡 feed: ${known.length} repeat post(s) — no model call`);
+      return;
+    }
     // Each post with the one its channel sent just before: "כך נראה הרכב
     // שהותקף" means nothing alone (13.9 it became "Abu Ali's car was hit").
     const list = batch.map((p, i) => {
@@ -232,22 +285,32 @@ async function _flush() {
         }
       }
     } catch (e) { logger.warn('📡 feed headline check: ' + (e.message || '').substring(0, 60)); }
+    const verdict = new Map();   // content key → judgment, for this batch's twins
+    if (r && Array.isArray(r.items)) {
+      // What the model said about each post — "not news" is remembered too.
+      batch.forEach((p, i) => {
+        const it = r.items.find(x => +x.n === i + 1);
+        const v = it && it.news === true && it.headline ? { news: true, headline: it.headline, cat: it.cat } : { news: false };
+        const k = _jkey(p.text);
+        _remember(k, v); verdict.set(k, v);
+      });
+    }
     for (const it of (r && Array.isArray(r.items) ? r.items : [])) {
       const p = batch[(+it.n || 0) - 1];
       if (!p || it.news !== true || !it.headline) continue;
-      it.headline = require('./news-apps').fixRole(it.headline, p.text);
-      let img = null;
-      if (p.media) { try { img = await _saveMedia(await Promise.race([p.media(), new Promise(r2 => setTimeout(() => r2(null), 20000))]), p.video ? 400 : 2000); } catch (_) {} }
-      out.push({
-        source: p.source, via: p.via, title: String(it.headline).substring(0, 240), text: '',
-        cat: ['ביטחון', 'פנים ישראל', 'פוליטיקה', 'חוץ', 'אחר'].includes(it.cat) ? it.cat : undefined,
-        full: p.text, ts: p.ts, link: p.link, reporter: isReporter(p.source), img,
-        ...(p.video ? { video: p.video } : {}),
-      });
+      out.push(await _toItem(p, it.headline, it.cat));
     }
+    // The repeats: the same judgment, another source for the story.
+    let reused = 0;
+    for (const { p, j, k } of known) {
+      const v = j || verdict.get(k);
+      if (v && v.news) { out.push(await _toItem(p, v.headline, v.cat)); reused++; }
+    }
+    if (known.length) logger.info(`📡 feed: ${known.length} repeat post(s) judged without the model (${reused} news)`);
     if (!r) {
       const back = batch.filter(p => Date.now() - (p.ts || 0) < 12 * 3600000);
-      _pending.unshift(...back);
+      // The twins waiting on this batch's answer go back with it.
+      _pending.unshift(...back, ...known.filter(x => x.k).map(x => x.p));
       if (_pending.length > 1500) _pending.splice(1500);
       _pauseUntil = Date.now() + 5 * 60000;
       logger.warn(`📡 feed: classification failed — ${back.length} posts back in the queue, retry in 5 min (${_pending.length} waiting)`);
@@ -385,7 +448,8 @@ function start() {
     try { const t = JSON.parse(fs.readFileSync(_LAST_FILE, 'utf8')).ts; if (t) h = Math.min(12, Math.max(4, Math.ceil((Date.now() - t) / 3600000) + 1)); } catch (_) {}
     catchUp(h);
   }, 3 * 60000);
-  setInterval(_flush, 45000);
+  // Checked often; a batch leaves when it is full or has waited long enough (_ready).
+  setInterval(_flush, 15000);
   setTimeout(_hookTelegram, 20000);
   setInterval(_hookTelegram, 5 * 60000);        // re-hook after a reconnect
   setTimeout(_pollChannels, 60000);

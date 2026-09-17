@@ -128,8 +128,19 @@ async function check(story) {
       .map(c => ({ ...c, n: overlap(text, c.text) })).filter(c => c.n >= 3.5)
       .sort((a, b) => b.n - a.n).slice(0, 9);
     const tgs = (await _telegram(text, from)).map(c => ({ ...c, n: overlap(text, c.text) })).filter(c => c.n >= 2).slice(0, 5);
-    const cands = [...pool, ...tgs];
+    let cands = [...pool, ...tgs];
     let hits = [];
+    // 💰 Haiku picks, Sonnet decides only on what was picked (17.9).
+    if (cands.length) {
+      const list0 = cands.map((c, i) => `${i + 1}. [${c.type}] ${c.text.replace(/\s+/g, ' ').substring(0, 350)}`).join('\n');
+      const pre = await require('./claude').classifyJSON(`ידיעה:\n"${text}"\n\nמועמדים:\n${list0}`, {
+        system: 'אילו מהמועמדים מדווחים על אותו אירוע ספציפי שבידיעה — אותם אנשים, אותו מעשה או אותה אמירה? לא: אותו נושא כללי או אירוע אחר. ' +
+          'כשיש ספק — כלול אותו, בדיקה נוספת תכריע. החזר JSON בלבד: {"same":[מספרים]}',
+        maxTokens: 60, model: 'claude-haiku-4-5-20251001', temperature: 0,
+      });
+      const picked = Array.isArray(pre && pre.same) ? [...new Set(pre.same.map(Number))].filter(n => n >= 1 && n <= cands.length) : [];
+      cands = picked.map(n => cands[n - 1]);
+    }
     if (cands.length) {
       const list = cands.map((c, i) => `${i + 1}. [${c.type}] ${c.text.replace(/\s+/g, ' ').substring(0, 350)}`).join('\n');
       const r = await require('./claude').classifyJSON(`ידיעה:\n"${text}"\n\nמועמדים:\n${list}`, {

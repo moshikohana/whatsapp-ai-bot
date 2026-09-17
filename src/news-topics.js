@@ -478,7 +478,8 @@ function reset() {
 
 function start() {
   setTimeout(group, 4 * 60000);
-  setInterval(group, 20 * 60000);
+  // 💰 Every 45 minutes, not 20: a Sonnet call each time, and stories rarely wait (17.9).
+  setInterval(group, 45 * 60000);
 }
 
 module.exports = { start, group, write, list, follow, build, find, format, reset };

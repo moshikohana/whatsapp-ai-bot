@@ -124,7 +124,8 @@ async function ground(items, transcript, { label = '', window = null } = {}) {
     (news.length ? `\nכותרות קשורות מאפליקציות וערוצים:\n${news.map(p => `  - [${p.source} ${hhmm(p.ts)}] ${p.text.substring(0, 220)}`).join('\n')}` : '');
   const ask = async list => {
     const r = await claude.classifyJSON(`תמלול:\n${String(transcript).substring(0, 24000)}\n\nפריטים לבדיקה:\n${list.map(block).join('\n\n')}`,
-      { system: SYSTEM, maxTokens: 3000, temperature: 0 });
+      // 💰 A single radio headline is checked against a few minutes of transcript — Haiku does it (17.9).
+      { system: SYSTEM, maxTokens: 3000, temperature: 0, ...(label === 'headline' ? { model: 'claude-haiku-4-5-20251001' } : {}) });
     return new Map(((r && r.items) || []).filter(Boolean).map(x => [String(x.id).replace(/^#/, ''), x]));
   };
 

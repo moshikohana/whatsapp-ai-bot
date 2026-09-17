@@ -45,6 +45,8 @@ const { renderVideo, getTemplates } = require('./src/video');
 const { loadConversations, saveConversations, flushConversations, loadScheduledTasks, saveScheduledTasks, loadDailyTasks, saveDailyTasks } = require('./src/persistence');
 const { withCache, cache } = require('./src/cache');
 const logger = require('./src/logger');
+// 💰 Every model call counted by feature, under a daily cap (17.9).
+require('./src/ai-meter').install();
 
 // Stamp every console line with the time. pm2 only does this when the process
 // was started with --time, and this one was not — which left its whole log
@@ -9075,6 +9077,17 @@ setInterval(async () => {
     if (list.length) { await _sendHeadlineList(list); logger.info(`🎧 focus: ${list.length} headline(s) sent`); }
   } catch (e) { logger.warn('focus loop: ' + (e.message || '').substring(0, 70)); }
 }, 10 * 1000);
+// 💰 Once a day, when the extras stop for the budget.
+require('./src/ai-meter').onCap(c => {
+  try {
+    require('./src/jarvis-api').pushAlert({
+      title: `💰 הגענו ל-$${c.usd.toFixed(2)} היום`,
+      summary: 'נושאים, כבר ידוע ואומת נעצרו עד מחר. רדיו והאזנה לראיונות ממשיכים.',
+      body: 'התקרה היומית לשימוש במודלים נוצלה ברובה. כדי לא לעבור אותה, התוספות נעצרו עד חצות: קיבוץ נושאים, "כבר ידוע", "אומת" וסיכומים. כותרות רדיו, האזנה לראיונות והשיחה איתך ממשיכים.',
+      kind: 'system', urgency: 'normal', supersedes: 'budget',
+    });
+  } catch (_) {}
+});
 try {
   require('./src/broadcast-focus').setSender(async (text, file, radio) => {
     const oc = await client.getChatById(OWNER_ID);

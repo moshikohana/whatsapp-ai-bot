@@ -41,7 +41,19 @@ async function _confirm(storyText, cands, t0 = Date.now()) {
   // matched sirens 22 hours earlier: the same words, another night (13.9).
   const ago = ts => { const h = (t0 - ts) / 3600000; return h < 1 ? `${Math.max(1, Math.round(h * 60))} דק׳ לפני` : `${Math.round(h)} שעות לפני`; };
   const list = cands.map((c, i) => `${i + 1}. (${c.ts ? ago(c.ts) : '?'}) ${String(c.text).replace(/\s+/g, ' ').substring(0, 400)}`).join('\n');
-  const r = await require('./claude').classifyJSON(`ידיעה:\n"${storyText.substring(0, 500)}"\n\nמועמדים:\n${list}`, {
+  // 💰 Haiku first, with a one-line answer: most checks find nothing, and
+  // those used to cost a full Sonnet answer each (17.9). Sonnet — with the
+  // who-does-what reasoning — only looks at what Haiku picked.
+  const pre = await require('./claude').classifyJSON(`ידיעה:\n"${storyText.substring(0, 500)}"\n\nמועמדים:\n${list}`, {
+    system: 'אילו מהמועמדים מדווחים על אותו אירוע ספציפי שבידיעה — אותם אנשים, אותו מעשה או אותה אמירה? לא: אותו נושא כללי, אדם אחר שעשה משהו דומה, או אירוע אחר של אותו אדם. ' +
+      'כשיש ספק — כלול אותו, בדיקה נוספת תכריע. החזר JSON בלבד: {"same":[מספרים]}',
+    maxTokens: 60, model: 'claude-haiku-4-5-20251001', temperature: 0,
+  });
+  const picked = Array.isArray(pre && pre.same) ? [...new Set(pre.same.map(Number))].filter(n => n >= 1 && n <= cands.length) : [];
+  if (!picked.length) return [];
+  cands = picked.map(n => cands[n - 1]);
+  const list2 = cands.map((c, i) => `${i + 1}. (${c.ts ? ago(c.ts) : '?'}) ${String(c.text).replace(/\s+/g, ' ').substring(0, 400)}`).join('\n');
+  const r = await require('./claude').classifyJSON(`ידיעה:\n"${storyText.substring(0, 500)}"\n\nמועמדים:\n${list2}`, {
     // "Leaders around the world sent new-year greetings" was matched to Ben
     // Gvir's own new-year message: same occasion, not the same story. The
     // prompt asks for the specific event — who, what, where.

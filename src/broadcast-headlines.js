@@ -28,6 +28,9 @@ const MIN_SCORE = 4;
 const KEY_FIGURES = /(נתניהו|איזנקוט|אייזנקוט|גנץ|ליברמן|וינטר|בן גביר|סמוטריץ|יאיר גולן|בנט|לפיד|דרעי|גולדקנופף|קלנר|הליכוד|עמך ישראל|הציונות הדתית|עוצמה יהודית|ש"ס|יהדות התורה|הדמוקרטים|ישראל ביתנו|כחול לבן)/;          // 1-5; only genuine headlines interrupt him
 
 const _prev = {};             // station -> recent chunks [{ ts, text }]
+// Words a political, diplomatic or security headline cannot do without.
+const POLITICAL = /(ממשל|כנסת|השר|שרה|שרים|ח"כ|ח״כ|חבר הכנסת|בחירות|מפלג|קואליצי|אופוזיצי|צה"ל|צה״ל|צהל|חמאס|חיזבאללה|איראן|עזה|לבנון|חטופ|בג"ץ|בג״ץ|בגץ|יועמ"ש|יועמ״ש|שב"כ|שב״כ|שבכ|מלחמ|ביטחון|רמטכ|סקר|מנדט|ראש הממשלה|רה"מ|רה״מ|פוליטי|ועדת|הפגנ|פיגוע|מחבל)/;
+const _skipN = {};            // station -> non-political samples in a row
 
 // Words too common to say two headlines are about the same thing.
 const STOP = new Set([
@@ -125,13 +128,26 @@ async function onChunk({ station, text, ts = Date.now(), guest = null, wait = fa
     // introduced once, at the start — the wider the window, the likelier that
     // introduction is in it and the speaker can be named honestly rather than
     // left blank.
-    const window = [...recentArr.slice(-3).map(p => p.text), clean].join('\n');
+    // 💰 Two samples back, not three (17.9): the names are still checked
+    // against this window, and most introductions fall in the last eight minutes.
+    const window = [...recentArr.slice(-2).map(p => p.text), clean].join('\n');
 
     // 📻 Where in the day this is: the round-hour bulletin, or which programme
     // (and its hosts, who are never the "speaker"). See broadcast-schedule.
     let seg = { bulletin: false, name: null, hosts: [], type: 'morning' };
     try { seg = require('./broadcast-schedule').segmentAt(station, ts); } catch (_) {}
     if (seg.type === 'sports' || seg.type === 'music') { _kind[station] = { ts, kind: seg.type === 'music' ? 'music' : 'talk' }; return out; }
+    // 💰 No model for what cannot be a headline (17.9):
+    // the round-hour bulletin has its own summary path, and a sample with no
+    // key figure and no political word is not one of his headlines. One in
+    // three of those still goes, so a song is still noticed and the station paused.
+    if (!guest) {
+      if (seg.bulletin) { _kind[station] = { ts, kind: 'news' }; return out; }
+      if (!KEY_FIGURES.test(clean) && !POLITICAL.test(clean)) {
+        _skipN[station] = (_skipN[station] || 0) + 1;
+        if (_skipN[station] % 3 !== 0) return out;
+      }
+    }
     const segLine = seg.bulletin ? 'עכשיו: מבזק החדשות של השעה העגולה'
       : `עכשיו: ${seg.name ? `התוכנית "${seg.name}"` : 'תוכנית'}${seg.type === 'interviews' ? ' (ראיונות)' : ''}` +
         (seg.hosts.length ? `\nמנחי התוכנית (הם לא הדוברים): ${seg.hosts.join(', ')}` : '');

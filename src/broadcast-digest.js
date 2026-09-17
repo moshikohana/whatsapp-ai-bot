@@ -329,7 +329,8 @@ async function analyseHour({ fromTs, toTs } = {}) {
   const result = await claude.classifyJSON(
     `תמלולי רדיו מהשעה האחרונה (${_hhmm(from)}–${_hhmm(to)}):\n\n${body}\n\n` +
     `הגבל ל-4 נושאים ו-4 ציטוטים לכל היותר, ושמור על summary של משפט אחד.` + avoid,
-    { system: SYSTEM, maxTokens: 6000 }
+    // 💰 Haiku, hourly: on Sonnet this summary alone was about two dollars a day (17.9).
+    { system: SYSTEM, maxTokens: 6000, model: 'claude-haiku-4-5-20251001' }
   );
   if (!result) {
     logger.warn(`📻 digest ${_hhmm(from)}–${_hhmm(to)}: analysis returned nothing (${chunks.length} chunks were available)`);

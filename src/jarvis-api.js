@@ -822,6 +822,8 @@ function attach(app, deps = {}) {
     deps.runCommand('סרטון שבועי').then(t => res.json({ ok: true, text: t })).catch(e => res.status(500).json({ error: (e.message || '').substring(0, 150) }));
   });
   app.get('/api/jarvis/jobs/active', guard, (_req, res) => res.json({ ok: true, jobs: require('./jobs').active() }));
+  // 💰 What the model cost today, by feature.
+  app.get('/api/jarvis/ai-usage', guard, (_req, res) => res.json({ ok: true, ...require('./ai-meter').today() }));
   // 🎧 Focused listen — one station without gaps, then the full recording and what mattered.
   app.get('/api/jarvis/broadcast/focus', guard, (_req, res) => res.json({ ok: true, ...require('./broadcast-focus').status() }));
   app.post('/api/jarvis/broadcast/focus', guard, (req, res) => {
