@@ -207,8 +207,12 @@ async function checkOnce() {
   const terms = (c.terms || []).filter(Boolean);
   if (!terms.length) return hits;
 
+  let _focused = null;
+  try { _focused = require('./broadcast-focus').busyStation(); } catch (_) {}
   for (const st of STATIONS.filter(s => (c.stations || []).includes(s.id))) {
     if ((_quiet[st.id] || {}).until > Date.now()) continue;
+    // Recorded without gaps right now — a sample on top would be paid twice.
+    if (st.id === _focused) continue;
     const file = await captureChunk(st.url, c.chunkSec);
     if (!file) { logger.warn?.(`broadcast: capture failed for ${st.name}`); continue; }
     const text = await transcribe(file);

@@ -7598,6 +7598,31 @@ async function route(chatId, text, chat) {
     }
   }
 
+  // 🎧 "האזן לכאן ב" / "האזן ל-103 ב-17:00 ל-30 דק׳" / "עצור האזנה" (17.9)
+  {
+    const bf = require('./src/broadcast-focus');
+    const tt = text.trim();
+    if (/^(עצור|הפסק|סיים)\s+(את\s+)?(ה)?(האזנה|הקלטה)/.test(tt)) {
+      const r = bf.stop();
+      return r.error ? `🎧 ${r.error}` : `🎧 עוצר את ההאזנה ל${r.station}. הסיכום וההקלטה המלאה בדרך.`;
+    }
+    if (/^(מצב|סטטוס)\s+(ה)?(האזנה|הקלטה)/.test(tt)) {
+      const s = bf.status();
+      if (!s.active) return '🎧 אין האזנה פעילה.';
+      const hh = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+      return s.waiting ? `🎧 אאזין ל${s.station} מ-${hh(s.from)} עד ${hh(s.until)}.` : `🎧 מאזין ל${s.station} עד ${hh(s.until)} — ${s.chunks} דקות הוקלטו.`;
+    }
+    const p = bf.parse(tt);
+    if (p && p.error) return `🎧 ${p.error}`;
+    if (p) {
+      const r = bf.start({ ...p, reason: tt });
+      if (r.error) return `🎧 ${r.error}`;
+      const hh = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+      return `🎧 ${r.waiting ? `אאזין ל${r.station} מ-${hh(r.from)}` : `מאזין עכשיו ל${r.station}`} עד ${hh(r.until)}, ברצף.\n` +
+        `ציטוטים חמים יגיעו תוך דקה-שתיים מרגע שנאמרו. בסוף — הקלטה מלאה, כותרות וקטעים חזקים.\n_לעצירה: "עצור האזנה"_`;
+    }
+  }
+
   // Quick commands (still work for power users)
   if (/^\/(תפריט|menu|help|עזרה|start)/i.test(text)) return helpMenu();
   if (/^\/(חדש|חדשות|עדכון|changelog|whatsnew|מה חדש)/i.test(text)) return whatsNew();
@@ -8989,47 +9014,8 @@ setInterval(() => {
 }, 60 * 1000);
 
 
-// ─── 📻 Live broadcast monitor loop ──────────────────────────────
-// Samples the enabled stations, transcribes, and pushes an alert the moment a
-// watched term is said on air. Self-throttling: only inside active hours.
-let _bcBusy = false;
-setInterval(async () => {
-  try {
-    if (!profile.jobEnabled('broadcast-monitor')) return;
-    if (botStatus !== 'connected' || _bcBusy) return;
-    const bm = require('./src/broadcast-monitor');
-    if (!bm.isEnabled() || !bm.inActiveHours()) return;
-    const c = bm.loadConfig();
-    if (Date.now() - (_bcLast || 0) < (c.intervalMin || 4) * 60 * 1000) return;
-    _bcBusy = true; _bcLast = Date.now();
-    const hits = await bm.checkOnce();
-    for (const h of hits) {
-      try { await botSend(await client.getChatById(OWNER_ID), bm.formatHit(h)); } catch {}
-      // Also to the phone. A name said on air is the case where WhatsApp is
-      // the wrong channel — it lands among everything else, and by the time
-      // he sees it the moment to respond has passed.
-      try {
-        require('./src/jarvis-api').pushAlert({
-          title: `📻 ${h.station || 'שידור'} — הוזכר קלנר`,
-          body: (h.sentence || h.text || '').substring(0, 400),
-          radio: [{ label: h.station || 'שידור', station: h.station || '', ts: h.ts || Date.now(), q: h.quote || h.term || '' }],
-          _pin: require('./src/broadcast-digest').pinAround(h.station || '', h.ts || Date.now(), h.quote || h.term || '', 'אזכור קלנר'),
-          kind: 'broadcast', urgency: 'high',
-        });
-      } catch {}
-    }
-    if (hits.length) logger.info(`📻 broadcast: ${hits.length} mention(s) alerted`);
-
-    // Headlines — the reason the monitor exists. Sent immediately, with the
-    // speaker and the verified quote, so it reaches him while it is still news
-    // rather than an hour later inside a summary.
-    // A headline that was built but never went out (a send that failed, a
-    // restart mid-loop) is picked up here rather than lost (15.9, 103FM 9:44).
-    let _headlines = hits.headlines || [];
-    try {
-      const _pend = require('./src/broadcast-headlines').pendingUnsent(45).filter(p => !_headlines.some(h => h.id === p.id));
-      if (_pend.length) { logger.info(`🗞️ ${_pend.length} headline(s) never went out — sending now`); _headlines = _headlines.concat(_pend); }
-    } catch (_) {}
+/** Headlines out to WhatsApp and the phone — from the sampling loop and from a focused listen. */
+async function _sendHeadlineList(_headlines) {
     for (const h of _headlines) {
       try { require('./src/broadcast-headlines').markTried(h.id); } catch (_) {}
       // 🔕 Kept for the tab and the hourly summary, not pushed: the round-hour
@@ -9077,6 +9063,72 @@ setInterval(async () => {
         } catch (e) { logger.warn('ready-response: ' + (e.message || '').substring(0, 60)); }
       })();
     }
+}
+
+// ─── 🎧 Focused listen: one station without gaps (17.9) ─────────
+setInterval(async () => {
+  try {
+    if (botStatus !== 'connected') return;
+    const bf = require('./src/broadcast-focus');
+    bf.tick();
+    const list = bf.drainHeadlines();
+    if (list.length) { await _sendHeadlineList(list); logger.info(`🎧 focus: ${list.length} headline(s) sent`); }
+  } catch (e) { logger.warn('focus loop: ' + (e.message || '').substring(0, 70)); }
+}, 10 * 1000);
+try {
+  require('./src/broadcast-focus').setSender(async (text, file) => {
+    const oc = await client.getChatById(OWNER_ID);
+    await botSend(oc, text);
+    if (file && fs.existsSync(file) && fs.statSync(file).size < 95 * 1024 * 1024) {
+      const { MessageMedia } = require('whatsapp-web.js');
+      await oc.sendMessage(new MessageMedia('audio/mpeg', fs.readFileSync(file).toString('base64'), path.basename(file)), { sendMediaAsDocument: true, caption: '🎧 ההקלטה המלאה' + BOT_MARKER });
+    }
+    try { require('./src/jarvis-api').pushAlert({ title: '🎧 סיכום האזנה', body: text.replace(/[*_]/g, '').substring(0, 1500), kind: 'broadcast-focus', urgency: 'normal' }); } catch (_) {}
+  });
+} catch (_) {}
+
+// ─── 📻 Live broadcast monitor loop ──────────────────────────────
+// Samples the enabled stations, transcribes, and pushes an alert the moment a
+// watched term is said on air. Self-throttling: only inside active hours.
+let _bcBusy = false;
+setInterval(async () => {
+  try {
+    if (!profile.jobEnabled('broadcast-monitor')) return;
+    if (botStatus !== 'connected' || _bcBusy) return;
+    const bm = require('./src/broadcast-monitor');
+    if (!bm.isEnabled() || !bm.inActiveHours()) return;
+    const c = bm.loadConfig();
+    if (Date.now() - (_bcLast || 0) < (c.intervalMin || 4) * 60 * 1000) return;
+    _bcBusy = true; _bcLast = Date.now();
+    const hits = await bm.checkOnce();
+    for (const h of hits) {
+      try { await botSend(await client.getChatById(OWNER_ID), bm.formatHit(h)); } catch {}
+      // Also to the phone. A name said on air is the case where WhatsApp is
+      // the wrong channel — it lands among everything else, and by the time
+      // he sees it the moment to respond has passed.
+      try {
+        require('./src/jarvis-api').pushAlert({
+          title: `📻 ${h.station || 'שידור'} — הוזכר קלנר`,
+          body: (h.sentence || h.text || '').substring(0, 400),
+          radio: [{ label: h.station || 'שידור', station: h.station || '', ts: h.ts || Date.now(), q: h.quote || h.term || '' }],
+          _pin: require('./src/broadcast-digest').pinAround(h.station || '', h.ts || Date.now(), h.quote || h.term || '', 'אזכור קלנר'),
+          kind: 'broadcast', urgency: 'high',
+        });
+      } catch {}
+    }
+    if (hits.length) logger.info(`📻 broadcast: ${hits.length} mention(s) alerted`);
+
+    // Headlines — the reason the monitor exists. Sent immediately, with the
+    // speaker and the verified quote, so it reaches him while it is still news
+    // rather than an hour later inside a summary.
+    // A headline that was built but never went out (a send that failed, a
+    // restart mid-loop) is picked up here rather than lost (15.9, 103FM 9:44).
+    let _headlines = hits.headlines || [];
+    try {
+      const _pend = require('./src/broadcast-headlines').pendingUnsent(45).filter(p => !_headlines.some(h => h.id === p.id));
+      if (_pend.length) { logger.info(`🗞️ ${_pend.length} headline(s) never went out — sending now`); _headlines = _headlines.concat(_pend); }
+    } catch (_) {}
+    await _sendHeadlineList(_headlines);
     if ((hits.headlines || []).length) logger.info(`🗞️ broadcast: ${hits.headlines.length} headline(s) sent`);
   } catch (e) { logger.warn('broadcast loop: ' + (e.message || '').substring(0, 70)); }
   finally { _bcBusy = false; }

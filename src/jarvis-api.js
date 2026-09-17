@@ -822,6 +822,16 @@ function attach(app, deps = {}) {
     deps.runCommand('סרטון שבועי').then(t => res.json({ ok: true, text: t })).catch(e => res.status(500).json({ error: (e.message || '').substring(0, 150) }));
   });
   app.get('/api/jarvis/jobs/active', guard, (_req, res) => res.json({ ok: true, jobs: require('./jobs').active() }));
+  // 🎧 Focused listen — one station without gaps, then the full recording and what mattered.
+  app.get('/api/jarvis/broadcast/focus', guard, (_req, res) => res.json({ ok: true, ...require('./broadcast-focus').status() }));
+  app.post('/api/jarvis/broadcast/focus', guard, (req, res) => {
+    const b = req.body || {};
+    const bf = require('./broadcast-focus');
+    if (b.stop) { const r = bf.stop(); return res.status(r.error ? 409 : 200).json(r.error ? { error: r.error } : r); }
+    const stationId = b.stationId || bf.stationOf(b.station);
+    const r = bf.start({ stationId, from: +b.from || Date.now(), minutes: Math.max(5, Math.min(90, +b.minutes || 30)), reason: b.reason || '' });
+    res.status(r.error ? 409 : 200).json(r.error ? { error: r.error } : r);
+  });
   app.get('/api/jarvis/news/img', guard, (req, res) => {
     const p = require('./news-feed').mediaPath(String(req.query.name || ''), req.query.thumb === '1');
     if (!p) return res.status(404).json({ error: 'אין תמונה' });
