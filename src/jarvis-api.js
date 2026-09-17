@@ -1144,7 +1144,7 @@ function attach(app, deps = {}) {
   app.get('/api/jarvis/news-compare', guard, (req, res) => {
     try {
       const na = require('./news-apps');
-      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7), stories: na.stories(24, 15), latest: na.latest(24, 40), hot: require('./news-verify').attach(require('./news-prior').attach(na.hot(12, 12))), duel: na.duel(24) });
+      res.json({ ok: true, recent: na.recent(30), today: na.stats(1), week: na.stats(7), stories: na.stories(24, 15), latest: na.latest(24, 40), hot: (require('./ai-features').on('priorAuto') ? (h => require('./news-verify').attach(require('./news-prior').attach(h))) : (h => require('./news-verify').peek(require('./news-prior').peek(h))))(na.hot(12, 12)), duel: na.duel(24) });
     } catch (e) {
       res.status(500).json({ error: (e.message || 'failed').substring(0, 150) });
     }

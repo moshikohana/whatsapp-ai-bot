@@ -382,10 +382,18 @@ async function write(id, { force = false } = {}) {
 }
 
 // ── API helpers ──────────────────────────────────────────────────
+let _openedGroupAt = 0;
 function list() {
   const na = require('./news-apps');
   const all = na.latest(48, 3000);
   const now = Date.now();
+  // 🧵 Opening the tab is what groups now (17.9): at most every 30 minutes,
+  // in the background — this call answers with what is there, the app's next
+  // refresh has the new topics.
+  if (!require('./ai-features').on('topicsAuto') && now - _openedGroupAt > 30 * 60000) {
+    _openedGroupAt = now;
+    setImmediate(() => group().catch(() => {}));
+  }
   let hotIds = new Set();
   try { hotIds = new Set(na.hot(12, 12).map(s => s.id)); } catch (_) {}
   return _load().topics.filter(t => !t.closed && now - (t.updated || t.created) < KEEP_H * 3600000).map(t => {
@@ -477,6 +485,8 @@ function reset() {
 }
 
 function start() {
+  // 🧵 Grouped when he opens the tab (list(), below) unless turned back on (17.9).
+  if (!require('./ai-features').on('topicsAuto')) return;
   setTimeout(group, 4 * 60000);
   // 💰 Every 45 minutes, not 20: a Sonnet call each time, and stories rarely wait (17.9).
   setInterval(group, 60 * 60000);

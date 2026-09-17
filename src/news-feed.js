@@ -39,12 +39,16 @@ function _sources() {
   // themselves are untouched.
   let excluded = new Set();
   try { excluded = new Set(JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'news-feed-exclude.json'), 'utf8')).names || []); } catch (_) {}
+  // And when there is an include list, only it and the reporters (17.9, cost).
+  let included = new Set();
+  try { included = new Set(JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'news-feed-include.json'), 'utf8')).names || []); } catch (_) {}
+  const wanted = name => !included.size || included.has(name) || isReporter(name);
   try {
     for (const p of require('./scan-presets').list() || []) {
       for (const s of p.sources || []) {
         const id = String((s && s.id) || '');
         const name = String(s.raw || s.label || '').replace(/^[^\p{L}\d]+/u, '').trim();
-        if (!name || SKIP_SOURCE.test(name) || excluded.has(name)) continue;
+        if (!name || SKIP_SOURCE.test(name) || excluded.has(name) || !wanted(name)) continue;
         if (id.startsWith('wa:')) wa.set(id.slice(3), name);
         // Telegram: channels only — a discussion group is chatter.
         else if (id.startsWith('tg:') && s.type === 'channel') tg.set(id.slice(3).replace(/^-100/, ''), name);

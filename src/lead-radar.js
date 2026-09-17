@@ -41,6 +41,8 @@ const _pending = [];   // { id, text, group, ts }
  * נקרא על כל הודעת טקסט בקבוצה. זול: השוואת מילים בלבד, ומועמדות נכנסות לתור.
  */
 function onGroupText({ text, group, ts }) {
+  // 🏆 מד היתרון is part of the race he turned off (17.9).
+  try { if (!require('./ai-features').on('race')) return; } catch (_) {}
   try {
     const body = String(text || '');
     if (body.length < 25) return;

@@ -9233,6 +9233,8 @@ setInterval(async () => {
     const il = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
     const hourKey = `${il.toDateString()}-${il.getHours()}`;
     if (_digestHour === hourKey) return;
+    // 📻 The hourly summary is on request only (17.9); the bulletin path below is not this.
+    if (!require('./src/ai-features').on('hourlyDigest')) return;
     // A few minutes past the hour, so the window it covers is already complete —
     // and the round-hour bulletin (4 minutes of audio from each station) is in.
     if (il.getMinutes() < 6) return;
@@ -9305,6 +9307,8 @@ setInterval(async () => {
 setInterval(async () => {
   try {
     if (!profile.jobEnabled('alert-hub-digest')) return;
+    // 🎯 On request only (17.9) — the 'מוקד' command still builds one.
+    if (!require('./src/ai-features').on('hub')) return;
     if (botStatus !== 'connected') return;
     const hub = require('./src/alert-hub');
     if (!hub.dueForDigest()) return;

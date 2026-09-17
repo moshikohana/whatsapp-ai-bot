@@ -337,6 +337,8 @@ const RADIO_JUDGE = 'אתה עורך חדשות קפדן. יש התראה מאפ
   'דוגמה ל"לא": התראה "פיצוצים נשמעו באיראן, במקביל: התרעות בסעודיה" מול רדיו "נשיא איראן אמר שארצו אינה במלחמה עם סעודיה" — אותן מדינות, ידיעה אחרת. ' +
   'אם כן — צטט מהטקסט של הרדיו, מילה במילה, את המשפט שמדווח את הידיעה. החזר JSON בלבד: {"same": true|false, "excerpt": "המשפט" או null}';
 async function _confirmRadio(pushText, radioText) {
+  // 🏆 The apps-vs-radio race is off unless he turns it back on (17.9).
+  if (!require('./ai-features').on('race')) return null;
   const hk = Math.floor(Date.now() / 3600000);
   if (hk !== _hourKey) { _hourKey = hk; _checks = 0; }
   if (_checks >= MAX_CHECKS_PER_HOUR) return null;
