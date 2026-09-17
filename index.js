@@ -1908,9 +1908,55 @@ const pendingClearConfirm = new Map(); // chatId → { name, count, expiresAt } 
 // ─── Feedback store ──────────────────────────────────────────────
 // Key: bot's sent message ID → { name, imageBuffer, confidence, groupName }
 // Also keep "last" per chatId for text-based "פידבק כן/לא"
-const forwardedPhotos = new Map();   // msgId → photoData
-const lastForwardedPhoto = new Map(); // chatId → photoData (for text-only feedback)
 const MAX_FEEDBACK_STORE = 50;       // don't grow unbounded
+
+/**
+ * 📸 The photos waiting for "כן / לא" survive a restart. They lived in memory
+ * only, and a restart between the photo and his answer left "לא" with nothing
+ * to refer to — Boti answered "מה לא?" (16.9 and 17.9, both about מיה).
+ * Kept on disk for 48 hours: the details in a JSON file, each picture beside it.
+ */
+const _FB_DIR = path.join(__dirname, 'data', 'face-feedback');
+const _FB_KEEP_MS = 48 * 3600000;
+class _FeedbackMap extends Map {
+  constructor(file) {
+    super();
+    this._file = path.join(_FB_DIR, file);
+    try {
+      for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(this._file, 'utf8')))) {
+        if (Date.now() - (v.sentAt || 0) > _FB_KEEP_MS) continue;
+        const img = path.join(_FB_DIR, v.img);
+        if (!fs.existsSync(img)) continue;
+        super.set(k, { ...v, imageBuffer: fs.readFileSync(img) });
+      }
+    } catch (_) {}
+  }
+  _flush() {
+    try {
+      fs.mkdirSync(_FB_DIR, { recursive: true });
+      const out = {};
+      for (const [k, v] of this) {
+        if (!v || !v.imageBuffer) continue;
+        const img = require('crypto').createHash('md5').update(v.imageBuffer).digest('hex').slice(0, 16) + '.jpg';
+        const p = path.join(_FB_DIR, img);
+        if (!fs.existsSync(p)) fs.writeFileSync(p, v.imageBuffer);
+        const { imageBuffer, ...rest } = v;
+        out[k] = { ...rest, img };
+      }
+      fs.writeFileSync(this._file, JSON.stringify(out));
+      // Pictures no longer referenced by either store go.
+      const used = new Set();
+      for (const f of ['photos.json', 'last.json']) {
+        try { for (const v of Object.values(JSON.parse(fs.readFileSync(path.join(_FB_DIR, f), 'utf8')))) used.add(v.img); } catch (_) {}
+      }
+      for (const f of fs.readdirSync(_FB_DIR)) if (f.endsWith('.jpg') && !used.has(f)) fs.unlinkSync(path.join(_FB_DIR, f));
+    } catch (e) { logger.warn('📸 feedback store: ' + (e.message || '').substring(0, 60)); }
+  }
+  set(k, v) { super.set(k, v); this._flush(); return this; }
+  delete(k) { const r = super.delete(k); if (r) this._flush(); return r; }
+}
+const forwardedPhotos = new _FeedbackMap('photos.json');   // msgId → photoData
+const lastForwardedPhoto = new _FeedbackMap('last.json');  // chatId → photoData (for text-only feedback)
 
 // Env-driven so a second instance can run for someone else without touching
 // the 108 places this is compared against. Default is unchanged, so his
@@ -2058,9 +2104,10 @@ async function _flushMaybe(key) {
     // The same reply-feedback path as a regular match alert.
     if (sent?.id?._serialized) {
       if (forwardedPhotos.size >= MAX_FEEDBACK_STORE) forwardedPhotos.delete([...forwardedPhotos.keys()][0]);
-      forwardedPhotos.set(sent.id._serialized, {
-        name: b.name, imageBuffer: best.raw, confidence: best.confidence, groupName: b.groupName, sentAt: Date.now(),
-      });
+      const pd = { name: b.name, imageBuffer: best.raw, confidence: best.confidence, groupName: b.groupName, sentAt: Date.now() };
+      forwardedPhotos.set(sent.id._serialized, pd);
+      // The caption says "או הגב כן / לא" — a plain "לא" counts too.
+      lastForwardedPhoto.set(OWNER_ID, pd);
     }
   } catch (e) { logger.warn('maybe send: ' + (e.message || '').substring(0, 60)); }
   try {
@@ -7528,16 +7575,24 @@ async function route(chatId, text, chat) {
   // Short message after a forwarded photo → Claude feedback handler.
   // ALWAYS cleared after first use to prevent feedback loops.
   // TTL: 3 minutes (if user doesn't respond in time, they should reply directly to the photo).
-  const lastPhoto = lastForwardedPhoto.get(chatId);
-  const FEEDBACK_TTL = 3 * 60 * 1000; // 3 minutes
+  // The photo is stored under his number; he may write from the self-chat lid.
+  const _fbKey = !lastForwardedPhoto.has(chatId) && (chatId === ownerSelfLid || chatId === OWNER_ID) ? OWNER_ID : chatId;
+  const lastPhoto = lastForwardedPhoto.get(_fbKey);
+  const FEEDBACK_TTL = 3 * 60 * 1000; // 3 minutes — any short message
+  // A bare yes/no is about the photo for much longer: nothing else Boti sends
+  // asks a yes/no question, and "לא" 6 and 13 minutes after a photo of מיה
+  // got "מה לא?" (16.9, 17.9).
+  const YESNO_TTL = 90 * 60 * 1000;
+  const yesNo = /^(כן|לא|נכון|לא נכון|טעות|שגוי|בדיוק|זו היא|זה הוא|(?:זו|זאת) לא (היא|\S+)|זה לא (הוא|\S+)|לא (היא|הוא))[.!\s]*$/.test(text.trim());
   if (lastPhoto && text.length < 150 && !text.startsWith('/')) {
+    const age = lastPhoto.sentAt ? Date.now() - lastPhoto.sentAt : 0;
     // Expire stale entries
-    if (lastPhoto.sentAt && Date.now() - lastPhoto.sentAt > FEEDBACK_TTL) {
-      lastForwardedPhoto.delete(chatId);
+    if (age > YESNO_TTL || (age > FEEDBACK_TTL && !yesNo)) {
+      if (age > YESNO_TTL) lastForwardedPhoto.delete(_fbKey);
     } else {
       // Always delete after one attempt — prevents endless feedback loop.
       // On temp API error (⏳), user can still reply directly to the forwarded photo.
-      lastForwardedPhoto.delete(chatId);
+      lastForwardedPhoto.delete(_fbKey);
       const reply = await handlePhotoFeedback(text.trim(), lastPhoto, null);
       return reply;
     }
