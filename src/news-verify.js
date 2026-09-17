@@ -16,7 +16,8 @@ const path = require('path');
 const logger = require('./logger');
 
 const FILE = path.join(__dirname, '..', 'data', 'news-verify.json');
-const RECHECK_MIN = [0, 30, 60, 120];
+// Two looks, not four: each is a Sonnet call and most confirmation arrives within the hour (17.9).
+const RECHECK_MIN = [0, 45];
 const WINDOW_BEFORE_MS = 12 * 3600000;
 
 let _groups = null;

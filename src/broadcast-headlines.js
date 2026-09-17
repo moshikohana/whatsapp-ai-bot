@@ -363,7 +363,11 @@ async function onChunk({ station, text, ts = Date.now(), guest = null, wait = fa
     }
     const about = c.about ? String(c.about).trim().substring(0, 60) : null;
     const keyOne = KEY_FIGURES.test(`${about || ''} ${headline}`);
-    if (!silent && !keyOne && (c.score || 0) < 5 && list.filter(h => h.sentAt && ts - h.sentAt < 3600000).length >= 6) silent = 'cap';
+    // Four an hour (17.9, he chose it: 29 radio alerts in three hours was too
+    // many). Past the cap they wait in the tab and the hourly summary. Only a
+    // flash (5) or a listen he started on purpose goes past it.
+    void keyOne;
+    if (!silent && !guest && (c.score || 0) < 5 && list.filter(h => h.sentAt && ts - h.sentAt < 3600000).length >= 4) silent = 'cap';
 
     const item = {
       id: `${ts}-${station}${out.length ? '-' + (out.length + 1) : ''}`.replace(/[^\w-]/g, ''),

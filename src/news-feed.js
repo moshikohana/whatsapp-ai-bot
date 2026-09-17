@@ -34,12 +34,17 @@ let _src = null, _srcAt = 0;
 function _sources() {
   if (_src && Date.now() - _srcAt < 10 * 60000) return _src;
   const wa = new Map(), tg = new Map();
+  // Left out of the news on purpose (17.9): foreign channels and ones that
+  // only repost — a fifth of the posts, almost never first. The scan lists
+  // themselves are untouched.
+  let excluded = new Set();
+  try { excluded = new Set(JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'news-feed-exclude.json'), 'utf8')).names || []); } catch (_) {}
   try {
     for (const p of require('./scan-presets').list() || []) {
       for (const s of p.sources || []) {
         const id = String((s && s.id) || '');
         const name = String(s.raw || s.label || '').replace(/^[^\p{L}\d]+/u, '').trim();
-        if (!name || SKIP_SOURCE.test(name)) continue;
+        if (!name || SKIP_SOURCE.test(name) || excluded.has(name)) continue;
         if (id.startsWith('wa:')) wa.set(id.slice(3), name);
         // Telegram: channels only — a discussion group is chatter.
         else if (id.startsWith('tg:') && s.type === 'channel') tg.set(id.slice(3).replace(/^-100/, ''), name);
