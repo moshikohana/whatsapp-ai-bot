@@ -153,7 +153,7 @@ async function group({ dry = false, model = GROUP_MODEL, fresh = false } = {}) {
     // list: the reaction that makes one of them a chain may come hours later.
     const cands = all.filter(s => !_topicOf(s, db.topics) && (CATS.has(s.cat) || !s.cat)
       && now - s.last < 12 * 3600000)   // one source too: "נתניהו יגיע לבית שאן" ← "הביקור בוטל" came from one channel (15.9)
-      .sort((a, b) => a.firstTs - b.firstTs).slice(-130);
+      .sort((a, b) => a.firstTs - b.firstTs).slice(-70);   // 💰 130 made each run $0.08 (17.9)
     if (!dry && !cands.some(s => !db.seen[s.id])) return { assigned: 0, created: 0 };
     const tList = open.map((t, i) => {
       const st = _storiesOf(t, all).slice(-3).map(s => `${_hhmm(s.firstTs)} ${s.title.substring(0, 90)}`).join(' | ');
@@ -479,7 +479,7 @@ function reset() {
 function start() {
   setTimeout(group, 4 * 60000);
   // 💰 Every 45 minutes, not 20: a Sonnet call each time, and stories rarely wait (17.9).
-  setInterval(group, 45 * 60000);
+  setInterval(group, 60 * 60000);
 }
 
 module.exports = { start, group, write, list, follow, build, find, format, reset };

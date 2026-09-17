@@ -312,6 +312,9 @@ async function _sameApps(a, b) {
     maxTokens: 30, model: 'claude-haiku-4-5-20251001', temperature: 0,
   });
   if (!(r && r.same === true)) return false;
+  // Most headlines of the same event share many words; Sonnet is for the
+  // weak ones only (78 Haiku + their confirmations were $0.08 an hour, 17.9).
+  if (_overlap(String(a).split(' — ')[0], String(b).split(' — ')[0]) >= 3.5) return true;
   // "כן" מצרף ידיעה לסיפור של מישהו אחר — תמונה, סרטון וכותרת עוברים איתה.
   // Haiku צירף את תקיפת היועצת של בן גביר למינוי של אריה דורון (16.9), אז
   // על "כן" שואלים גם את Sonnet. "לא" נשאר זול.
@@ -338,10 +341,14 @@ async function _confirmRadio(pushText, radioText) {
   if (hk !== _hourKey) { _hourKey = hk; _checks = 0; }
   if (_checks >= MAX_CHECKS_PER_HOUR) return null;
   _checks++;
-  return require('./claude').classifyJSON(
-    `התראה מאפליקציית חדשות:\n"${pushText}"\n\nמהרדיו:\n"${String(radioText).substring(0, 1500)}"`,
-    { system: RADIO_JUDGE, maxTokens: 250, model: 'claude-sonnet-4-6' }
-  );
+  const body = `התראה מאפליקציית חדשות:\n"${pushText}"\n\nמהרדיו:\n"${String(radioText).substring(0, 1500)}"`;
+  // 💰 Haiku says "no" to most of these; only its "yes" goes to Sonnet (20 Sonnet calls an hour, 17.9).
+  const pre = await require('./claude').classifyJSON(body, {
+    system: 'האם הרדיו דיווח על אותה ידיעה בדיוק כמו ההתראה — אותו אירוע או אותה אמירה של אותו אדם? אותו נושא או אותן מדינות — לא מספיק. כשיש ספק — כן. החזר JSON בלבד: {"same": true|false}',
+    maxTokens: 20, model: 'claude-haiku-4-5-20251001', temperature: 0,
+  });
+  if (pre && pre.same === false) return { same: false, excerpt: null };
+  return require('./claude').classifyJSON(body, { system: RADIO_JUDGE, maxTokens: 250, model: 'claude-sonnet-4-6' });
 }
 /** הציטוט באמת נמצא בתמלול — ולא משפט שהמודל ניסח בעצמו. */
 function _quoteIn(excerpt, text) {

@@ -201,8 +201,8 @@ function _remember(key, v) {
 }
 
 // A batch pays for the instructions once: posts wait for company, not long.
-const BATCH_MIN = 15;
-const WAIT_MS = 90 * 1000;
+const BATCH_MIN = 20;
+const WAIT_MS = 150 * 1000;   // measured 17.9: at 90s a batch still left every 77s
 const NIGHT_WAIT_MS = 20 * 60 * 1000;
 function _ready() {
   if (_pending.length >= BATCH_MIN) return true;

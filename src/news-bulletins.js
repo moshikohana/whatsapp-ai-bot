@@ -72,7 +72,7 @@ async function runHour(hourTs, fromDisk = false) {
   const r = await require('./claude').classifyJSON(
     `מהדורת ${_hhmm(hourTs)}:\n\n` + heard.map(h => `[${h.station}]\n${h.text.substring(0, 5000)}`).join('\n\n') +
     `\n\nכותרות שכבר נאמרו ב-6 השעות האחרונות:\n${prev.length ? prev.slice(-60).join('\n') : '(אין)'}`,
-    { system: SYSTEM, maxTokens: 2000 }
+    { system: SYSTEM, maxTokens: 2000, model: 'claude-haiku-4-5-20251001' }   // 💰 was Sonnet, hourly (17.9)
   );
   // Sport still slipped through the prompt (a windsurfing medal at 18:00, 12.9).
   const SPORT = /(פרמייר|ליג(?![א-ת])|קבוצתו|קבוצתה|יורוליג|מדליי|אליפות|אולימפ|גמר|ליגה|ליגת|כדורגל|כדורסל|טניס|גלישת רוח|שחייה|ג'ודו|נבחרת|שער|ניצחון על)/;

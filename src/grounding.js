@@ -122,10 +122,25 @@ async function ground(items, transcript, { label = '', window = null } = {}) {
     (miss.length ? `\nמילים שלא נמצאו בתמלול: ${miss.join(', ')}` : '') +
     (nowhere.length ? `\nמתוכן — לא בתמלול וגם לא באף כותרת: ${nowhere.join(', ')}` : '') +
     (news.length ? `\nכותרות קשורות מאפליקציות וערוצים:\n${news.map(p => `  - [${p.source} ${hhmm(p.ts)}] ${p.text.substring(0, 220)}`).join('\n')}` : '');
+  // 💰 Only the part of the transcript the items talk about, and Haiku: this
+  // check sent 24,000 characters to Sonnet 13 times an hour — the most
+  // expensive thing in the bot, $0.28 an hour (measured 17.9).
+  const relevant = list => {
+    const t = String(transcript);
+    if (t.length <= 6000) return t;
+    const words = new Set(list.flatMap(x => Object.values(x.it.fields).join(' ').split(/\s+/)).map(_norm).filter(w => w.length >= 3));
+    const parts = t.split(/(?<=[.?!\n])\s+/);
+    const keep = new Set();
+    parts.forEach((p, i) => {
+      const hits = _norm(p).split(' ').filter(w => words.has(w)).length;
+      if (hits >= 2) { keep.add(i - 1); keep.add(i); keep.add(i + 1); }
+    });
+    const out = parts.filter((_, i) => keep.has(i)).join(' ');
+    return (out.length >= 400 ? out : t).substring(0, 9000);
+  };
   const ask = async list => {
-    const r = await claude.classifyJSON(`תמלול:\n${String(transcript).substring(0, 24000)}\n\nפריטים לבדיקה:\n${list.map(block).join('\n\n')}`,
-      // 💰 A single radio headline is checked against a few minutes of transcript — Haiku does it (17.9).
-      { system: SYSTEM, maxTokens: 3000, temperature: 0, ...(label === 'headline' ? { model: 'claude-haiku-4-5-20251001' } : {}) });
+    const r = await claude.classifyJSON(`תמלול (הקטעים הרלוונטיים):\n${relevant(list)}\n\nפריטים לבדיקה:\n${list.map(block).join('\n\n')}`,
+      { system: SYSTEM, maxTokens: 3000, temperature: 0, model: 'claude-haiku-4-5-20251001' });
     return new Map(((r && r.items) || []).filter(Boolean).map(x => [String(x.id).replace(/^#/, ''), x]));
   };
 
@@ -160,14 +175,14 @@ async function ground(items, transcript, { label = '', window = null } = {}) {
   // A second, narrower ask for what still carries a name from nowhere.
   if (retry.length) {
     const r2 = await claude.classifyJSON(
-      `תמלול:\n${String(transcript).substring(0, 24000)}\n\n` + retry.map(p => {
+      `תמלול (הקטעים הרלוונטיים):\n${relevant(retry)}\n\n` + retry.map(p => {
         const x = result.get(p.it.id);
         return `#${p.it.id}\n${Object.entries(x.fields).map(([k, v]) => `${k}: ${v}`).join('\n')}\nחובה להוציא: ${x.left.join(', ')}`;
       }).join('\n\n'),
       {
         system: 'כתוב מחדש כל פריט רק לפי התמלול, בלי המילים שמסומנות "חובה להוציא" — הן לא נאמרו בשידור. שמור על אותם שדות ואורך דומה. ' +
           'החזר JSON בלבד: {"items":[{"id":"...","fields":{...}}]}',
-        maxTokens: 2000, temperature: 0,
+        maxTokens: 2000, temperature: 0, model: 'claude-haiku-4-5-20251001',
       });
     const m2 = new Map(((r2 && r2.items) || []).filter(Boolean).map(x => [String(x.id).replace(/^#/, ''), x]));
     for (const p of retry) {
