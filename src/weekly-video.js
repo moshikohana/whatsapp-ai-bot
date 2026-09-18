@@ -2,9 +2,9 @@
 /**
  * 🎞️ השבוע של מיה ושי — סרטון שבועי מהאלבום.
  *
- * עד 10 תמונות מ-7 הימים האחרונים, מפוזרות על פני השבוע: קודם מה שהוא
+ * עד 13 תמונות מ-7 הימים האחרונים, מפוזרות על פני השבוע: קודם מה שהוא
  * אישר בעצמו, אחר כך מה שזוהה בביטחון הכי גבוה. כל תמונה עם השם, היום
- * והשעה שבה נקלטה. עד 30 שניות (remotion/compositions/WeekOfGirls.jsx).
+ * והשעה שבה נקלטה. כ-2.7 שניות לתמונה, עד כ-40 שניות (remotion/compositions/WeekOfGirls.jsx).
  *
  * אותה תמונה באלבום של שתיהן — פעם אחת, עם שני השמות.
  */
@@ -14,7 +14,9 @@ const logger = require('./logger');
 
 const ALBUM = path.join(__dirname, '..', 'data', 'album');
 const OUT = path.join(__dirname, '..', 'output', 'weekly');
-const MAX_PHOTOS = 10;
+// 18.9: ~25 שניות עם 10 תמונות בקצב 2 שניות. הוא ביקש עוד 15 שניות וקצב
+// של 2.5–3 שניות לתמונה — 13 תמונות בקצב 2.7 נותנות כ-40 שניות.
+const MAX_PHOTOS = 13;
 const INDEX = path.join(OUT, 'index.json');
 // Kevin MacLeod (incompetech.com), CC BY 4.0 — credited at the end of the film.
 const TRACKS = {
@@ -68,10 +70,18 @@ async function _isFramed(file) {
   return false;
 }
 
+/** התמונות שכבר היו בשני הסרטונים האחרונים. */
+function _usedBefore() {
+  const out = new Set();
+  for (const v of _loadIndex().slice(0, 2)) for (const f of (v.files || [])) out.add(f);
+  return out;
+}
+
 /** התמונות של השבוע, מוכנות לסרטון. */
 async function pickPhotos(days = 7) {
   const idx = JSON.parse(fs.readFileSync(path.join(ALBUM, 'index.json'), 'utf8'));
   const since = Date.now() - days * 86400000;
+  const usedBefore = _usedBefore();
   const all = [];
   for (const [key, v] of Object.entries(idx)) {
     for (const p of v.photos || []) {
@@ -87,7 +97,10 @@ async function pickPhotos(days = 7) {
       // confirmed, or answered a "who is this?" about. An automatic match he
       // had marked "not Mia" was in this week's film (17.9).
       if (p.source !== 'confirm' && p.source !== 'answer') continue;
-      all.push({ name: v.name || key, ts: p.ts, file, sig, score: (p.source === 'confirm' ? 200 : 0) + (p.confidence || 50) });
+      // 🔁 מה שכבר היה בסרטון הקודם יורד בעדיפות, אבל לא נפסל: בשבוע דל
+      // תמונות עדיף לחזור על אחת מאשר לא להכין סרטון (18.9).
+      const seen = usedBefore.has(file) ? -150 : 0;
+      all.push({ name: v.name || key, ts: p.ts, file, sig, score: seen + (p.source === 'confirm' ? 200 : 0) + (p.confidence || 50) });
     }
   }
   // One photo, both girls: merged.
@@ -195,7 +208,7 @@ async function render({ days = 7, onProgress, music = DEFAULT_TRACK } = {}) {
     await renderStill({ composition, serveUrl, output: still, inputProps: props, frame: 75 + 30, imageFormat: 'jpeg', jpegQuality: 90 });
     logger.info(`🎞️ weekly video: ${picked.length} photos, ${(composition.durationInFrames / 30).toFixed(1)}s → ${video}`);
     const idx = _loadIndex();
-    idx.unshift({ file: path.basename(video), still: path.basename(still), ts: Date.now(), photos: picked.length, seconds: composition.durationInFrames / 30, range: props.range, music: TRACKS[track], sentAt: null });
+    idx.unshift({ file: path.basename(video), still: path.basename(still), ts: Date.now(), photos: picked.length, files: picked.map(p => p.file), seconds: composition.durationInFrames / 30, range: props.range, music: TRACKS[track], sentAt: null });
     _saveIndex(idx);
     return { video, still, photos: picked.length, seconds: composition.durationInFrames / 30 };
   } finally { _busy = false; }

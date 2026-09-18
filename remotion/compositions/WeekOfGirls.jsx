@@ -16,7 +16,8 @@ import { flip } from '@remotion/transitions/flip';
  * בלי אימוג'י: לשרת אין גופן אימוג'י — הלבבות והנצנצים מצוירים.
  */
 
-export const INTRO = 75, OUTRO = 80, PER_PHOTO = 78, TRANS = 18;
+// 2.7 שניות לתמונה (78 היו 2.0) — לבקשתו, 18.9.
+export const INTRO = 75, OUTRO = 80, PER_PHOTO = 100, TRANS = 18;
 export const weekDuration = n => INTRO + n * PER_PHOTO + OUTRO - (n + 1) * TRANS;
 
 const GIRL = {
