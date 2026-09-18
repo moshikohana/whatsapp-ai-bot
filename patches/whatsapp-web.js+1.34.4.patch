@@ -1,5 +1,5 @@
 diff --git a/node_modules/whatsapp-web.js/src/Client.js b/node_modules/whatsapp-web.js/src/Client.js
-index 6a67629..b79dab5 100644
+index 6a67629..4d2dabe 100644
 --- a/node_modules/whatsapp-web.js/src/Client.js
 +++ b/node_modules/whatsapp-web.js/src/Client.js
 @@ -212,6 +212,7 @@ class Client extends EventEmitter {
@@ -261,7 +261,7 @@ index 0c57775..e220afe 100644
  
              const { name, startTimeTs, eventSendOptions } = editedEventObject;
 diff --git a/node_modules/whatsapp-web.js/src/util/Injected/Store.js b/node_modules/whatsapp-web.js/src/util/Injected/Store.js
-index 3f2c8c2..b92b15f 100644
+index 3f2c8c2..873e7b1 100644
 --- a/node_modules/whatsapp-web.js/src/util/Injected/Store.js
 +++ b/node_modules/whatsapp-web.js/src/util/Injected/Store.js
 @@ -44,6 +44,13 @@ exports.ExposeStore = () => {
@@ -278,11 +278,35 @@ index 3f2c8c2..b92b15f 100644
      window.Store.AppState = window.require('WAWebSocketModel').Socket;
      window.Store.BlockContact = window.require('WAWebBlockContactAction');
      window.Store.Conn = window.require('WAWebConnModel').Conn;
+@@ -114,7 +121,7 @@ exports.ExposeStore = () => {
+     window.Store.Settings = {
+         ...window.require('WAWebUserPrefsGeneral'),
+         ...window.require('WAWebUserPrefsNotifications'),
+-        setPushname: window.require('WAWebSetPushnameConnAction').setPushname
++        setPushname: window.require('WAWebSetPushnameConnAction')?.setPushname
+     };
+     window.Store.NumberInfo = {
+         ...window.require('WAPhoneUtils'),
 diff --git a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
-index af2a39a..e11e02c 100644
+index af2a39a..2343f74 100644
 --- a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
 +++ b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
-@@ -655,10 +655,17 @@ exports.LoadUtils = () => {
+@@ -278,7 +278,13 @@ exports.LoadUtils = () => {
+             isNewMsg: true,
+             type: 'chat',
+             ...ephemeralFields,
+-            ...mediaOptions,
++            // __wwebjs_media_spread_fix (17.9): spreading the MediaData model
++            // copied its internals (parent, collection, mirror, __x_*) into the
++            // message. On WhatsApp Web 2.3000.10477xx that makes the Msg model
++            // throw Data passed to getter must include an id property, so no
++            // file — photo, document or audio — could be sent at all.
++            ...Object.fromEntries(Object.entries(mediaOptions).filter(([k]) =>
++                !k.startsWith('_') && !('parent collection mirror revisionNumber'.split(' ').includes(k)))),
+             ...(mediaOptions.toJSON ? mediaOptions.toJSON() : {}),
+             ...quotedMsgOptions,
+             ...locationOptions,
+@@ -655,10 +661,17 @@ exports.LoadUtils = () => {
  
          model.lastMessage = null;
          if (model.msgs && model.msgs.length) {

@@ -1729,6 +1729,39 @@ try {
       return true;
     },
     videoAudio: (id, withText, jobId) => _sendVideoAudio(id, withText, jobId),
+    // 🔬 A fixed look at how WhatsApp Web prepares a file today — nothing is sent (17.9, media sends broke).
+    mediaProbe: async (send) => {
+      if (send === 'image' || send === 'mp3') {
+        const { MessageMedia } = require('whatsapp-web.js');
+        const dir = path.join(__dirname, 'data', send === 'image' ? 'news-media' : 'broadcast', send === 'image' ? '' : 'audio');
+        const file = fs.readdirSync(dir).filter(f => f.endsWith(send === 'image' ? '-t.jpg' : '.mp3')).sort().pop();
+        if (!file) return { error: 'no test file' };
+        const buf = fs.readFileSync(path.join(dir, file));
+        const oc = await client.getChatById(OWNER_ID);
+        const sent = await oc.sendMessage(new MessageMedia(send === 'image' ? 'image/jpeg' : 'audio/mpeg', buf.toString('base64'), file),
+          { ...(send === 'mp3' ? { sendMediaAsDocument: true } : {}), caption: `🧪 בדיקה: שליחת ${send === 'image' ? 'תמונה' : 'קובץ'} עובדת` + BOT_MARKER });
+        return { sent: !!(sent && sent.id), file, kb: Math.round(buf.length / 1024) };
+      }
+      return client.pupPage.evaluate(async () => {
+      const out = { wa: (window.Debug && window.Debug.VERSION) || null };
+      try {
+        const bytes = new Uint8Array(2048).map((_, i) => i % 251);
+        const file = new File([bytes], 'probe.mp3', { type: 'audio/mpeg' });
+        const opaque = await window.Store.OpaqueData.createFromData(file, file.type);
+        const prep = window.Store.MediaPrep.prepRawMedia(opaque, { asDocument: true });
+        const md = await prep.waitForPrep();
+        out.type = typeof md;
+        out.ctor = md && md.constructor && md.constructor.name;
+        out.keys = md ? Object.keys(md).slice(0, 40) : null;
+        out.filehash = md && md.filehash;
+        out.getFilehash = md && typeof md.get === 'function' ? md.get('filehash') : undefined;
+        out.json = md && typeof md.toJSON === 'function' ? Object.keys(md.toJSON()).slice(0, 40) : null;
+        out.jsonFilehash = md && typeof md.toJSON === 'function' ? md.toJSON().filehash : undefined;
+        out.protoKeys = md ? Object.getOwnPropertyNames(Object.getPrototypeOf(md)).slice(0, 60) : null;
+      } catch (e) { out.error = String(e && e.message || e).slice(0, 200); }
+        return out;
+      });
+    },
     videoEta: (id, withText) => { const v = require('./src/videos').find(id); return _videoEta(v && v.duration, withText); },
     // Commands run through route() rather than a parallel implementation, so
     // JARVIS inherits the entire command surface. route() writes some of its
@@ -4197,6 +4230,32 @@ function _friendlyErr(msg) {
   return m.substring(0, 120);
 }
 
+/**
+ * 🎧 An MP3 to his own chat, whatever WhatsApp Web is doing today.
+ * "Data passed to getter must include an id property" came back from a
+ * document send at 17:56 on 17.9, where the same send had worked that
+ * morning. A document first; on failure, as a plain audio file; then
+ * through the self-chat lid. The one that worked is logged.
+ */
+async function sendOwnerMp3(buf, name, caption) {
+  const { MessageMedia } = require('whatsapp-web.js');
+  const media = () => new MessageMedia('audio/mpeg', buf.toString('base64'), name);
+  const tries = [
+    ['document', async () => (await client.getChatById(OWNER_ID)).sendMessage(media(), { sendMediaAsDocument: true, caption: caption + BOT_MARKER })],
+    ['audio', async () => (await client.getChatById(OWNER_ID)).sendMessage(media(), { caption: caption + BOT_MARKER })],
+    ['lid-document', async () => { if (!ownerSelfLid) throw new Error('no self lid'); return client.sendMessage(ownerSelfLid, media(), { sendMediaAsDocument: true, caption: caption + BOT_MARKER }); }],
+  ];
+  let last = null;
+  for (const [how, fn] of tries) {
+    try {
+      const r = await fn();
+      if (how !== 'document') logger.info(`🎧 mp3 sent as ${how} after: ${(last && last.message || '').substring(0, 60)}`);
+      return r;
+    } catch (e) { last = e; logger.warn(`🎧 mp3 ${how} failed: ${(e.message || '').substring(0, 80)}`); }
+  }
+  throw last;
+}
+
 async function _sendVideoAudio(id, withText = false, jobId = null) {
   const vids = require('./src/videos');
   const jobs = require('./src/jobs');
@@ -4218,7 +4277,7 @@ async function _sendVideoAudio(id, withText = false, jobId = null) {
       if (buf.length > 95 * 1024 * 1024) throw new Error('ה-MP3 גדול מדי לוואטסאפ');
       const name = `סרטון-${stamp}.mp3`;
       jobs.update(jobId, { stage: '📤 שולח את ה-MP3 לוואטסאפ…', pct: withText ? 30 : 70, etaSec: left() });
-      await oc.sendMessage(new MessageMedia('audio/mpeg', buf.toString('base64'), name), { sendMediaAsDocument: true, caption: `🎧 ${name}` + BOT_MARKER });
+      await sendOwnerMp3(buf, name, `🎧 ${name}`);
     } finally { try { fs.unlinkSync(f); } catch (_) {} }
     if (withText) {
       jobs.update(jobId, { stage: '📝 מתמלל…', pct: 40, etaSec: left() });
@@ -4279,8 +4338,7 @@ async function _tryVideoChoice(text) {
           const buf = fs.readFileSync(f);
           const name = `סרטון-${stamp}${ids.length > 1 ? '-' + (i + 1) : ''}.mp3`;
           if (buf.length > 95 * 1024 * 1024) out.push(`❌ ה-MP3${label} גדול מדי לוואטסאפ (${Math.round(buf.length / 1024 ** 2)}MB)`);
-          else await oc.sendMessage(new MessageMedia('audio/mpeg', buf.toString('base64'), name),
-            { sendMediaAsDocument: true, caption: `🎧 ${name}` + BOT_MARKER });
+          else await sendOwnerMp3(buf, name, `🎧 ${name}`);
           try { fs.unlinkSync(f); } catch (_) {}
         } catch (e) { out.push(`❌ MP3${label}: ${(e.message || '').substring(0, 100)}`); }
       }
@@ -6410,6 +6468,16 @@ async function handlePhotoFeedback(feedbackText, photoData, quotedMsgId) {
     if (intent.action === 'false_positive' || intent.intent === 'wrong_person') {
       logger.warn(`❌ Feedback: false positive "${name}" (${confidence}%) from "${groupName}" — user said: "${feedbackText}"`);
       if (quotedMsgId) forwardedPhotos.delete(quotedMsgId);
+      // 🗑️ Out of the album too — it was still picked up by the weekly film (17.9).
+      try {
+        const n = require('./src/album').removeNear(name, photoData.sentAt || Date.now(), groupName);
+        if (n) logger.info(`🗑️ album: ${n} photo(s) of "${name}" removed after he said it is not them`);
+      } catch (e) { logger.warn('album remove: ' + (e.message || '').substring(0, 60)); }
+      // 🧒 And out of this week's album card, which is built in memory.
+      try {
+        const i = _weeklyFacePhotos.findIndex(p => p.base64 && imageBuffer && p.base64.slice(0, 200) === imageBuffer.toString('base64').slice(0, 200));
+        if (i >= 0) _weeklyFacePhotos.splice(i, 1);
+      } catch (_) {}
       const fix = intent.fixName ? `\n💡 אם זו ${intent.fixName} — שלח תמונה שלה עם "ייחוס ${intent.fixName}" כדי ללמד אותי` : '\n💡 אם זה קורה הרבה — אמור "תחמיר רגישות"';
       return `📝 *סומן כזיהוי שגוי* — לא ${name} בתמונה הזו${fix}`;
     }
@@ -9093,8 +9161,7 @@ try {
     const oc = await client.getChatById(OWNER_ID);
     await botSend(oc, text);
     if (file && fs.existsSync(file) && fs.statSync(file).size < 95 * 1024 * 1024) {
-      const { MessageMedia } = require('whatsapp-web.js');
-      await oc.sendMessage(new MessageMedia('audio/mpeg', fs.readFileSync(file).toString('base64'), path.basename(file)), { sendMediaAsDocument: true, caption: '🎧 ההקלטה המלאה' + BOT_MARKER });
+      await sendOwnerMp3(fs.readFileSync(file), path.basename(file), '🎧 ההקלטה המלאה');
     }
     try { require('./src/jarvis-api').pushAlert({ title: '🎧 סיכום האזנה', body: text.replace(/[*_]/g, '').substring(0, 1500), kind: 'broadcast-focus', urgency: 'normal', ...(radio ? { radio: [{ label: radio.station, station: radio.station, ts: radio.ts, q: radio.q }] } : {}) }); } catch (_) {}
   });

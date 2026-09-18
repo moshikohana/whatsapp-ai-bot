@@ -822,6 +822,12 @@ function attach(app, deps = {}) {
     deps.runCommand('סרטון שבועי').then(t => res.json({ ok: true, text: t })).catch(e => res.status(500).json({ error: (e.message || '').substring(0, 150) }));
   });
   app.get('/api/jarvis/jobs/active', guard, (_req, res) => res.json({ ok: true, jobs: require('./jobs').active() }));
+  app.get('/api/jarvis/debug/media-probe', guard, async (req, res) => {
+    if (!deps.mediaProbe) return res.status(503).json({ error: 'לא זמין' });
+    // ?send=image|mp3 — a real send to his own chat, to prove files work again (17.9).
+    try { res.json({ ok: true, probe: await deps.mediaProbe(String(req.query.send || '')) }); }
+    catch (e) { res.status(500).json({ error: (e.message || '').slice(0, 200) }); }
+  });
   // 💰 What the model cost today, by feature.
   app.get('/api/jarvis/ai-usage', guard, (_req, res) => res.json({ ok: true, ...require('./ai-meter').today() }));
   // 🎧 Focused listen — one station without gaps, then the full recording and what mattered.

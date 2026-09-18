@@ -137,6 +137,23 @@ function remove(name, ts) {
 }
 
 /**
+ * 🗑️ התמונה שעליה הוא אמר "זו לא היא" — החוצה מהאלבום.
+ * הפידבק מגיע על הודעת ההתראה, בלי חותמת הזמן של האלבום, אז מחפשים את
+ * התמונה של אותו שם מאותה קבוצה סביב אותו רגע (17.9: תמונה שסומנה שגויה
+ * עדיין נכנסה לסרטון השבועי).
+ */
+function removeNear(name, sentAt, group = '', windowMs = 20 * 60000) {
+  const idx = _load();
+  const p = idx[_safe(name)];
+  if (!p) return 0;
+  const hits = (p.photos || []).filter(x => Math.abs(x.ts - sentAt) <= windowMs
+    && (!group || !x.group || x.group === group) && x.source !== 'confirm');
+  let n = 0;
+  for (const h of hits) if (remove(name, h.ts)) n++;
+  return n;
+}
+
+/**
  * באילו אלבומים התמונה הזו נמצאת (לפי חתימה, באותם ימים) — כדי שהעריכה
  * תראה "מיה ✓ · שי ✓" ולא רק את האלבום שממנו פתחו.
  */
@@ -200,4 +217,4 @@ function monthCard(key) {
 }
 
 module.exports = {
-  whoIn, setNames, add, summary, month, photo, remove, monthCard, _monthKey };
+  whoIn, setNames, add, summary, month, photo, remove, removeNear, monthCard, _monthKey };

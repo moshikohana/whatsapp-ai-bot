@@ -83,6 +83,10 @@ async function pickPhotos(days = 7) {
       // the same photo sent twice sat in the film twice (13.9).
       let sig = null;
       try { sig = await _dhash(file); } catch (_) {}
+      // 🎞️ Only what he checked himself goes into the film: photos he
+      // confirmed, or answered a "who is this?" about. An automatic match he
+      // had marked "not Mia" was in this week's film (17.9).
+      if (p.source !== 'confirm' && p.source !== 'answer') continue;
       all.push({ name: v.name || key, ts: p.ts, file, sig, score: (p.source === 'confirm' ? 200 : 0) + (p.confidence || 50) });
     }
   }
