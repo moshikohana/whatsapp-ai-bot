@@ -30,6 +30,18 @@ const STALE_DAYS = 3;
 const TEXT_CUE = /(לאשר|אישור הגעה|תאשר|מאשרים|מי מגיע|מי בא|כמה מגיעים|להגיע|הזמנה|מוזמנ|להביא|תביאו|עד יום|עד מחר|עד ה-?\d|דדליין|הרשמה|להירשם|תירשמו|לשלם|תשלום|להעביר|ביט|פייבוקס|טופס|למלא|תמלאו|אסיפ|פגישה|ישיבה|להתייצב|התייצבות|תזכורת|שימו לב|חובה|אל תשכחו|נא ל|בבקשה ל|rsvp|\d{1,2}[:.]\d{2}|מחר ב|ב-?\d{1,2}[./]\d{1,2})/i;
 const JUNK_GROUP = /(עבודות|דרושים|מציאת עבודה|קופון|מבצעים|למכירה|יד שנייה)/;
 
+// 🗓️ הודעה פרטית שמציעה מועד. אותו שער זול, רק צר יותר: בצ'אט אישי רוב
+// ההודעות הן שיחה, ורק הצעה של מועד מעניינת אותו. הדס הציעה "יום שלישי
+// ה-22 בשעה 12:00" והוא ענה ידנית שלוש שעות אחר כך (19.9).
+// \b לא עובד על עברית ב-JS: אות עברית אינה \w, אז "תור לרופא" לא נתפס.
+// הגבול נכתב במפורש ברווחים ובסימני פיסוק.
+const MEET_CUE = /(להיפגש|נפגש|פגישה|פגישת|לקבוע|נקבע|תיאום|לתאם|מתאים לך|יתאים לך|תוכל ב|תוכלי ב|זום|zoom|טלפון בשעה|נדבר ב|מפגש|טיפול|(?:^|[\s,])תור(?=[\s,.?!]|$))/i;
+// "בשלישי" בלי המילה "יום" נפוץ בדיבור, וכך גם "ה-22 לחודש".
+const _DAYS = '(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)';
+const TIME_CUE = new RegExp(
+  `(\\d{1,2}[:.]\\d{2}|\\d{1,2}[./]\\d{1,2}|ה-?\\d{1,2} לחודש|(?:ב?יום )?${_DAYS}|ב${_DAYS}|מחר|מחרתיים|היום ב|השבוע|שבוע הבא|בשעה)`
+);
+
 let _presetIds = null, _presetAt = 0;
 function _newsGroupIds() {
   if (_presetIds && Date.now() - _presetAt < 5 * 60000) return _presetIds;
@@ -65,17 +77,36 @@ function _save(l) { try { fs.writeFileSync(FILE, JSON.stringify(l, null, 1)); } 
 
 const _seenMsg = new Set();
 
+const _DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+
 function _today() {
   const d = new Date();
-  const days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
   const il = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
-  return `${il.getFullYear()}-${String(il.getMonth() + 1).padStart(2, '0')}-${String(il.getDate()).padStart(2, '0')}, יום ${days[il.getDay()]}, ${String(il.getHours()).padStart(2, '0')}:${String(il.getMinutes()).padStart(2, '0')}`;
+  return `${il.getFullYear()}-${String(il.getMonth() + 1).padStart(2, '0')}-${String(il.getDate()).padStart(2, '0')}, יום ${_DAY_NAMES[il.getDay()]}, ${String(il.getHours()).padStart(2, '0')}:${String(il.getMinutes()).padStart(2, '0')}`;
+}
+
+/**
+ * לוח שבעת הימים הבאים, מוכן. המודל טעה בחישוב: ב-20.9 (ראשון) הוא המיר
+ * "בשלישי" ל-23.9, שהוא רביעי — הוא ספר את ראשון כיום מספר 1. כשהתאריכים
+ * כתובים לפניו אין מה לחשב.
+ */
+function _nextDays(n = 8) {
+  const il = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+  const p = v => String(v).padStart(2, '0');
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const d = new Date(il.getFullYear(), il.getMonth(), il.getDate() + i);
+    const iso = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    out.push(`יום ${_DAY_NAMES[d.getDay()]} = ${iso}${i === 0 ? ' (היום)' : i === 1 ? ' (מחר)' : ''}`);
+  }
+  return out.join(', ');
 }
 
 const SYSTEM = () => `אתה העוזר האישי של מושיקו. קיבלת הודעה מקבוצת וואטסאפ אישית שלו (משפחה, גן של הבנות, עבודה, מילואים).
 האם ההודעה מבקשת ממנו — או מכל חברי הקבוצה — לעשות משהו: לאשר הגעה, להגיע למקום בשעה מסוימת, להביא משהו, לשלם, להירשם, למלא טופס, לענות, או לעמוד במועד?
 ברכות, תמונות משפחתיות, בדיחות, עדכונים וחדשות — לא. הודעה שכבר אומרת "תודה לכל מי שאישר" — לא.
 היום: ${_today()} (שעון ישראל).
+התאריכים הקרובים, מוכנים — אל תחשב בעצמך: ${_nextDays()}.
 החזר JSON בלבד:
 {"needs": true|false,
  "what": "משפט קצר — מה בדיוק צריך לעשות",
@@ -89,6 +120,30 @@ const SYSTEM = () => `אתה העוזר האישי של מושיקו. קיבלת
 תאריך עברי (למשל "ט״ו באלול") — המר לתאריך הלועזי; אם כתוב גם לועזי, העדף אותו.
 יום בשבוע ("יום חמישי") = המופע הקרוב שעוד לא עבר: אם זה היום והשעה כבר עברה — השבוע הבא.
 כשיש כמה מועדים — של האירוע שצריך להגיע אליו.`;
+
+/**
+ * 🗓️ אותו פלט בדיוק, לצ'אט אישי אחד־על־אחד. השאלה שונה: לא "מבקשים ממנו
+ * משהו" אלא "מציעים לו מועד" — וזה מה שהוא רוצה שיישאל עליו.
+ */
+const SYSTEM_DM = () => `אתה העוזר האישי של מושיקו. קיבלת הודעה בצ'אט אישי אחד־על־אחד שנשלחה אליו.
+האם ההודעה מציעה או קובעת מועד להיפגש, לדבר או להגיע — פגישה, שיחה, זום, טלפון, תור או ביקור?
+שיחת חולין, ברכה, שאלה כללית, עדכון, או "נדבר בהמשך" בלי מועד — לא.
+הודעה ששולחת אליו אישור על מועד שכבר נקבע — כן.
+הודעה שהוא עצמו שלח — לא.
+היום: ${_today()} (שעון ישראל).
+התאריכים הקרובים, מוכנים — אל תחשב בעצמך: ${_nextDays()}.
+החזר JSON בלבד:
+{"needs": true|false,
+ "what": "משפט קצר בגוף שלישי — מה מציעים. למשל: הדס מציעה פגישה",
+ "event": "שם הפגישה או null",
+ "when": "היום והשעה כפי שנכתבו, או null",
+ "where": "המקום, או 'זום' אם זו שיחת וידאו, או null",
+ "deadline": null,
+ "dateISO": "YYYY-MM-DDTHH:MM של המועד, או null",
+ "date": "YYYY-MM-DD כשהיום ידוע בלי שעה, או null"}
+כללים ל-dateISO: רק כשגם היום וגם השעה כתובים במפורש — בלי שעה, null (לא 00:00), ואז רק date.
+יום בשבוע ("יום שלישי") = המופע הקרוב שעוד לא עבר.
+"ה-22 לחודש" = ה-22 בחודש הנוכחי אם עוד לא עבר, אחרת בחודש הבא.`;
 
 /**
  * A date already in the past is not where he has to be. "יום חמישי ב-19:30"
@@ -119,10 +174,12 @@ function _fixDay(d) {
   return d >= `${il.getFullYear()}-${p(il.getMonth() + 1)}-${p(il.getDate())}` ? d : null;
 }
 
-async function _classifyText(text, group, sender) {
+async function _classifyText(text, group, sender, dm = false) {
   return require('./claude').classifyJSON(
-    `קבוצה: ${group}\nשולח/ת: ${sender || '—'}\nהודעה:\n${String(text).substring(0, 1500)}`,
-    { system: SYSTEM(), maxTokens: 400, model: 'claude-haiku-4-5-20251001' }
+    dm
+      ? `שולח/ת: ${sender || group || '—'}\nהודעה:\n${String(text).substring(0, 1500)}`
+      : `קבוצה: ${group}\nשולח/ת: ${sender || '—'}\nהודעה:\n${String(text).substring(0, 1500)}`,
+    { system: dm ? SYSTEM_DM() : SYSTEM(), maxTokens: 400, model: 'claude-haiku-4-5-20251001' }
   );
 }
 
@@ -152,11 +209,12 @@ async function _classifyImage(buf, caption, group, sender) {
  * נקרא על כל הודעה בקבוצה. מחזיר פריט חדש כשיש משהו שדורש ממנו פעולה.
  * @param media  { buffer } לתמונה, אם כבר הורדה
  */
-async function check({ msgId, chatId, group, sender, text, isImage, media, ts = Date.now(), direct = false }) {
+async function check({ msgId, chatId, group, sender, text, isImage, media, ts = Date.now(), direct = false, dm = false }) {
   try {
     // direct: he sent it to the bot himself ("תסתכל על ההזמנה הזאת") — no
     // group to judge, and a clear sign he wants it handled.
-    if (!direct && !isPersonal(chatId, group)) return null;
+    // dm: someone wrote to him privately and proposed a time.
+    if (!direct && !dm && !isPersonal(chatId, group)) return null;
     if (msgId) { if (_seenMsg.has(msgId)) return null; _seenMsg.add(msgId); if (_seenMsg.size > 2000) _seenMsg.clear(); }
     let r = null, source = 'text';
     // An image's body can be its base64 preview, not a caption.
@@ -165,8 +223,12 @@ async function check({ msgId, chatId, group, sender, text, isImage, media, ts = 
       source = 'image';
       r = await _classifyImage(media.buffer, text, group, sender);
     } else {
-      if (!text || text.length < 12 || !TEXT_CUE.test(text)) return null;
-      r = await _classifyText(text, group, sender);
+      // בצ'אט אישי צריך גם רמז לפגישה וגם רמז לזמן, אחרת כל שיחת חולין
+      // הייתה מגיעה למודל.
+      if (dm) {
+        if (!text || text.length < 10 || !MEET_CUE.test(text) || !TIME_CUE.test(text)) return null;
+      } else if (!text || text.length < 12 || !TEXT_CUE.test(text)) return null;
+      r = await _classifyText(text, group, sender, dm);
     }
     if (!r || r.needs !== true || !r.what) return null;
 
@@ -187,12 +249,15 @@ async function check({ msgId, chatId, group, sender, text, isImage, media, ts = 
       dateISO,
       date: dateISO ? dateISO.slice(0, 10) : _fixDay(r.date || String(r.dateISO || '').slice(0, 10)),
       source, excerpt: String(text || '').substring(0, 300),
+      kind: dm ? 'meeting' : 'request',
       done: false, calendar: false,
     };
     list.unshift(item);
     const cutoff = Date.now() - KEEP_DAYS * 86400000;
     _save(list.filter(x => x.ts >= cutoff).slice(0, 300));
-    logger.info(`📌 attention: "${item.what.substring(0, 50)}" (${group}, ${source})`);
+    // צ'אט אישי הוא לא קבוצה: מה שנכתב שם לא נכנס ללוג, רק שנמצאה הצעת מועד.
+    if (dm) logger.info(`🗓️ meeting proposal found in a private chat (${item.dateISO || item.date || 'no date'})`);
+    else logger.info(`📌 attention: "${item.what.substring(0, 50)}" (${group}, ${source})`);
     return item;
   } catch (e) {
     logger.warn('attention check: ' + (e.message || '').substring(0, 60));
@@ -200,13 +265,23 @@ async function check({ msgId, chatId, group, sender, text, isImage, media, ts = 
   }
 }
 
-function format(it) {
-  const lines = [`📌 *דורש התייחסות* · ${it.group}${it.sender ? ` · ${it.sender}` : ''}`, '', `*${it.what}*`];
+function format(it, conflicts) {
+  const meeting = it.kind === 'meeting';
+  const who = it.sender || it.group;
+  const lines = meeting
+    ? [`🗓️ *מציעים לך מועד* · ${who}`, '', `*${it.what}*`]
+    : [`📌 *דורש התייחסות* · ${it.group}${it.sender ? ` · ${it.sender}` : ''}`, '', `*${it.what}*`];
   const facts = [it.when && `🗓️ ${it.when}`, it.where && `📍 ${it.where}`].filter(Boolean);
   if (facts.length) lines.push(facts.join(' · '));
   if (it.deadline) lines.push(`⏳ לענות עד: ${it.deadline}`);
   if (it.source === 'image') lines.push('_(נקרא מתוך תמונה)_');
-  lines.push('', `↩️ ענה על ההודעה: ${(it.dateISO || it.date) ? '*ליומן* או ' : ''}*טופל*`);
+  // מה שכבר ביומן באותה שעה — כדי שלא יאשר ואז יגלה.
+  if (conflicts && conflicts.length) {
+    lines.push('', `⚠️ כבר ביומן: ${conflicts.slice(0, 3).map(c => `${c.summary} ${c.timeStr}`).join(' · ')}`);
+  }
+  lines.push('', meeting
+    ? `↩️ ענה על ההודעה: ${(it.dateISO || it.date) ? '*ליומן* לקביעה, או ' : ''}*טופל*`
+    : `↩️ ענה על ההודעה: ${(it.dateISO || it.date) ? '*ליומן* או ' : ''}*טופל*`);
   return lines.join('\n');
 }
 

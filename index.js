@@ -6697,6 +6697,43 @@ client.on('message', async (msg) => {
   }
   // Persist group text messages to disk — survives bot restarts for scan resilience
   _cacheGroupMsg(msg);
+  // 🗓️ מציעים לך מועד — someone wrote to him privately and proposed a time.
+  // He answered Hadas by hand three hours later (19.9); the bot saw the message
+  // and said nothing. Two cheap regexes gate the model, so ordinary small talk
+  // in a private chat never costs a call.
+  (async () => {
+    try {
+      const _from = msg.from || '';
+      if (msg.fromMe) return;
+      if (/@g(\.us)?$|@broadcast$|status@/.test(_from)) return;
+      if (_from === OWNER_ID) return;             // his own chat with the bot
+      if (msg.type !== 'chat' || !msg.body) return;
+      const att = require('./src/attention');
+      const _chat = await msg.getChat();
+      const _who = _chat?.name || msg._data?.notifyName || '';
+      const item = await att.check({
+        msgId: _msgIdOf(msg), chatId: _from, group: _who, sender: _who,
+        text: msg.body, ts: (msg.timestamp || 0) * 1000 || Date.now(), dm: true,
+      });
+      if (!item) return;
+      // מה שכבר קבוע באותה שעה, כדי שלא יאשר ואז יגלה התנגשות.
+      let conflicts = [];
+      if (item.dateISO) {
+        conflicts = await detectCalendarConflicts({
+          dateISO: item.dateISO.slice(0, 10), time: item.dateISO.slice(11), durationMinutes: 60,
+        }).catch(() => []);
+      }
+      const txt = att.format(item, conflicts);
+      _lastAttention = { id: item.id, at: Date.now() };
+      await botSend(await client.getChatById(OWNER_ID), txt);
+      require('./src/jarvis-api').pushAlert({
+        title: `🗓️ ${item.what}`,
+        summary: [item.when, conflicts.length ? 'יש התנגשות ביומן' : null].filter(Boolean).join(' · '),
+        body: txt.replace(/\*/g, ''),
+        kind: 'attention', urgency: 'high',
+      });
+    } catch (e) { logger.warn('meeting ask: ' + (e.message || '').substring(0, 60)); }
+  })();
   // 📌 דורש התייחסות — a request in a personal group (family, kindergarten,
   // work, reserve duty), including an invitation sent as a picture.
   (async () => {
@@ -7562,7 +7599,7 @@ async function route(chatId, text, chat) {
   // 🎞️ "סרטון שבועי" / "השבוע של הבנות"
   if (chatId === OWNER_ID && /^(סרטון שבועי|השבוע של (הבנות|מיה ושי)|סרטון השבוע)$/.test(String(text || '').trim())) {
     _sendWeeklyVideo(chat).catch(async e => { try { await botSend(chat, '❌ הסרטון לא נבנה: ' + (e.message || '').substring(0, 100)); } catch (_) {} });
-    return '🎞️ מכין את *השבוע של מיה ושי* — עד 10 תמונות מהשבוע, עם מעברים ותאריכים. זה לוקח כ-4 דקות, ואז הוא יגיע אליך לוואטסאפ.';
+    return '🎞️ מכין את *השבוע של מיה ושי* — עד 13 תמונות מהשבוע, עם מעברים ותאריכים. זה לוקח כ-4 דקות, ואז הוא יגיע אליך לוואטסאפ.';
   }
   // 🎬 An answer to the open video question.
   if (chatId === OWNER_ID && _videoMenu) {
