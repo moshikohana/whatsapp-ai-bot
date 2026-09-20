@@ -97,10 +97,8 @@ async function pickPhotos(days = 7) {
       // confirmed, or answered a "who is this?" about. An automatic match he
       // had marked "not Mia" was in this week's film (17.9).
       if (p.source !== 'confirm' && p.source !== 'answer') continue;
-      // 🔁 מה שכבר היה בסרטון הקודם יורד בעדיפות, אבל לא נפסל: בשבוע דל
-      // תמונות עדיף לחזור על אחת מאשר לא להכין סרטון (18.9).
-      const seen = usedBefore.has(file) ? -150 : 0;
-      all.push({ name: v.name || key, ts: p.ts, file, sig, score: seen + (p.source === 'confirm' ? 200 : 0) + (p.confidence || 50) });
+      // 🔁 תמונה שהייתה בשני הסרטונים האחרונים נכנסת רק אם אין מספיק חדשות.
+      all.push({ name: v.name || key, ts: p.ts, file, sig, seen: usedBefore.has(file), score: (p.source === 'confirm' ? 200 : 0) + (p.confidence || 50) });
     }
   }
   // One photo, both girls: merged.
@@ -125,16 +123,22 @@ async function pickPhotos(days = 7) {
     }
     return out;
   };
-  const girls = {};
-  for (const p of uniq) for (const n of p.names) (girls[n] = girls[n] || []).push(p);
-  const lists = Object.values(girls).map(spread);
   const chosen = [];
-  for (let i = 0; chosen.length < MAX_PHOTOS && lists.some(l => l.length > i); i++) {
-    for (const l of lists) {
-      const p = l[i];
-      if (p && !chosen.includes(p) && chosen.length < MAX_PHOTOS) chosen.push(p);
+  const take = pool => {
+    const girls = {};
+    for (const p of pool) for (const n of p.names) (girls[n] = girls[n] || []).push(p);
+    const lists = Object.values(girls).map(spread);
+    for (let i = 0; chosen.length < MAX_PHOTOS && lists.some(l => l.length > i); i++) {
+      for (const l of lists) {
+        const p = l[i];
+        if (p && !chosen.includes(p) && chosen.length < MAX_PHOTOS) chosen.push(p);
+      }
     }
-  }
+  };
+  // קודם כל מה שלא היה בשני הסרטונים האחרונים. רק אם זה לא מספיק לסרטון מלא
+  // משלימים מהישנות — עדיף לחזור על תמונה מאשר לא להכין סרטון (18.9).
+  take(uniq.filter(p => !p.seen));
+  if (chosen.length < MAX_PHOTOS) take(uniq.filter(p => p.seen));
   return chosen.sort((a, b) => a.ts - b.ts);
 }
 
