@@ -2856,7 +2856,9 @@ function notifyOwnerCreditLow(detail) {
   const now = Date.now();
   let last = 0;
   try { last = JSON.parse(fs.readFileSync(_creditNotifyFile, 'utf8')).lastSent || 0; } catch {}
-  if (now - last < 6 * 3600 * 1000) return; // at most once per 6h
+  // Every two hours, not every six. On 20.9 it was down from 10:36 to 16:17
+  // and said so once, at the start — the rest of the outage was silent.
+  if (now - last < 2 * 3600 * 1000) return;
   try { fs.writeFileSync(_creditNotifyFile, JSON.stringify({ lastSent: now })); } catch {}
   (async () => {
     try {
@@ -2883,10 +2885,30 @@ function notifyOwnerCreditLow(detail) {
   // Also where he looks: WhatsApp and the app. The email alone went unseen, and
   // on 15.9 news and radio stood still for four hours (15.9).
   const _txt = '💳 *נגמרו הקרדיטים ב-Anthropic*\n\nחדשות, כותרות רדיו וסיכומים עצרו עד שיוטענו קרדיטים. ההודעות מהקבוצות נשמרות בתור ויעובדו כשהקרדיט יחזור.\n\nלטעינה: console.anthropic.com → Plans & Billing (מומלץ Auto-reload).';
-  (async () => { try { await botSend(await client.getChatById(OWNER_ID), _txt); } catch (_) {} })();
+  // A swallowed failure here is how "he was told" turns out to be false —
+  // the result is logged either way.
+  (async () => {
+    try { await botSend(await client.getChatById(OWNER_ID), _txt); logger.info('💳 credit-low sent to his WhatsApp'); }
+    catch (e) { logger.warn('💳 credit-low WhatsApp FAILED: ' + (e.message || '').substring(0, 90)); }
+  })();
   try { require('./src/jarvis-api').pushAlert({ title: '💳 נגמרו הקרדיטים ב-Anthropic', body: _txt.replace(/\*/g, ''), kind: 'system', urgency: 'high' }); } catch (_) {}
 }
 try { require('./src/claude').onCreditError(notifyOwnerCreditLow); } catch (e) { logger.warn('onCreditError hook: ' + e.message); }
+
+/** הקרדיט חזר — כמה זמן הבוט היה חלקי, ושהוא שלם שוב. */
+function notifyOwnerCreditBack(since) {
+  const mins = Math.max(1, Math.round((Date.now() - since) / 60000));
+  const how = mins >= 60 ? `${Math.floor(mins / 60)} שעות ו-${mins % 60} דקות` : `${mins} דקות`;
+  const txt = `✅ *הקרדיט חזר* — הבוט עובד במלוא היכולות.\n\nהוא היה חלקי ${how}. מה שנכנס בינתיים מהקבוצות עובד עכשיו בתור.`;
+  logger.info(`💳 credit is back after ${mins} min`);
+  try { fs.writeFileSync(_creditNotifyFile, JSON.stringify({ lastSent: 0 })); } catch (_) {}
+  (async () => {
+    try { await botSend(await client.getChatById(OWNER_ID), txt); }
+    catch (e) { logger.warn('💳 credit-back WhatsApp FAILED: ' + (e.message || '').substring(0, 90)); }
+  })();
+  try { require('./src/jarvis-api').pushAlert({ title: '✅ הקרדיט חזר', summary: `הבוט היה חלקי ${how}`, body: txt.replace(/\*/g, ''), kind: 'system', urgency: 'normal' }); } catch (_) {}
+}
+try { require('./src/claude').onCreditBack(notifyOwnerCreditBack); } catch (e) { logger.warn('onCreditBack hook: ' + e.message); }
 
 // ─── Auto-reconnect: try to revive the client in-process before exiting ──
 async function attemptReconnect(reason) {

@@ -843,12 +843,24 @@ async function callWithRetry(fn, opts = {}) {
   const { maxRetries = 3, baseDelayMs = 2000, label = 'api' } = opts;
   for (let i = 0; i < maxRetries; i++) {
     try {
-      return await fn();
+      const out = await fn();
+      // First call through after a credit outage: say it is back. On 20.9 the
+      // credit ran out at 10:36 and returned at 16:17, and nothing marked the
+      // end of it — he had no way to know the bot was whole again.
+      if (_creditDownSince) {
+        const since = _creditDownSince; _creditDownSince = 0;
+        try { _creditBack?.(since); } catch {}
+      }
+      return out;
     } catch (err) {
       // No credit: every background job (news, radio) fails through here, and
       // only the chat path used to raise the alert — so on 15.9 the credit ran
       // out at noon and nobody was told (15.9).
-      if (/credit balance|too low/i.test(err.message || '')) { try { _creditAlert?.(err.message); } catch {} throw err; }
+      if (/credit balance|too low/i.test(err.message || '')) {
+        if (!_creditDownSince) _creditDownSince = Date.now();
+        try { _creditAlert?.(err.message); } catch {}
+        throw err;
+      }
       const isLast = i === maxRetries - 1;
       if (!isRetryableError(err) || isLast) throw err;
       const delay = baseDelayMs * Math.pow(2, i);
@@ -868,6 +880,9 @@ const MIN_INTERVAL = 3000; // 3s between API calls
 // low" — otherwise the bot silently loses all its AI features until noticed.
 let _creditAlert = null;
 function onCreditError(cb) { _creditAlert = cb; }
+// The other half: when it starts working again.
+let _creditBack = null, _creditDownSince = 0;
+function onCreditBack(cb) { _creditBack = cb; }
 
 async function callClaude(params, retries = 2) {
   // Enforce minimum interval between calls
@@ -1274,4 +1289,4 @@ async function completeText(userMessage, { system, maxTokens = 1500, model = 'cl
   }
 }
 
-module.exports = { parseLooseJSON, smartChat, thinkWithClaude, classifyJSON, completeText, registerToolHandlers, getUsageSummary, onCreditError };
+module.exports = { parseLooseJSON, smartChat, thinkWithClaude, classifyJSON, completeText, registerToolHandlers, getUsageSummary, onCreditError, onCreditBack };
