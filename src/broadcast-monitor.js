@@ -35,7 +35,7 @@ const DEFAULTS = {
   intervalMin: 4,        // how often each station is sampled
   chunkSec: 55,          // how much audio per sample
   activeFrom: 6,         // Israel hours — outside this window we don't spend
-  activeTo: 23,
+  activeTo: 21,      // 21:00–06:00 הוא מוזיקה ברוב התחנות — לא נדגם (20.9)
   terms: ['קלנר', 'אריאל קלנר'],
 };
 

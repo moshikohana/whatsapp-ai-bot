@@ -10651,6 +10651,9 @@ async function runMediaMonitor(now = new Date()) {
 nodeCron.schedule('0 8 * * *', async () => {
   try {
     if (!profile.jobEnabled('x-monitor')) return;
+    // 💰 מעקב המדיה היומי עלה כ-$0.29 ליום (קריאה אחת עם 6 חיפושי רשת) והוא
+    // ביקש לבטל אותו (20.9). הפקודה הידנית נשארת — רק ההרצה האוטומטית כבויה.
+    if (!require('./src/ai-features').on('mediaMonitor')) return;
     const oc = await client.getChatById(OWNER_ID);
     const now = new Date();
     const today = now.toLocaleDateString('he-IL');

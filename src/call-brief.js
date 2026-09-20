@@ -42,11 +42,10 @@ async function _news(since) {
     const na = require('./news-apps');
     const hours = Math.ceil((Date.now() - since) / 3600000) + 1;
     const stories = na.hot(hours, 40).filter(s => (s.firstTs || s.last) >= since);
-    // Whether each was already known — checked now for the top few, so the
-    // call can say "this one you have not heard yet".
-    const np = require('./news-prior');
-    np.attach(stories);
-    for (const s of stories.slice(0, 4)) if (!s.prior) { try { s.prior = await np.check(s); } catch (_) {} }
+    // 💰 "כבר ידוע" רק על מה שהוא בחר לבדוק (20.9). קודם התדריך הריץ את
+    // הבדיקה על 40 ידיעות בכל בוקר — 103 קריאות ביום, בלי שביקש. עכשיו הוא
+    // מציג רק מה שכבר נבדק; ידיעה שלא נבדקה פשוט לא תסומן.
+    require('./news-prior').peek(stories);
     return stories.slice(0, 12).map(s => ({
       id: s.id, title: s.title, channels: Object.keys(s.apps), time: _hm(s.firstTs || s.last),
       texts: s.texts, breaking: !!s.breaking, radio: !!s.radio, score: s.score,

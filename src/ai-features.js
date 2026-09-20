@@ -16,6 +16,7 @@ const DEFAULTS = {
   hub: false,           // 🎯 מוקד אוטומטי (הפקודה "מוקד" נשארת)
   priorAuto: false,     // ⏪✅ כבר ידוע / אומת על החמות — עכשיו רק בידיעה שנפתחה
   topicsAuto: false,    // 🧵 קיבוץ נושאים כל שעה — עכשיו כשפותחים את הטאב
+  mediaMonitor: false,  // 🔍 מעקב מדיה יומי ב-08:00 — הוא ביקש לבטל (20.9)
 };
 let _c = null, _at = 0;
 function on(name) {
