@@ -35,7 +35,8 @@ const DEFAULTS = {
   intervalMin: 4,        // how often each station is sampled
   chunkSec: 55,          // how much audio per sample
   activeFrom: 6,         // Israel hours — outside this window we don't spend
-  activeTo: 21,      // 21:00–06:00 הוא מוזיקה ברוב התחנות — לא נדגם (20.9)
+  activeTo: 21,            // 21:00–06:00 הוא מוזיקה ברוב התחנות — לא נדגם (20.9)
+  skipHours: [14, 15, 16], // מגזין ומוזיקה — אפס כותרות במדידה (20.9)
   terms: ['קלנר', 'אריאל קלנר'],
 };
 
@@ -91,6 +92,10 @@ function inActiveHours(d = new Date()) {
   const h = +new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })).getHours();
   const chag = chagState(d);
   if (chag === 'chag') return false;
+  // 📻 שעות שנמדדו כריקות: 14:00–16:59 הן מגזין ומוזיקה בתחנות האלה. במדידה
+  // מ-17.9 ואילך יצאו מהן 303 דגימות ואפס כותרות, בזמן ש-17:00 נתנה 23.8%
+  // ו-10:00 נתנה 15.8% (20.9). הרשימה בקובץ ההגדרות — אפשר לשנות בלי קוד.
+  if ((c.skipHours || DEFAULTS.skipHours).includes(h)) return false;
   const to = chag === 'erev' ? Math.min(c.activeTo, 16) : c.activeTo;
   return h >= c.activeFrom && h < to;
 }

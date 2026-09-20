@@ -381,6 +381,13 @@ async function onChunk({ station, text, ts = Date.now(), guest = null, wait = fa
     // many). Past the cap they wait in the tab and the hourly summary. Only a
     // flash (5) or a listen he started on purpose goes past it.
     void keyOne;
+    // 🎙️ ניתוח של פאנליסט בלי דובר מזוהה — לא כותרת בשבילו (20.9, בחירתו).
+    // מדידה על 86 ההתראות שנשלחו: 33 היו בלי דובר, ורובן פרשנות ("ליברמן
+    // ואיזנקוט מוגדרים כשמאל", "נתניהו שולט בסדר היום") ולא אמירה של מישהו.
+    // שם שכתוב בכותרת עצמה ("בנט: ...") נחשב דובר מזוהה, ומבזק בציון 5 עובר
+    // בכל מקרה — שם הידיעה היא העניין, לא מי אמר אותה.
+    const named = (speaker && !/לא מזוהה/.test(speaker)) || /^[^:]{2,30}:/.test(headline);
+    if (!silent && !guest && !named && (c.score || 0) < 5) silent = 'no-speaker';
     if (!silent && !guest && (c.score || 0) < 5 && list.filter(h => h.sentAt && ts - h.sentAt < 3600000).length >= 4) silent = 'cap';
 
     const item = {
