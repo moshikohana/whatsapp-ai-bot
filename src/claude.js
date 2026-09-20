@@ -386,7 +386,13 @@ const TOOLS = [
   // ─── Computer (unified) ───────────────────────────────────────
   {
     name: 'computer',
-    description: 'מחשב. פעולות: info (מידע מערכת), files (קבצים), read_file, search_files, run (פקודה), battery, wifi, processes.',
+    // 20.9: הוא ביקש להוסיף ערוץ לסריקה היומית, והמודל ניגש בכלי הזה ל-
+    // data/daily.json — קובץ של השרת — וענה "לא נמצא", כי הוא חיפש אותו
+    // במחשב הביתי. התיאור לא אמר שאלה שתי מכונות שונות.
+    description: 'המחשב הביתי שלו בבית (Windows), דרך סוכן מרוחק — לא השרת שהבוט רץ עליו. ' +
+      'הקבצים וההגדרות של הבוט עצמו (data/, daily.json, רשימות סריקה) לא נמצאים כאן לעולם; ' +
+      'לרשימת הסריקה היומית יש להשתמש ב-schedule (list_daily / daily). ' +
+      'פעולות: info (מידע מערכת), files (קבצים), read_file, search_files, run (פקודה), battery, wifi, processes.',
     input_schema: {
       type: 'object',
       properties: {

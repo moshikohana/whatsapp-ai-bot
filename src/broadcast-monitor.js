@@ -66,10 +66,33 @@ function saveConfig(next) {
   return cfg;
 }
 
+// 🕯️ בחג התחנות משדרות מוזיקה ותוכניות חג, ואין בהן מה לחפש (20.9).
+// התאריך העברי מגיע מ-Intl, בלי ספרייה חיצונית. לפי שם החודש ולא לפי מספרו:
+// בשנה מעוברת יש אדר א׳ ואדר ב׳ וכל המספור שאחריהם זז.
+const CHAG = new Set([
+  '1 Tishri', '2 Tishri',   // ראש השנה
+  '10 Tishri',              // יום כיפור
+  '15 Tishri', '22 Tishri', // סוכות, שמיני עצרת
+  '15 Nisan', '21 Nisan',   // פסח, שביעי של פסח
+  '6 Sivan',                // שבועות
+]);
+const _HEB = new Intl.DateTimeFormat('en-u-ca-hebrew', { day: 'numeric', month: 'long', timeZone: 'Asia/Jerusalem' });
+const _hebDay = d => _HEB.format(d);
+/** null ביום רגיל, 'chag' בחג עצמו, 'erev' בערב חג. */
+function chagState(d = new Date()) {
+  if (CHAG.has(_hebDay(d))) return 'chag';
+  // החג נכנס בערב, והשידור עובר לתוכניות חג כמה שעות קודם.
+  if (CHAG.has(_hebDay(new Date(d.getTime() + 86400000)))) return 'erev';
+  return null;
+}
+
 function inActiveHours(d = new Date()) {
   const c = loadConfig();
   const h = +new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })).getHours();
-  return h >= c.activeFrom && h < c.activeTo;
+  const chag = chagState(d);
+  if (chag === 'chag') return false;
+  const to = chag === 'erev' ? Math.min(c.activeTo, 16) : c.activeTo;
+  return h >= c.activeFrom && h < to;
 }
 
 // ── Capture a chunk of live audio ────────────────────────────────
