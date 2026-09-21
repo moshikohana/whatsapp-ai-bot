@@ -31,7 +31,7 @@ const STATIONS = [
 
 const DEFAULTS = {
   enabled: false,
-  stations: ['glz', '103fm', 'kanbet'],
+  stations: ['glz', 'kanbet'],   // 103FM ירדה 21.9: שליש מעלות הרדיו מול 14% מההתראות
   intervalMin: 4,        // how often each station is sampled
   chunkSec: 55,          // how much audio per sample
   activeFrom: 6,         // Israel hours — outside this window we don't spend
