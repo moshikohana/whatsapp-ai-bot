@@ -20,7 +20,8 @@ const STATE = path.join(__dirname, '..', 'data', 'broadcast', 'bulletins-state.j
 const CAPTURE_SEC = 240;
 const LOOKBACK_MS = 6 * 3600000;
 // News stations only — גלגלצ is music.
-const BULLETIN_STATIONS = ['glz', '103fm', 'kanbet'];
+// 103FM ירדה גם כאן (24.9) — הוא ביקש להוריד אותה, והמבזקים דגמו אותה 12 פעמים ביום.
+const BULLETIN_STATIONS = ['glz', 'kanbet'];
 
 function _load() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return []; } }
 function _save(l) { try { fs.writeFileSync(FILE, JSON.stringify(l.slice(0, 200), null, 1)); } catch (_) {} }
