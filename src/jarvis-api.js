@@ -1645,6 +1645,8 @@ function attach(app, deps = {}) {
 
   // Mail + calendar for the PC JARVIS (מזכיר) — 1.10.2026.
   try { require('./jarvis-secretary').attach(app, guard); } catch (e) { logger.warn('secretary not attached: ' + e.message); }
+  // Phone → PC tasks, the PC's board, the morning call — 1.10.2026.
+  try { require('./jarvis-tasks').attach(app, guard); } catch (e) { logger.warn('pc tasks not attached: ' + e.message); }
 
   logger.info(`🤝 JARVIS bridge ${secret() ? 'ready' : 'DISABLED (no JARVIS_SECRET)'}`);
 }

@@ -22,7 +22,7 @@ const cal = () => require('./calendar');
 const gmail = () => google.gmail({ version: 'v1', auth: cal().getAuthClient() });
 
 // Same idea as gmail.js isSpamEmail — kept local because that one isn't exported.
-const NOISE_FROM = /(no-?reply|noreply|newsletter|notifications?@|mailer|marketing|promo|aliexpress|twitch|linkedin|facebookmail|temu|shein|wolt|news@|info@)/i;
+const NOISE_FROM = /(no-?reply|noreply|newsletter|notifications?@|mailer|marketing|promo|aliexpress|twitch|linkedin|facebookmail|temu|shein|wolt|news@|info@|editor|digest|newsletter|weekly|daily brief)/i;
 const NOISE_SUBJ = /(מבצע|הנחה|קופון|sale|% off|newsletter|ניוזלטר|webinar|unsubscribe|deal|הזמנה שלך נשלחה)/i;
 
 const hv = (headers, n) => (headers || []).find(h => h.name.toLowerCase() === n.toLowerCase())?.value || '';
@@ -69,7 +69,9 @@ async function inbox({ q = 'in:inbox newer_than:2d', max = 25 } = {}) {
   const msgs = await Promise.all(ids.map(id => g.users.messages.get({
     userId: 'me', id, format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'],
   }).then(r => r.data).catch(() => null)));
-  return msgs.filter(Boolean).map(brief);
+  // Mail from his own address is the bot's reports and notes-to-self — never 'important'.
+  const me = await myAddress(g).catch(() => '');
+  return msgs.filter(Boolean).map(brief).map(m => (me && m.fromAddr.toLowerCase() === me ? { ...m, fromMe: true, noise: true } : m));
 }
 
 async function message(id) {

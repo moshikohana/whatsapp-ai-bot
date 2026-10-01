@@ -1627,6 +1627,17 @@ try {
     } catch (e) { logger.warn('claude push failed: ' + (e.message || '').substring(0, 80)); }
   });
 } catch (e) { console.warn('desktop-agent attach: ' + e.message); }
+// "ג׳רביס …" from WhatsApp → the PC JARVIS; its answer comes back here.
+try {
+  require('./src/jarvis-tasks').onDone(async (t) => {
+    if (t.from !== 'whatsapp') return;
+    try {
+      const chat = await client.getChatById(OWNER_ID);
+      const head = (t.status === 'done' ? '🖥️ *ג׳רביס סיים*' : '🖥️ *ג׳רביס נכשל*') + `\n_${t.text.substring(0, 80)}_\n${'━'.repeat(18)}\n\n`;
+      await botSend(chat, head + (t.result || '(בלי פירוט)'));
+    } catch (e) { logger.warn('pc task push failed: ' + (e.message || '').substring(0, 80)); }
+  });
+} catch (e) { console.warn('pc tasks hook: ' + e.message); }
 // A guest instance gets a different front page: the QR to scan and the guide
 // for using the bot, in one place. The owner's page is an operator dashboard
 // — restart buttons, logs, diagnostics — which is the wrong thing to hand
@@ -1726,6 +1737,13 @@ try {
       const oc = await client.getChatById(OWNER_ID);
       await orig.forward(oc);
       if (note) { try { await botSend(oc, note); } catch (_) {} }
+      return true;
+    },
+    // 🖼️ An image to his own chat, with a caption — for a question that needs him to look (24.9).
+    sendOwnerImage: async (b64, caption) => {
+      const { MessageMedia } = require('whatsapp-web.js');
+      const oc = await client.getChatById(OWNER_ID);
+      await oc.sendMessage(new MessageMedia('image/jpeg', b64, 'image.jpg'), { caption: String(caption || '') + BOT_MARKER });
       return true;
     },
     videoAudio: (id, withText, jobId) => _sendVideoAudio(id, withText, jobId),
@@ -2194,7 +2212,7 @@ function _queueFaceDoubts(ambiguous, buffer, groupName, raw = null, detections =
           : `מי זה בתמונה${where ? ` (${where}, מסומן ב-?)` : ''} — ${between[0]} או ${between[1]}?`,
         hint: one
           ? `בוטי לא בטוח. אם זו ${between[0]} — התשובה תיכנס לייחוס ותשפר את ההכרעה הבאה.`
-          : `הפרש של ${a.distance != null ? a.distance.toFixed(3) : '?'} בלבד בין השתיים. ` +
+          : (a.gap != null ? `הן נראות לבוטי כמעט אותו דבר (הפרש ${a.gap.toFixed(2)}, צריך לפחות 0.06). ` : '') +
             `אם זה ילד אחר — "אף אחת". התשובה תיכנס לייחוס ותשפר את ההכרעה הבאה.`,
         options: one
           ? [{ label: `כן, זו ${between[0]}`, value: between[0] }, { label: 'לא', value: '__none__' }]
@@ -2702,6 +2720,7 @@ client.on('ready', () => {
     const failed = results.filter(r => !r[1]);
     if (failed.length === 0) {
       logger.info(`💚 Health check passed: ${results.map(r => r[0]).join(', ')}`);
+      notifyOwnerBotBack().catch(() => {});
     } else {
       const detail = failed.map(r => `${r[0]}${r[2] ? ' (' + String(r[2]).substring(0, 40) + ')' : ''}`).join(', ');
       logger.error(`🚑 Health check FAILED: ${detail}`);
@@ -2844,6 +2863,34 @@ async function notifyOwnerBotDown(kind, details) {
     logger.info(`📧 Bot-down email sent to ${OWNER_EMAIL} — ${kind}`);
   } catch (e) {
     logger.warn(`📧 Bot-down email FAILED: ${e.message?.substring(0,120)}`);
+  }
+}
+
+// After a "בוטי נותק" email, the next healthy start sends "בוטי חזר לפעול" — with how long it
+// was down (1.10: the 22:16 email came, the 22:17 recovery was silent, and he was left guessing).
+// Once per outage: the state file remembers it was sent. Only within 24h of the down email.
+async function notifyOwnerBotBack() {
+  const state = _loadNotifyState();
+  if (!state.lastSent || state.backSent || Date.now() - state.lastSent > 24 * 3600000) return;
+  try {
+    const { sendEmail } = require('./src/gmail');
+    const downMin = Math.max(1, Math.round((Date.now() - state.lastSent) / 60000));
+    const whenIL = new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+    const sentIL = new Date(state.lastSent).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+    const body = [
+      `<b>✅ בוטי מחובר לוואטסאפ ופועל כרגיל</b>`,
+      ``,
+      `<b>חזר לפעול:</b> ${whenIL}`,
+      `<b>ההתראה על הניתוק נשלחה:</b> ${sentIL} (${state.kind || '?'})`,
+      ...(downMin <= 120 ? [`<b>זמן עד החזרה:</b> ${downMin} דקות מההתראה`] : []),
+      ``,
+      `לא נדרש ממך כלום.`,
+    ].join('\n');
+    await sendEmail(OWNER_EMAIL, `✅ בוטי חזר לפעול — מחובר לוואטסאפ`, body);
+    _saveNotifyState({ ...state, backSent: Date.now() });
+    logger.info(`📧 Bot-back email sent to ${OWNER_EMAIL} (${downMin} min after the down email)`);
+  } catch (e) {
+    logger.warn(`📧 Bot-back email FAILED: ${e.message?.substring(0, 120)}`);
   }
 }
 
@@ -4002,8 +4049,11 @@ async function runGroupSuggestionCheck(opts = {}) {
 try { if (profile.jobEnabled('group-suggestion')) nodeCron.schedule('0 20 * * *', () => { runGroupSuggestionCheck().catch(() => {}); }); } catch {}
 
 // ─── Poll vote handler — drives all interactive flows ─────────
+require('./src/family').init({ client, OWNER_ID, BOT_MARKER, Poll: require('whatsapp-web.js').Poll });
+setInterval(() => { if (botStatus === 'connected') require('./src/family').tick().catch(e => logger.warn('family tick: ' + (e.message || '').substring(0, 60))); }, 10 * 60 * 1000);
 client.on('vote_update', async (vote) => {
   try {
+    if (require('./src/family').onVote(vote)) return;
     const ifl = require('./src/interactive-flow');
     const onb = require('./src/onboarding-flow');
     const sf = require('./src/scan-flow');
@@ -4402,6 +4452,8 @@ client.on('message_create', async (msg) => {
 
   // Persist group messages to disk for scan resilience across restarts
   if (!msg.fromMe) _cacheGroupMsg(msg);
+  // 👨‍👩‍👧 his own lines in a family group — others' come through 'message'.
+  if (msg.fromMe && /@g\.us$/.test(msg.to || '')) { require('./src/family').onGroupMessage(msg).catch(e => console.error('family onGroupMessage: ' + String((e && e.stack) || e).substring(0, 300))); }
   try {
     // Only handle text and images
     if (!ALLOWED_TYPES.has(msg.type)) {
@@ -5249,7 +5301,7 @@ ${rawBody}`;
 
           const lines = _nf.faces.map(f => f.isMatch
             ? `*${f.n}.* ✅ ${f.matchedName} _(${f.confidence}%)_`
-            : `*${f.n}.* ❓ לא מזוהה${f.nearest ? ` — הכי קרוב ל-${f.nearest} (${f.confidence}%)` : ''}`).join('\n');
+            : (f.ambiguous ? `*${f.n}.* 🤔 ${f.ambiguous.join(' או ')} — לא בטוח` : `*${f.n}.* ❓ לא מזוהה${f.nearest ? ` — הכי קרוב ל-${f.nearest} (${f.confidence}%)` : ''}`)).join('\n');
 
           const { MessageMedia } = require('whatsapp-web.js');
           await chat.sendMessage(
@@ -6650,6 +6702,8 @@ async function handleFaceTest(msg, withBlur = false, withHighlight = false, high
 // IMPORTANT: Only READS from groups. NEVER sends to groups.
 // Only forwards matching photos to OWNER's self-chat.
 client.on('message', async (msg) => {
+  // 👨‍👩‍👧 family group: "בוטי, …", "אני על הקינוח" (29.9)
+  if (/@g\.us$/.test(msg.from || '')) { require('./src/family').onGroupMessage(msg).catch(e => console.error('family onGroupMessage: ' + String((e && e.stack) || e).substring(0, 300))); }
   // ── Keyword alert — runs for ALL message types (text, image, video…) ────────
   {
     const _kFromJid = msg.from || '';
@@ -7607,6 +7661,11 @@ setInterval(async () => {
 }, 60000);
 
 async function route(chatId, text, chat) {
+  // 👨‍👩‍👧 family group: scheduling, who is coming, who brings what, family dates (29.9)
+  if (chatId === OWNER_ID) {
+    try { const fr = await require('./src/family').command(text); if (fr) return fr; }
+    catch (e) { logger.warn('family: ' + (e.message || '').substring(0, 60)); }
+  }
   // 🎞️ "שלח שוב את הסרטון" — the last film, without building it again.
   if (chatId === OWNER_ID && /^(שלח שוב (את )?(הסרטון|סרטון שבועי)|סרטון שבועי שוב)$/.test(String(text || '').trim())) {
     const dir = path.join(__dirname, 'output', 'weekly');
@@ -7741,6 +7800,13 @@ async function route(chatId, text, chat) {
       const hh = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
       return s.waiting ? `🎧 אאזין ל${s.station} מ-${hh(s.from)} עד ${hh(s.until)}.` : `🎧 מאזין ל${s.station} עד ${hh(s.until)} — ${s.chunks} דקות הוקלטו.`;
     }
+    // 💡 A bare "האזן" answers the last suggestion ("להאזין? השב האזן").
+    if (/^(כן\s+)?(האזן|תאזין)\s*[!.]?$/.test(tt) && bf.suggestions().length) {
+      const r = bf.acceptSuggestion();
+      if (r.error) return `🎧 ${r.error}`;
+      const hh = t => new Date(t).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+      return `🎧 ${r.waiting ? `אאזין ל${r.station} מ-${hh(r.from)}` : `מאזין עכשיו ל${r.station}`} עד ${hh(r.until)}. בסוף — סיכום, כותרות והקלטה מלאה.\n_לעצירה: "עצור האזנה"_`;
+    }
     const p = bf.parse(tt);
     if (p && p.error) return `🎧 ${p.error}`;
     if (p) {
@@ -7854,7 +7920,7 @@ async function route(chatId, text, chat) {
         if (!_nf.count) { await botSend(chat, '🤷 לא זוהו פנים בתמונה האחרונה.'); return; }
         const lines = _nf.faces.map(f => f.isMatch
           ? `*${f.n}.* ✅ ${f.matchedName} _(${f.confidence}%)_`
-          : `*${f.n}.* ❓ לא מזוהה${f.nearest ? ` — הכי קרוב ל-${f.nearest} (${f.confidence}%)` : ''}`).join('\n');
+          : (f.ambiguous ? `*${f.n}.* 🤔 ${f.ambiguous.join(' או ')} — לא בטוח` : `*${f.n}.* ❓ לא מזוהה${f.nearest ? ` — הכי קרוב ל-${f.nearest} (${f.confidence}%)` : ''}`)).join('\n');
         const { MessageMedia } = require('whatsapp-web.js');
         await chat.sendMessage(
           new MessageMedia('image/jpeg', _nf.buffer.toString('base64'), 'faces.jpg'),
@@ -7867,6 +7933,20 @@ async function route(chatId, text, chat) {
       }
     })();
     return '🔢 ממספר את הפרצופים בתמונה האחרונה... שנייה.';
+  }
+
+  // ─── 🖥️ "ג׳רביס <משימה>" → ג׳רביס של המחשב (1.10.2026) ──────────────
+  // Unlike "קלוד" (which feeds an open dev chat), this goes to the PC
+  // assistant's task queue: it runs even with no chat window open, and the
+  // answer comes back here when it's done.
+  {
+    const _jm = text.trim().match(/^(?:ג['׳]?רביס|גרביס|jarvis)\s*[,:،]?\s+([\s\S]{3,})$/i);
+    if (_jm && chatId === OWNER_ID) {
+      const jt = require('./src/jarvis-tasks');
+      const t = jt.enqueue(_jm[1], 'whatsapp');
+      return `🖥️ *נשלח לג׳רביס במחשב*` + (jt.pcOnline() ? '' : `\n_המחשב לא מחובר כרגע — המשימה תחכה עד שיידלק._`) +
+        `\n\n_התשובה תגיע לכאן כשתהיה מוכנה._ \`${t.id}\``;
+    }
   }
 
   // ─── 🧠 גשר ל-Claude Code שבמחשב ─────────────────────────────────
@@ -8711,7 +8791,15 @@ server.listen(PORT, () => {
   // ── Schedule daily backup (23:00 Israel time) ──
   try {
     const { scheduleDailyBackup } = require('./src/backup');
-    scheduleDailyBackup(nodeCron);
+    scheduleDailyBackup(nodeCron, (res) => {
+      try {
+        require('./src/jarvis-api').pushAlert({
+          title: '⚠️ הגיבוי הלילי נכשל', summary: String(res.error || '').substring(0, 120),
+          body: `הגיבוי של הנתונים (זיכרון, פרצופים, אלבום, הגדרות) לא נשמר הלילה.\n${String(res.error || '').substring(0, 400)}`,
+          kind: 'system', urgency: 'normal', supersedes: 'backup-fail',
+        });
+      } catch (_) {}
+    });
     logger.info('📦 Daily backup scheduled — 23:00 Asia/Jerusalem');
   } catch (err) {
     logger.warn('⚠️ Daily backup scheduling failed:', err.message);
@@ -9209,12 +9297,23 @@ require('./src/ai-meter').onCap(c => {
   try {
     require('./src/jarvis-api').pushAlert({
       title: `💰 הגענו ל-$${c.usd.toFixed(2)} היום`,
-      summary: 'נושאים, כבר ידוע ואומת נעצרו עד מחר. רדיו והאזנה לראיונות ממשיכים.',
+      summary: 'נושאים, כבר ידוע ואומת נעצרו עד מחר. אפשר להגדיל להיום באפליקציה — בית → 💰 תקציב.',
       body: 'התקרה היומית לשימוש במודלים נוצלה ברובה. כדי לא לעבור אותה, התוספות נעצרו עד חצות: קיבוץ נושאים, "כבר ידוע", "אומת" וסיכומים. כותרות רדיו, האזנה לראיונות והשיחה איתך ממשיכים.',
       kind: 'system', urgency: 'normal', supersedes: 'budget',
     });
   } catch (_) {}
 });
+// 💡 A suggested listen: asked on WhatsApp and in the app, started only on his word.
+try {
+  require('./src/broadcast-focus').setSuggestSender(async (s) => {
+    const hh = new Date(s.from).toLocaleTimeString('he-IL', { timeZone: 'Asia/Jerusalem', hour: '2-digit', minute: '2-digit' });
+    const now = s.from <= Date.now() + 60000;
+    const line = `📻 *הצעה להאזנה:* ${s.who} ב${s.station} ${now ? 'עכשיו' : 'ב-' + hh}\n` +
+      (s.heard ? '✅ שמעתי אותו עכשיו בשידור' : s.sure ? '✅ הפוסט אומר שזה משודר עכשיו' : '⚠️ רק ציטוט — ייתכן שהראיון כבר נגמר. אם השם לא יישמע ב-4 דקות, אעצור לבד');
+    try { await botSend(await client.getChatById(OWNER_ID), `${line}\n_${s.text.substring(0, 160)}_\n\nלהאזין? השב *האזן* (כ-$0.25)`); } catch (_) {}
+    try { require('./src/jarvis-api').pushAlert({ title: `📻 להאזין? ${s.who} ב${s.station} ${now ? 'עכשיו' : hh}`, summary: (s.heard ? '✅ שמעתי אותו עכשיו בשידור' : s.sure ? '✅ משודר עכשיו' : '⚠️ ייתכן שכבר נגמר') + ' · לחץ 🎧 האזן', body: `${s.text}\n\nלחץ 🎧 האזן בהתראה — או בוואטסאפ: "האזן".`, kind: 'radio-suggest', urgency: 'high', link: `listen:${s.id}` }); } catch (_) {}
+  });
+} catch (_) {}
 try {
   require('./src/broadcast-focus').setSender(async (text, file, radio) => {
     const oc = await client.getChatById(OWNER_ID);
@@ -9509,8 +9608,11 @@ setInterval(async () => {
     if (!pageAlive) throw new Error('Store not found');
 
     const silentMin = Math.round((Date.now() - _lastMsgEventAt) / 60000);
-    logger.info(`🔍 Watchdog: page=alive | last msg event ${silentMin}min ago`);
-    if (silentMin >= 45) {
+    if (silentMin >= 15 || ++_wdTick % 4 === 0) logger.info(`🔍 Watchdog: page=alive | last msg event ${silentMin}min ago`);
+    // 15 quiet minutes → ask WhatsApp. Not CONNECTED twice in a row (5 min apart) → restart.
+    // It used to wait 45 min, checking every 20 — a zombie on 30.9 ran 62 min, and family
+    // messages from then were answered only after it (1.10).
+    if (silentMin >= 15) {
       // Quiet ≠ zombie. The political/news groups go SILENT on Shabbat and
       // overnight — that used to false-trigger this and KILL a perfectly
       // healthy connection ("the code disconnected me", 2026-09-05). Before
@@ -9524,9 +9626,12 @@ setInterval(async () => {
         ]);
       } catch (e) { state = 'ERR:' + (e.message || '').substring(0, 30); }
       if (state === 'CONNECTED') {
-        logger.info(`🔍 Watchdog: ${silentMin}min quiet but WA state=CONNECTED — healthy (just quiet, e.g. Shabbat). Not killing.`);
+        _wdNotConnected = 0;
+        if (silentMin >= 45) logger.info(`🔍 Watchdog: ${silentMin}min quiet but WA state=CONNECTED — healthy (just quiet, e.g. Shabbat). Not killing.`);
         return;
       }
+      if (++_wdNotConnected < 2) { logger.warn(`🔍 Watchdog: ${silentMin}min quiet and WA state=${state} — checking again in 5 min`); return; }
+      _wdNotConnected = 0;
       logger.warn(`💀 Watchdog: ${silentMin}min no events AND WA state=${state} — genuinely dead. Exiting for clean pm2 restart.`);
       notifyOwnerBotDown('watchdog-zombie', `no events ${silentMin}min, state=${state}`).catch(()=>{});
       setTimeout(() => process.exit(1), 1500);
@@ -9541,7 +9646,8 @@ setInterval(async () => {
     // Only exit after 5 reconnect attempts fail (see attemptReconnect).
     attemptReconnect(`watchdog: ${why}`);
   }
-}, 20 * 60 * 1000);
+}, 5 * 60 * 1000);
+let _wdTick = 0, _wdNotConnected = 0;
 
 // ─── Command Center: proactive layer (#1 in feature roadmap) ─────
 // 1.1 Pending media follow-up: every 1h, if any contact is pending 6h+
@@ -10671,6 +10777,8 @@ nodeCron.schedule('0 8 * * *', async () => {
 nodeCron.schedule('30 7 * * *', async () => {
   try {
     if (!profile.jobEnabled('reputation-pulse')) return;
+    // 💰 הדופק היומי האוטומטי כבוי (24.9, בחירתו) — קריאה אחת של ~29 אלף טוקנים ביום.
+    if (!require('./src/ai-features').on('pulseAuto')) return;
     if (botStatus !== 'connected') return;
     const oc = await client.getChatById(OWNER_ID);
     const r = await runReputationPulse(1440);
