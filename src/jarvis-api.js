@@ -279,7 +279,10 @@ function attach(app, deps = {}) {
   // first thing asked when the buttons appeared to do nothing.
   app.use('/api/jarvis', (req, res, next) => {
     const ok = authed(req);
-    if (ok) _lastSeen = Date.now();
+    // The PC JARVIS uses the same key. Its calls must not make the phone look
+    // online, or alerts would stop falling back to WhatsApp while the phone is off.
+    const fromPc = req.get('x-jarvis-source') === 'pc';
+    if (ok && !fromPc) _lastSeen = Date.now();
     const started = Date.now();
     res.on('finish', () => {
       // The source tag separates a background poll from the app being opened.
@@ -290,7 +293,7 @@ function attach(app, deps = {}) {
         `(${Date.now() - started}ms${ok ? '' : ', BAD KEY'})`);
       // What he did in the app, for the activity tab. Background polling is
       // filtered out inside, so this only keeps actions he actually took.
-      if (ok) {
+      if (ok && !fromPc) {
         try { require('./activity-log').recordApp(req.method, req.path, req.body, res.statusCode); } catch (_) {}
       }
     });
@@ -437,7 +440,7 @@ function attach(app, deps = {}) {
         // mislabelled it.
         details: (out.faces || []).map(f => ({
           n: f.n, matchedName: f.matchedName, nearest: f.nearest,
-          confidence: f.confidence, isMatch: !!f.isMatch,
+          confidence: f.confidence, isMatch: !!f.isMatch, ambiguous: f.ambiguous || null,
         })),
       });
     } catch (e) {
@@ -451,6 +454,15 @@ function attach(app, deps = {}) {
    * אותה פונקציה בדיוק שמשרתת את וואטסאפ, כדי ששתי הדרכים יתנהגו זהה ולא
    * ייווצר הבדל שקט בין מה שקורה בטלפון לבין מה שקורה בצ׳אט.
    */
+  // 🚫 "זו לא <שם>" — remembered as a face that is not her; her photos are kept.
+  app.post('/api/jarvis/face/not', guard, async (req, res) => {
+    const { name, image, faceIndex } = req.body || {};
+    if (!name || !image) return res.status(400).json({ error: 'צריך שם ותמונה' });
+    try {
+      const r = await require('./face-recognition').addNegative(String(name).trim(), Buffer.from(String(image), 'base64'), parseInt(faceIndex, 10) || 0);
+      res.status(r.success ? 200 : 409).json(r.success ? { ok: true, count: r.count } : { error: r.error });
+    } catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 200) }); }
+  });
   app.post('/api/jarvis/face/unteach', guard, async (req, res) => {
     const { name, image, faceIndex } = req.body || {};
     if (!name || !image) return res.status(400).json({ error: 'צריך שם ותמונה' });
@@ -830,12 +842,22 @@ function attach(app, deps = {}) {
   });
   // 💰 What the model cost today, by feature.
   app.get('/api/jarvis/ai-usage', guard, (_req, res) => res.json({ ok: true, ...require('./ai-meter').today() }));
+  // 🖼️ An image to his WhatsApp — only ever to his own chat.
+  app.post('/api/jarvis/owner/image', guard, async (req, res) => {
+    const { image, caption } = req.body || {};
+    if (!image || !deps.sendOwnerImage) return res.status(400).json({ error: 'צריך תמונה' });
+    try { await deps.sendOwnerImage(String(image), String(caption || '').substring(0, 900)); res.json({ ok: true }); }
+    catch (e) { res.status(500).json({ error: (e.message || 'failed').substring(0, 120) }); }
+  });
+  // 💰 Raise today's cap — the app asks him to confirm first; tomorrow it is back to the base.
+  app.post('/api/jarvis/ai-usage/raise', guard, (req, res) => res.json({ ok: true, ...require('./ai-meter').raise((req.body || {}).add) }));
   // 🎧 Focused listen — one station without gaps, then the full recording and what mattered.
   app.get('/api/jarvis/broadcast/focus', guard, (_req, res) => res.json({ ok: true, ...require('./broadcast-focus').status() }));
   app.post('/api/jarvis/broadcast/focus', guard, (req, res) => {
     const b = req.body || {};
     const bf = require('./broadcast-focus');
     if (b.stop) { const r = bf.stop(); return res.status(r.error ? 409 : 200).json(r.error ? { error: r.error } : r); }
+    if (b.suggestion) { const r = bf.acceptSuggestion(String(b.suggestion)); return res.status(r.error ? 409 : 200).json(r.error ? { error: r.error } : r); }
     const stationId = b.stationId || bf.stationOf(b.station);
     const r = bf.start({ stationId, from: +b.from || Date.now(), minutes: Math.max(5, Math.min(90, +b.minutes || 30)), reason: b.reason || '' });
     res.status(r.error ? 409 : 200).json(r.error ? { error: r.error } : r);
@@ -1238,6 +1260,9 @@ function attach(app, deps = {}) {
         }),
         // 🎙️ How much transcription is left today, and who is resting (music).
         asr: { models: bm.asrStatus(), quiet: bm.quietStations() },
+        // 🎧 Radio on demand (24.9): what is being heard now, and where he can send it.
+        focus: require('./broadcast-focus').status(),
+        listenStations: bm.STATIONS.filter(s => s.id !== 'glglz').map(s => ({ id: s.id, name: s.name })),
         // 📡 Per station: news / talk / music / ads at its last sample.
         onAir: bm.STATIONS.filter(s => (c.stations || []).includes(s.id)).map(s => {
           const k = require('./broadcast-headlines').lastKind(s.name);
@@ -1617,6 +1642,9 @@ function attach(app, deps = {}) {
     else return res.status(400).json({ error: 'nothing to store' });
     res.json({ ok: true, ...memory() });
   });
+
+  // Mail + calendar for the PC JARVIS (מזכיר) — 1.10.2026.
+  try { require('./jarvis-secretary').attach(app, guard); } catch (e) { logger.warn('secretary not attached: ' + e.message); }
 
   logger.info(`🤝 JARVIS bridge ${secret() ? 'ready' : 'DISABLED (no JARVIS_SECRET)'}`);
 }
