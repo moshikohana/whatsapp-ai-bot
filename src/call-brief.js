@@ -186,6 +186,29 @@ async function _calendar() {
   } catch { return []; }
 }
 
+// ── JARVIS (1.10.2026): important mail, what the PC did, what waits on the board ──
+async function _mail(since) {
+  try {
+    const hours = Math.max(1, Math.ceil((Date.now() - since) / 3600000));
+    const m = await require('./jarvis-secretary').inbox({ q: `is:unread in:inbox newer_than:${Math.min(hours, 48)}h`, max: 25 });
+    return m.filter(x => !x.noise).slice(0, 6).map(x => ({ from: x.from, subject: x.subject.substring(0, 90), time: _hm(new Date(x.date).getTime()) }));
+  } catch { return []; }
+}
+function _pcWork(since) {
+  try {
+    return require('./jarvis-tasks').tasks().filter(t => (t.status === 'done' || t.status === 'failed' || t.status === 'waiting') && t.updated >= since)
+      .slice(-5).map(t => ({ task: t.text.substring(0, 90), status: t.status, result: (t.result || t.question || '').substring(0, 200) }));
+  } catch { return []; }
+}
+function _board() {
+  try {
+    const items = JSON.parse(fs.readFileSync(path.join(DATA, 'pc-board.json'), 'utf8')).items || [];
+    const today = _il(Date.now()).toLocaleDateString('en-CA');
+    return items.filter(i => i.status !== 'done' && (i.status === 'waiting' || i.owner === 'moshiko' || (i.due && i.due <= today)))
+      .slice(0, 6).map(i => ({ title: i.title, status: i.status, due: i.due || null }));
+  } catch { return []; }
+}
+
 function _missed(list, since) {
   return (Array.isArray(list) ? list : []).filter(x => (+x.ts || 0) >= since).slice(0, 15).map(x => ({
     time: _hm(+x.ts), app: String(x.app || '').substring(0, 30), title: String(x.title || '').substring(0, 80), text: String(x.text || '').substring(0, 120),
@@ -205,10 +228,12 @@ const SCRIPT_SYSTEM = `אתה בוטי, העוזר האישי של מושיקו,
 5. תמונות חדשות של הבנות — אם יש.
 6. אנשים שכתבו לו בפרטי ולא ענה, ושיחות שלא נענו — שמות, ובקצרה מה רצו.
 7. היומן להיום — אם זו שיחת בוקר או שיש משהו בשעות הקרובות.
-8. סיום: "רוצה לשאול משהו על מה שאמרתי?"
+8. מייל: רק מיילים חשובים (mail) — כמה, ומי הכי חשוב בשם. לא לקרוא נושאים של פרסומות.
+9. ג׳רביס במחשב: מה הוא סיים או מה מחכה לאישור שלו (pcWork), ומה מחכה לו בלוח או שמגיע היום (board) — משפט או שניים.
+10. סיום: "רוצה לשאול משהו על מה שאמרתי?"
 דלג על קטע ריק. אם כמעט לא קרה כלום — אמור את זה בקצרה.
 החזר JSON בלבד:
-{"segments":[{"kind":"intro|news|mention|attention|photos|people|calendar|outro","title":"כותרת קצרה למסך","say":"מה לומר","ref":"מזהה רלוונטי או null"}]}
+{"segments":[{"kind":"intro|news|mention|attention|photos|people|calendar|mail|pc|outro","title":"כותרת קצרה למסך","say":"מה לומר","ref":"מזהה רלוונטי או null"}]}
 ref: לחדשות — id הידיעה; לדורש התייחסות — id הפריט; לאנשים — chatId של הראשון; אחרת null.`;
 
 async function prepare({ missed = [], reason = 'manual', since = null } = {}) {
@@ -218,16 +243,18 @@ async function prepare({ missed = [], reason = 'manual', since = null } = {}) {
   from = Math.max(from, until - MAX_WINDOW_MS);
   from = Math.min(from, until - MIN_WINDOW_MS);
   const t0 = Date.now();
-  const [news, people, calendar] = await Promise.all([_news(from), _unanswered(from), _calendar()]);
+  const [news, people, calendar, mail] = await Promise.all([_news(from), _unanswered(from), _calendar(), _mail(from)]);
   const raw = {
     window: { from: _hm(from), to: _hm(until), hours: Math.round((until - from) / 360000) / 10 },
     now: _il(until).toLocaleString('he-IL'), reason,
     news, radio: _radio(from), alerts: _alerts(from), attention: _attention(from),
     photos: _photos(from), people, missedCalls: _missed(missed, from), calendar,
+    mail, pcWork: _pcWork(from), board: _board(),
   };
   const counts = {
     news: news.length, radio: raw.radio.length, alerts: raw.alerts.length, attention: raw.attention.length,
     photos: raw.photos.reduce((a, p) => a + p.count, 0), people: people.length, missed: raw.missedCalls.length, calendar: calendar.length,
+    mail: mail.length, pc: raw.pcWork.length, board: raw.board.length,
   };
   let segments = null;
   try {
