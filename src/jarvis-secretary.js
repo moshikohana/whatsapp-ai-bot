@@ -162,6 +162,50 @@ async function mark(id, { read, star }) {
   return { ok: true };
 }
 
+// ── Labels (1.10.2026 — JARVIS asked for this itself, via the dev bridge) ──
+// Only his own labels move. System labels are refused by name, so a tagging
+// run can never trash, spam, or archive (remove INBOX) anything by accident.
+const SYSTEM_LABELS = /^(INBOX|TRASH|SPAM|SENT|DRAFT|CHAT|STARRED|IMPORTANT|UNREAD|CATEGORY_\w+)$/i;
+
+async function labels() {
+  const r = await gmail().users.labels.list({ userId: 'me' });
+  return (r.data.labels || []).map(l => ({ id: l.id, name: l.name, type: l.type }));
+}
+
+async function label({ ids = [], add = [], remove = [] }) {
+  ids = [...new Set((Array.isArray(ids) ? ids : [ids]).map(String).filter(Boolean))].slice(0, 1000);
+  if (!ids.length) throw new Error('אין מיילים לתייג');
+  const bad = [...add, ...remove].filter(n => SYSTEM_LABELS.test(String(n)));
+  if (bad.length) throw new Error('תוויות מערכת חסומות: ' + bad.join(', '));
+  const g = gmail();
+  const existing = await labels();
+  const byName = new Map(existing.map(l => [l.name.toLowerCase(), l]));
+  const created = [];
+  const idsFor = async (names, create) => {
+    const out = [];
+    for (const raw of names) {
+      const name = String(raw).trim();
+      if (!name) continue;
+      let l = byName.get(name.toLowerCase());
+      if (!l && create) {
+        const r = await g.users.labels.create({ userId: 'me', requestBody: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' } });
+        l = { id: r.data.id, name: r.data.name, type: 'user' };
+        byName.set(name.toLowerCase(), l);
+        created.push(name);
+      }
+      if (l && l.type === 'user') out.push(l.id);
+    }
+    return out;
+  };
+  const addIds = await idsFor(add, true);
+  const removeIds = await idsFor(remove, false);
+  if (!addIds.length && !removeIds.length) throw new Error('אין תוויות לשנות');
+  for (let i = 0; i < ids.length; i += 500) {
+    await g.users.messages.batchModify({ userId: 'me', requestBody: { ids: ids.slice(i, i + 500), addLabelIds: addIds, removeLabelIds: removeIds } });
+  }
+  return { applied: ids.length, added: add.filter(Boolean), removed: remove.filter(Boolean), created };
+}
+
 async function events(days = 7) {
   const from = new Date(); from.setHours(0, 0, 0, 0);
   const to = new Date(from.getTime() + Math.min(+days || 7, 60) * 86400000);
@@ -191,6 +235,8 @@ function attach(app, guard) {
     return await sendDraft(id);
   }));
   app.post('/api/jarvis/mail/mark', guard, wrap(async (req) => mark(String((req.body || {}).id || ''), req.body || {})));
+  app.get('/api/jarvis/mail/labels', guard, wrap(async () => ({ labels: await labels() })));
+  app.post('/api/jarvis/mail/label', guard, wrap(async (req) => label(req.body || {})));
   app.get('/api/jarvis/calendar', guard, wrap(async (req) => ({ events: await events(req.query.days) })));
   app.post('/api/jarvis/calendar/event', guard, wrap(async (req) => {
     const { summary, startLocal, endLocal, location } = req.body || {};
@@ -202,4 +248,4 @@ function attach(app, guard) {
   }));
 }
 
-module.exports = { attach, inbox, message, awaiting, draft, sendDraft, mark, events };
+module.exports = { attach, inbox, message, awaiting, draft, sendDraft, mark, events, labels, label };
