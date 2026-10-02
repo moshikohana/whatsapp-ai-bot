@@ -63,6 +63,8 @@ function update(id, patch) {
   const before = t.status;
   for (const k of ['status', 'progress', 'result', 'question']) if (patch[k] !== undefined) t[k] = String(patch[k]).substring(0, 8000);
   if (patch.status === 'waiting') t.answer = '';
+  // The server brain hands a task back for the PC (needs files, browser, video…).
+  if (patch.pcOnly) t.pcOnly = true;
   t.updated = Date.now();
   persist();
   if (t.status === 'waiting' && before !== 'waiting') {
@@ -116,9 +118,17 @@ async function morning() {
 }
 
 function attach(app, guard) {
-  const fromPc = (req) => req.get('x-jarvis-source') === 'pc';
-  const pcOnly = (req, res, next) => { if (!fromPc(req)) return res.status(403).json({ error: 'pc only' }); _pcSeen = Date.now(); next(); };
-  const pub = (t) => t && ({ id: t.id, text: t.text, from: t.from, status: t.status, progress: t.progress, result: t.result, question: t.question, answer: t.answer, created: t.created, updated: t.updated });
+  // Two workers can serve the queue: the PC ('pc') and, when the PC is off,
+  // the server brain ('cloud', 2.10). Only the PC counts as "the PC is on".
+  const source = (req) => req.get('x-jarvis-source') || '';
+  const fromPc = (req) => source(req) === 'pc';
+  const pcOnly = (req, res, next) => {
+    const s = source(req);
+    if (s !== 'pc' && s !== 'cloud') return res.status(403).json({ error: 'pc only' });
+    if (s === 'pc') _pcSeen = Date.now();
+    next();
+  };
+  const pub = (t) => t && ({ id: t.id, text: t.text, from: t.from, status: t.status, progress: t.progress, result: t.result, question: t.question, answer: t.answer, worker: t.worker || null, pcOnly: !!t.pcOnly, created: t.created, updated: t.updated });
 
   app.post('/api/jarvis/pc/tasks', guard, (req, res) => {
     const text = String((req.body || {}).text || '').trim();
@@ -128,10 +138,14 @@ function attach(app, guard) {
   app.get('/api/jarvis/pc/tasks', guard, (_req, res) => res.json({ ok: true, pcOnline: pcOnline(), tasks: tasks().slice(-30).reverse().map(pub) }));
   app.get('/api/jarvis/pc/status', guard, (_req, res) => res.json({ ok: true, online: pcOnline(), lastSeen: _pcSeen }));
 
-  app.get('/api/jarvis/pc/tasks/next', guard, pcOnly, (_req, res) => {
-    const t = tasks().find(x => x.status === 'queued');
+  app.get('/api/jarvis/pc/tasks/next', guard, pcOnly, (req, res) => {
+    const cloud = source(req) === 'cloud';
+    // The server brain only takes over when the PC is off (or a task has
+    // waited 90s unclaimed), and never takes back what it handed to the PC.
+    const t = tasks().find(x => x.status === 'queued' &&
+      (!cloud || (!x.pcOnly && (!pcOnline() || Date.now() - x.created > 90 * 1000))));
     if (!t) return res.json({ ok: true, task: null });
-    t.status = 'running'; t.updated = Date.now(); persist();
+    t.status = 'running'; t.worker = cloud ? 'cloud' : 'pc'; t.updated = Date.now(); persist();
     res.json({ ok: true, task: pub(t) });
   });
   app.get('/api/jarvis/pc/tasks/:id', guard, (req, res) => {
