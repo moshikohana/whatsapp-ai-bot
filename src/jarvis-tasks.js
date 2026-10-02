@@ -30,6 +30,9 @@ const KEEP = 60;
 
 let _tasks = null;
 let _pcSeen = 0;
+let _hud = { dev: [], jobs: [], settings: null, whatsNew: null, updated: 0 };
+const _hudEvents = [];
+let _hudSeq = 0;
 const doneHandlers = [];
 
 const load = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
@@ -157,6 +160,28 @@ function attach(app, guard) {
     res.json({ ok: true, count: items.length });
   });
   app.get('/api/jarvis/pc/board', guard, (_req, res) => res.json({ ok: true, ...load(BOARD_FILE, { items: [], updated: 0 }) }));
+
+  // ── HUD mirror (2.10): what the PC screen shows, for the phone's copy of it ──
+  // The PC posts a snapshot (progress bars, running jobs, its status rows,
+  // "what's new") plus a stream of events (panels, activity lines, reply
+  // text as it's written). The phone polls with ?since=<seq>. One channel, so
+  // anything new on the PC screen reaches the phone without building it twice.
+  app.post('/api/jarvis/pc/hud', guard, pcOnly, (req, res) => {
+    const b = req.body || {};
+    for (const k of ['dev', 'jobs', 'settings', 'whatsNew']) if (b[k] !== undefined) _hud[k] = b[k];
+    _hud.updated = Date.now();
+    for (const e of (Array.isArray(b.events) ? b.events : []).slice(0, 200)) {
+      _hudEvents.push({ seq: ++_hudSeq, ts: Date.now(), type: String(e.type || '').substring(0, 20), data: e.data || {} });
+    }
+    if (_hudEvents.length > 400) _hudEvents.splice(0, _hudEvents.length - 400);
+    res.json({ ok: true, seq: _hudSeq });
+  });
+  app.get('/api/jarvis/pc/hud', guard, (req, res) => {
+    const since = parseInt(req.query.since, 10);
+    // First call (no since): just the snapshot and the current seq — old events are history, not news.
+    const events = Number.isFinite(since) ? _hudEvents.filter(e => e.seq > since) : [];
+    res.json({ ok: true, pcOnline: pcOnline(), seq: _hudSeq, ..._hud, events });
+  });
 
   app.get('/api/jarvis/morning', guard, async (_req, res) => {
     try { res.json({ ok: true, ...(await morning()) }); } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
